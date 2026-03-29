@@ -1,0 +1,2446 @@
+<script setup>
+import { ref, onMounted, onUnmounted, computed, watch } from 'vue';
+import axios from 'axios';
+import { io } from 'socket.io-client';
+import VChart from 'vue-echarts';
+import { use } from 'echarts/core';
+import { CanvasRenderer } from 'echarts/renderers';
+import { CalendarComponent, GridComponent, LegendComponent, TooltipComponent, VisualMapComponent } from 'echarts/components';
+import { HeatmapChart, LineChart, PieChart } from 'echarts/charts';
+import {
+  Plus,
+  Trash2,
+  CheckCircle2,
+  Clock,
+  History,
+  Settings,
+  Loader2,
+  Search,
+  Check,
+  ChevronRight,
+  ChevronDown,
+  ArrowRightLeft,
+  LayoutGrid,
+  Cpu,
+  BarChart3,
+  Users,
+  BookOpen,
+  X,
+  ShieldCheck,
+  ShieldAlert,
+  Pencil,
+  Download,
+  Upload
+} from 'lucide-vue-next';
+
+use([CanvasRenderer, CalendarComponent, GridComponent, LegendComponent, TooltipComponent, VisualMapComponent, HeatmapChart, LineChart, PieChart]);
+
+const hostname = window.location.hostname;
+const API_BASE = `http://${hostname}:3000/api`;
+let socket = null;
+
+const authToken = ref(localStorage.getItem('llmproxy_admin_token') || '');
+const authUser = ref(null);
+const mustChangePassword = ref(false);
+const loginForm = ref({ username: 'llmproxy', password: '' });
+const changePasswordForm = ref({ currentPassword: '', newPassword: '', confirmNewPassword: '' });
+
+const setAuthToken = (token) => {
+  authToken.value = token;
+  if (token) {
+    localStorage.setItem('llmproxy_admin_token', token);
+    axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+  } else {
+    localStorage.removeItem('llmproxy_admin_token');
+    delete axios.defaults.headers.common['Authorization'];
+  }
+};
+
+const connectSocket = () => {
+  if (!authToken.value) return;
+  if (socket) {
+    socket.disconnect();
+    socket = null;
+  }
+  socket = io(`http://${hostname}:3000`, { auth: { token: authToken.value } });
+  socket.on('log_update', handleLogUpdate);
+};
+
+const disconnectSocket = () => {
+  if (socket) {
+    socket.disconnect();
+    socket = null;
+  }
+};
+
+const checkProxyHealth = async () => {
+  try {
+    const res = await axios.get(`http://${hostname}:3000/healthz`, { timeout: 1500 });
+    proxyHealth.value = { status: res.status === 200 && res.data?.ok ? 'up' : 'down', lastCheckAt: new Date() };
+  } catch {
+    proxyHealth.value = { status: 'down', lastCheckAt: new Date() };
+  }
+};
+
+const startProxyHealthPolling = () => {
+  if (proxyHealthTimer) clearInterval(proxyHealthTimer);
+  checkProxyHealth();
+  proxyHealthTimer = setInterval(checkProxyHealth, 5000);
+};
+
+const stopProxyHealthPolling = () => {
+  if (proxyHealthTimer) {
+    clearInterval(proxyHealthTimer);
+    proxyHealthTimer = null;
+  }
+};
+
+const isAuthenticated = computed(() => !!authUser.value && !!authToken.value);
+
+if (authToken.value) {
+  setAuthToken(authToken.value);
+}
+
+axios.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error?.response?.status === 401) {
+      authUser.value = null;
+      mustChangePassword.value = false;
+      setAuthToken('');
+      disconnectSocket();
+    }
+    return Promise.reject(error);
+  }
+);
+
+const activeTab = ref('providers');
+const providers = ref([]);
+const logs = ref([]);
+const clientKeys = ref([]);
+const managedModels = ref([]);
+const modelsCatalog = ref([]);
+const activeProviderId = ref(null);
+const activeProviderDefaultModelId = ref(null);
+const newProvider = ref({ name: '', type: 'openai', baseUrl: '', apiKey: '' });
+const newManagedModel = ref({ name: '' });
+const newClientApp = ref({ name: '', providerId: null, managedModelId: null });
+const editingProvider = ref(null);
+const editingModel = ref(null);
+const editingApp = ref(null);
+const showAddProvider = ref(false);
+const showAddApp = ref(false);
+const showAddModel = ref(false);
+const modelRules = ref([]);
+const newModelRule = ref({ pattern: '*', targetModel: '', priority: 0 });
+const editingModelRule = ref(null);
+const showAddModelRule = ref(false);
+const adminUsers = ref([]);
+const newAdminUser = ref({ username: '', password: '', enabled: 1 });
+const editingAdminUser = ref(null);
+const showAddAdminUser = ref(false);
+const resetPasswordUser = ref(null);
+const resetPasswordValue = ref('');
+const searchQuery = ref('');
+const selectedLog = ref(null);
+const selectedClientKey = ref('all');
+const logsPage = ref(1);
+const logsPageSize = ref(50);
+const logsTotal = ref(0);
+const logsTotalPages = ref(1);
+const hasNewLogs = ref(false);
+
+const proxyHealth = ref({ status: 'unknown', lastCheckAt: null });
+let proxyHealthTimer = null;
+
+const showAddProviderModel = ref(false);
+const providerModelTargetProvider = ref(null);
+const newProviderModelName = ref('');
+
+// 导入/导出相关状态
+const showExportDialog = ref(false);
+const exportIncludeApiKey = ref(false);
+const showImportDialog = ref(false);
+const importData = ref(null);
+const importConflicts = ref([]);
+const importMergeStrategy = ref({});
+const importStep = ref('file');
+const importResults = ref([]);
+
+const filteredLogs = ref([]);
+
+const statsRange = ref('30d');
+const statsProviderId = ref('all');
+const statsLoading = ref(false);
+const statsData = ref(null);
+
+const fetchStats = async () => {
+  statsLoading.value = true;
+  try {
+    const params = { range: statsRange.value };
+    if (statsProviderId.value !== 'all') {
+      params.providerId = statsProviderId.value;
+    }
+    const res = await axios.get(`${API_BASE}/stats`, { params });
+    statsData.value = res.data;
+  } finally {
+    statsLoading.value = false;
+  }
+};
+
+const formatNumber = (n) => {
+  if (n === null || n === undefined) return '-';
+  const num = Number(n);
+  if (!Number.isFinite(num)) return '-';
+  if (num >= 1e9) return (num / 1e9).toFixed(2) + 'B';
+  if (num >= 1e6) return (num / 1e6).toFixed(2) + 'M';
+  if (num >= 1e3) return (num / 1e3).toFixed(2) + 'K';
+  return String(num);
+};
+
+const formatMs = (ms) => {
+  if (ms === null || ms === undefined) return '-';
+  const num = Number(ms);
+  if (!Number.isFinite(num)) return '-';
+  if (num < 1000) return `${num.toFixed(0)}ms`;
+  return `${(num / 1000).toFixed(2)}s`;
+};
+
+const modelCatalogMap = computed(() => {
+  const map = new Map();
+  for (const m of modelsCatalog.value) {
+    map.set(m.id, m);
+  }
+  return map;
+});
+
+const getModelCatalogEntry = (id) => {
+  if (!id) return null;
+  return modelCatalogMap.value.get(id) || null;
+};
+
+const activeProvider = computed(() => providers.value.find(p => p.active) || null);
+
+const activeDefaultModel = computed(() => {
+  if (!activeProviderDefaultModelId.value) return null;
+  return managedModels.value.find(m => m.id === activeProviderDefaultModelId.value) || null;
+});
+
+const enabledModelRulesCount = computed(() => modelRules.value.filter(r => r.enabled).length);
+
+const getModelOptionsForProvider = (providerId, selectedModelId) => {
+  const selectedEntry = getModelCatalogEntry(selectedModelId);
+  const options = [];
+  if (selectedEntry) {
+    options.push({ id: selectedEntry.id, name: selectedEntry.name, providers: selectedEntry.providers || [], _selected: true });
+  }
+  for (const m of modelsCatalog.value) {
+    if (selectedEntry && m.id === selectedEntry.id) continue;
+    if (!providerId) {
+      options.push(m);
+      continue;
+    }
+    const supported = (m.providers || []).some(p => p.id === providerId);
+    if (supported) options.push(m);
+  }
+  return options;
+};
+
+const updateFilteredLogs = () => {
+  filteredLogs.value = logs.value;
+};
+
+const handleLogUpdate = (data) => {
+  const index = logs.value.findIndex(l => l.id === data.id);
+  if (index !== -1) {
+    const updatedLog = { ...logs.value[index], ...data };
+    logs.value.splice(index, 1, updatedLog);
+    updateFilteredLogs();
+    if (selectedLog.value && selectedLog.value.id === data.id) {
+      selectedLog.value = updatedLog;
+    }
+  } else {
+    if (logsPage.value === 1 && (selectedClientKey.value === 'all' || Number(data.clientKeyId) === Number(selectedClientKey.value))) {
+      fetchLogs();
+    } else {
+      hasNewLogs.value = true;
+    }
+  }
+};
+
+const statsSummary = computed(() => {
+  const s = statsData.value?.summary;
+  if (!s) return null;
+  const requestCount = Number(s.requestCount || 0);
+  const errorCount = Number(s.errorCount || 0);
+  const errorRate = requestCount ? (errorCount / requestCount) : 0;
+  return {
+    requestCount,
+    errorCount,
+    errorRate,
+    tokensTotal: Number(s.tokensTotal || 0),
+    avgLatencyMs: s.avgLatencyMs === null || s.avgLatencyMs === undefined ? null : Number(s.avgLatencyMs),
+    activeDays: Number(s.activeDays || 0)
+  };
+});
+
+const heatmapOption = computed(() => {
+  const raw = statsData.value?.heatmapYear || [];
+  const formatLocalDay = (d) => {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  };
+  const calendarRange = statsData.value?.heatmapYearRange || (() => {
+    const end = new Date();
+    const start = new Date(end.getTime() - 365 * 24 * 60 * 60 * 1000);
+    return [formatLocalDay(start), formatLocalDay(end)];
+  })();
+  const startStr = calendarRange?.[0];
+  const endStr = calendarRange?.[1];
+  const start = startStr ? new Date(startStr + 'T00:00:00') : new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
+  const end = endStr ? new Date(endStr + 'T00:00:00') : new Date();
+
+  const map = new Map(raw.map((d) => [d[0], Number(d[1] || 0)]));
+  const filled = [];
+  for (let dt = new Date(start); dt <= end; dt.setDate(dt.getDate() + 1)) {
+    const day = formatLocalDay(dt);
+    filled.push([day, map.get(day) || 0]);
+  }
+
+  return {
+    tooltip: {
+      trigger: 'item',
+      formatter: (params) => {
+        const v = params?.value || params?.data;
+        const day = Array.isArray(v) ? v[0] : '';
+        const count = Array.isArray(v) ? Number(v[1] || 0) : 0;
+        const active = count > 0 ? 1 : 0;
+        return `${day}<br/>请求：${count} 次<br/>活跃：${active}`;
+      }
+    },
+    visualMap: {
+      type: 'piecewise',
+      show: false,
+      pieces: [
+        { value: 0, color: '#ebedf0' },
+        { min: 1, max: 4, color: '#9be9a8' },
+        { min: 5, max: 9, color: '#40c463' },
+        { min: 10, max: 19, color: '#30a14e' },
+        { min: 20, color: '#216e39' }
+      ]
+    },
+    calendar: {
+      top: 10,
+      left: 20,
+      right: 20,
+      cellSize: [12, 12],
+      range: calendarRange,
+      itemStyle: { color: '#ebedf0', borderWidth: 2, borderColor: '#fff' },
+      splitLine: { show: false },
+      dayLabel: { color: '#6b7280' },
+      monthLabel: { color: '#6b7280', position: 'top', margin: 8, align: 'left' },
+      yearLabel: { show: false }
+    },
+    series: [
+      {
+        type: 'heatmap',
+        coordinateSystem: 'calendar',
+        data: filled
+      }
+    ]
+  };
+});
+
+const requestsOption = computed(() => {
+  const ts = statsData.value?.timeseries;
+  const days = ts?.days || [];
+  return {
+    tooltip: { trigger: 'axis' },
+    legend: { data: ['请求', '错误'], top: 0 },
+    grid: { left: 40, right: 20, top: 40, bottom: 30 },
+    xAxis: { type: 'category', data: days, axisLabel: { color: '#6b7280' } },
+    yAxis: { type: 'value', axisLabel: { color: '#6b7280' } },
+    series: [
+      { name: '请求', type: 'line', smooth: true, data: ts?.requests || [], showSymbol: false },
+      { name: '错误', type: 'line', smooth: true, data: ts?.errors || [], showSymbol: false }
+    ]
+  };
+});
+
+const tokensOption = computed(() => {
+  const ts = statsData.value?.timeseries;
+  const days = ts?.days || [];
+  return {
+    tooltip: { trigger: 'axis' },
+    legend: { data: ['Tokens'], top: 0 },
+    grid: { left: 40, right: 20, top: 40, bottom: 30 },
+    xAxis: { type: 'category', data: days, axisLabel: { color: '#6b7280' } },
+    yAxis: { type: 'value', axisLabel: { color: '#6b7280' } },
+    series: [
+      { name: 'Tokens', type: 'line', smooth: true, data: ts?.tokensTotal || [], showSymbol: false }
+    ]
+  };
+});
+
+const latencyOption = computed(() => {
+  const ts = statsData.value?.timeseries;
+  const days = ts?.days || [];
+  return {
+    tooltip: { trigger: 'axis' },
+    legend: { data: ['平均耗时(ms)'], top: 0 },
+    grid: { left: 40, right: 20, top: 40, bottom: 30 },
+    xAxis: { type: 'category', data: days, axisLabel: { color: '#6b7280' } },
+    yAxis: { type: 'value', axisLabel: { color: '#6b7280' } },
+    series: [
+      { name: '平均耗时(ms)', type: 'line', smooth: true, data: ts?.avgLatencyMs || [], showSymbol: false }
+    ]
+  };
+});
+
+const modelPieOption = computed(() => {
+  const rows = statsData.value?.distributions?.byModel || [];
+  const data = rows.map(r => ({ name: r.name, value: Number(r.tokens || 0) }));
+  return {
+    tooltip: { trigger: 'item' },
+    legend: { type: 'scroll', orient: 'vertical', right: 10, top: 10, bottom: 10 },
+    series: [
+      {
+        type: 'pie',
+        radius: ['40%', '70%'],
+        center: ['40%', '55%'],
+        data,
+        avoidLabelOverlap: true,
+        label: { show: false },
+        emphasis: { label: { show: true, fontSize: 12 } }
+      }
+    ]
+  };
+});
+
+const loadAllData = async () => {
+  await fetchProviders();
+  await fetchClientKeys();
+  await fetchManagedModels();
+  await fetchModelsCatalog();
+  await fetchModelRules();
+  await fetchLogs();
+  if (activeTab.value === 'stats') {
+    await fetchStats();
+  }
+};
+
+const checkAuth = async () => {
+  if (!authToken.value) return false;
+  try {
+    const res = await axios.get(`${API_BASE}/auth/me`);
+    authUser.value = res.data.user;
+    mustChangePassword.value = !!res.data.mustChangePassword;
+    if (!mustChangePassword.value) connectSocket();
+    return true;
+  } catch (e) {
+    authUser.value = null;
+    mustChangePassword.value = false;
+    setAuthToken('');
+    disconnectSocket();
+    return false;
+  }
+};
+
+const login = async () => {
+  const { username, password } = loginForm.value;
+  try {
+    const res = await axios.post(`${API_BASE}/auth/login`, { username, password });
+    setAuthToken(res.data.token);
+    authUser.value = res.data.user;
+    mustChangePassword.value = !!res.data.mustChangePassword;
+    if (!mustChangePassword.value) connectSocket();
+    if (!mustChangePassword.value) {
+      await loadAllData();
+    }
+  } catch (err) {
+    alert('登录失败: ' + (err.response?.data?.error || err.message));
+  }
+};
+
+const logout = async () => {
+  try {
+    await axios.post(`${API_BASE}/auth/logout`);
+  } catch (e) {
+  }
+  authUser.value = null;
+  mustChangePassword.value = false;
+  setAuthToken('');
+  disconnectSocket();
+};
+
+const changePassword = async () => {
+  const { currentPassword, newPassword, confirmNewPassword } = changePasswordForm.value;
+  if (!newPassword) return;
+  if (newPassword !== confirmNewPassword) {
+    alert('两次输入的新密码不一致');
+    return;
+  }
+  try {
+    await axios.post(`${API_BASE}/auth/change-password`, { currentPassword, newPassword });
+    mustChangePassword.value = false;
+    changePasswordForm.value = { currentPassword: '', newPassword: '', confirmNewPassword: '' };
+    connectSocket();
+    await loadAllData();
+  } catch (err) {
+    alert('修改密码失败: ' + (err.response?.data?.error || err.message));
+  }
+};
+
+const fetchProviders = async () => {
+  const res = await axios.get(`${API_BASE}/providers`);
+  providers.value = res.data;
+};
+
+const fetchClientKeys = async () => {
+  const res = await axios.get(`${API_BASE}/keys`);
+  clientKeys.value = res.data;
+};
+
+const fetchManagedModels = async () => {
+  const res = await axios.get(`${API_BASE}/models`);
+  managedModels.value = res.data.models || [];
+  activeProviderId.value = res.data.providerId || null;
+  activeProviderDefaultModelId.value = res.data.defaultModelId || null;
+};
+
+const fetchModelRules = async () => {
+  const res = await axios.get(`${API_BASE}/model-rules`);
+  modelRules.value = res.data;
+};
+
+const fetchModelsCatalog = async () => {
+  const res = await axios.get(`${API_BASE}/models/catalog`);
+  modelsCatalog.value = res.data;
+};
+
+const fetchLogs = async () => {
+  const params = { page: logsPage.value, pageSize: logsPageSize.value };
+  if (selectedClientKey.value !== 'all') {
+    params.clientKeyId = selectedClientKey.value;
+  }
+  const res = await axios.get(`${API_BASE}/logs`, { params });
+  logs.value = res.data.items || [];
+  logsTotal.value = Number(res.data.total || 0);
+  logsTotalPages.value = Number(res.data.totalPages || 1);
+  hasNewLogs.value = false;
+  updateFilteredLogs();
+};
+
+const fetchAdminUsers = async () => {
+  const res = await axios.get(`${API_BASE}/users`);
+  adminUsers.value = res.data;
+};
+
+const addAdminUser = async () => {
+  if (!newAdminUser.value.username || !newAdminUser.value.password) return;
+  await axios.post(`${API_BASE}/users`, newAdminUser.value);
+  newAdminUser.value = { username: '', password: '', enabled: 1 };
+  showAddAdminUser.value = false;
+  fetchAdminUsers();
+};
+
+const updateAdminUser = async () => {
+  if (!editingAdminUser.value) return;
+  await axios.put(`${API_BASE}/users/${editingAdminUser.value.id}`, editingAdminUser.value);
+  editingAdminUser.value = null;
+  fetchAdminUsers();
+};
+
+const resetAdminPassword = async () => {
+  if (!resetPasswordUser.value || !resetPasswordValue.value) return;
+  await axios.post(`${API_BASE}/users/${resetPasswordUser.value.id}/reset-password`, { password: resetPasswordValue.value });
+  resetPasswordUser.value = null;
+  resetPasswordValue.value = '';
+  fetchAdminUsers();
+};
+
+const deleteAdminUser = async (id) => {
+  if (!confirm('确定要删除这个用户吗？')) return;
+  await axios.delete(`${API_BASE}/users/${id}`);
+  fetchAdminUsers();
+};
+
+const clearLogs = async () => {
+  if (!confirm('确定要清空所有对话日志吗？')) return;
+  try {
+    await axios.delete(`${API_BASE}/logs`);
+    logs.value = [];
+    filteredLogs.value = [];
+    selectedLog.value = null;
+    hasNewLogs.value = false;
+    logsPage.value = 1;
+    logsTotal.value = 0;
+    logsTotalPages.value = 1;
+    alert('日志已清空');
+  } catch (err) {
+    console.error('清空日志失败:', err);
+    alert('清空日志失败: ' + (err.response?.data?.error || err.message));
+  }
+};
+
+const goToLatestLogs = async () => {
+  logsPage.value = 1;
+  await fetchLogs();
+};
+
+const prevLogsPage = async () => {
+  if (logsPage.value <= 1) return;
+  logsPage.value -= 1;
+  await fetchLogs();
+};
+
+const nextLogsPage = async () => {
+  if (logsPage.value >= logsTotalPages.value) return;
+  logsPage.value += 1;
+  await fetchLogs();
+};
+
+const addProvider = async () => {
+  await axios.post(`${API_BASE}/providers`, newProvider.value);
+  newProvider.value = { name: '', type: 'openai', baseUrl: '', apiKey: '' };
+  showAddProvider.value = false;
+  fetchProviders();
+};
+
+const updateProvider = async () => {
+  if (!editingProvider.value) return;
+  await axios.put(`${API_BASE}/providers/${editingProvider.value.id}`, editingProvider.value);
+  editingProvider.value = null;
+  fetchProviders();
+};
+
+// 导入/导出方法
+const openExportDialog = () => {
+  exportIncludeApiKey.value = false;
+  showExportDialog.value = true;
+};
+
+const doExport = async () => {
+  try {
+    const response = await fetch(`${API_BASE}/providers/export`, {
+      headers: { 'Authorization': `Bearer ${authToken.value}` }
+    });
+    const data = await response.json();
+
+    // 如果不包含 API Key，则移除
+    if (!exportIncludeApiKey.value) {
+      data.providers.forEach(p => p.apiKey = '');
+    }
+
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `llmproxy-providers-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+
+    showExportDialog.value = false;
+    await fetchProviders();
+  } catch (err) {
+    alert('导出失败：' + err.message);
+  }
+};
+
+const openImportDialog = () => {
+  importStep.value = 'file';
+  importData.value = null;
+  importConflicts.value = [];
+  importMergeStrategy.value = {};
+  importResults.value = [];
+  showImportDialog.value = true;
+};
+
+const handleImportFileSelect = (e) => {
+  const file = e.target.files[0];
+  if (file) processImportFile(file);
+};
+
+const handleImportDrop = (e) => {
+  const file = e.dataTransfer.files[0];
+  if (file && file.type === 'application/json') {
+    processImportFile(file);
+  }
+};
+
+const processImportFile = (file) => {
+  const reader = new FileReader();
+  reader.onload = async (e) => {
+    try {
+      const data = JSON.parse(e.target.result);
+      if (!data.providers || !Array.isArray(data.providers)) {
+        throw new Error('无效的配置文件格式');
+      }
+
+      importData.value = data;
+
+      // 检查冲突
+      const existingNames = new Set(providers.value.map(p => p.name));
+      importConflicts.value = data.providers
+        .filter(p => existingNames.has(p.name))
+        .map(p => ({ provider: p }));
+
+      // 设置默认策略
+      importConflicts.value.forEach(item => {
+        importMergeStrategy.value[item.provider.name] = 'skip';
+      });
+
+      if (importConflicts.value.length) {
+        importStep.value = 'conflict';
+      } else {
+        await doImport();
+      }
+    } catch (err) {
+      alert('解析文件失败：' + err.message);
+    }
+  };
+  reader.readAsText(file);
+};
+
+const doImport = async () => {
+  try {
+    const response = await fetch(`${API_BASE}/providers/import`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${authToken.value}`
+      },
+      body: JSON.stringify({
+        data: importData.value,
+        mergeStrategy: importMergeStrategy.value
+      })
+    });
+    const result = await response.json();
+    importResults.value = result.results;
+    importStep.value = 'result';
+    await fetchProviders();
+  } catch (err) {
+    alert('导入失败：' + err.message);
+  }
+};
+
+const closeImportDialog = () => {
+  showImportDialog.value = false;
+};
+
+const openEditModal = (provider) => {
+  editingProvider.value = { ...provider };
+};
+
+const addClientApp = async () => {
+  if (!newClientApp.value.name) return;
+  try {
+    await axios.post(`${API_BASE}/keys`, normalizeClientAppPayload(newClientApp.value));
+  } catch (err) {
+    alert(err.response?.data?.error || err.message);
+    return;
+  }
+  newClientApp.value = { name: '', providerId: null, managedModelId: null };
+  showAddApp.value = false;
+  fetchClientKeys();
+};
+
+const updateClientApp = async () => {
+  if (!editingApp.value) return;
+  try {
+    await axios.put(`${API_BASE}/keys/${editingApp.value.id}`, normalizeClientAppPayload(editingApp.value));
+  } catch (err) {
+    alert(err.response?.data?.error || err.message);
+    return;
+  }
+  editingApp.value = null;
+  fetchClientKeys();
+};
+
+const deleteClientApp = async (id) => {
+  if (!confirm('确定要删除这个应用吗？')) return;
+  await axios.delete(`${API_BASE}/keys/${id}`);
+  fetchClientKeys();
+};
+
+const normalizeClientAppPayload = (payload) => {
+  const p = { ...payload };
+  if (!p.providerId) {
+    p.providerId = null;
+    p.managedModelId = null;
+  }
+  if (p.providerId && !p.managedModelId) {
+    throw new Error('绑定了厂商后必须选择一个模型');
+  }
+  if (!p.managedModelId) p.managedModelId = null;
+  return p;
+};
+
+const openEditClientApp = (k) => {
+  const base = { ...k };
+  if (!base.providerId) base.managedModelId = null;
+  editingApp.value = base;
+};
+
+const onClientAppProviderChange = (target) => {
+  if (!target.providerId) {
+    target.providerId = null;
+    target.managedModelId = null;
+  } else {
+    target.managedModelId = null;
+  }
+};
+
+const toggleKey = async (id) => {
+  await axios.put(`${API_BASE}/keys/${id}/toggle`);
+  fetchClientKeys();
+};
+
+const activateProvider = async (id) => {
+  await axios.put(`${API_BASE}/providers/${id}/activate`);
+  await fetchProviders();
+  await fetchManagedModels();
+  await fetchModelsCatalog();
+};
+
+const deleteProvider = async (id) => {
+  const isUsed = clientKeys.value.some(k => k.providerId === id);
+  if (isUsed) {
+    if (!confirm('该厂商已被某些应用绑定，删除后这些应用将回退到“默认厂商”。是否确认删除？')) return;
+  }
+  await axios.delete(`${API_BASE}/providers/${id}`);
+  fetchProviders();
+  fetchClientKeys(); // Refresh to see updated app settings
+};
+
+const addManagedModel = async () => {
+  if (!newManagedModel.value.name) return;
+  await axios.post(`${API_BASE}/models`, newManagedModel.value);
+  newManagedModel.value = { name: '' };
+  showAddModel.value = false;
+  await fetchManagedModels();
+  await fetchProviders();
+  await fetchModelsCatalog();
+};
+
+const activateModel = async (id) => {
+  await axios.put(`${API_BASE}/models/${id}/activate`);
+  await fetchManagedModels();
+  await fetchProviders();
+  await fetchModelsCatalog();
+};
+
+const deleteModel = async (id) => {
+  if (!confirm('确定要从当前厂商中移除这个模型吗？')) return;
+  try {
+    await axios.delete(`${API_BASE}/models/${id}`);
+  } catch (err) {
+    const msg = err.response?.data?.message || err.response?.data?.error || err.message;
+    alert(msg);
+    return;
+  }
+  await fetchManagedModels();
+  await fetchProviders();
+  await fetchModelsCatalog();
+};
+
+const openAddProviderModel = (provider) => {
+  providerModelTargetProvider.value = provider;
+  newProviderModelName.value = '';
+  showAddProviderModel.value = true;
+};
+
+const addProviderModel = async () => {
+  if (!providerModelTargetProvider.value || !newProviderModelName.value) return;
+  await axios.post(`${API_BASE}/providers/${providerModelTargetProvider.value.id}/models`, { name: newProviderModelName.value });
+  showAddProviderModel.value = false;
+  providerModelTargetProvider.value = null;
+  newProviderModelName.value = '';
+  await fetchProviders();
+  await fetchModelsCatalog();
+  await fetchManagedModels();
+};
+
+const activateProviderModel = async (providerId, modelId) => {
+  await axios.put(`${API_BASE}/providers/${providerId}/models/${modelId}/activate`);
+  await fetchProviders();
+  await fetchModelsCatalog();
+  await fetchManagedModels();
+};
+
+const addModelRule = async () => {
+  if (!newModelRule.value.pattern || !newModelRule.value.targetModel) return;
+  await axios.post(`${API_BASE}/model-rules`, newModelRule.value);
+  newModelRule.value = { pattern: '*', targetModel: '', priority: 0 };
+  showAddModelRule.value = false;
+  fetchModelRules();
+};
+
+const updateModelRule = async () => {
+  if (!editingModelRule.value) return;
+  await axios.put(`${API_BASE}/model-rules/${editingModelRule.value.id}`, editingModelRule.value);
+  editingModelRule.value = null;
+  fetchModelRules();
+};
+
+const toggleModelRule = async (id) => {
+  await axios.put(`${API_BASE}/model-rules/${id}/toggle`);
+  fetchModelRules();
+};
+
+const deleteModelRule = async (id) => {
+  if (!confirm('确定要删除这个模型规则吗？')) return;
+  await axios.delete(`${API_BASE}/model-rules/${id}`);
+  fetchModelRules();
+};
+
+const highlightText = (text) => {
+  if (!searchQuery.value || !text) return text;
+  const regex = new RegExp(`(${searchQuery.value})`, 'gi');
+  return text.replace(regex, '<mark class="bg-yellow-200">$1</mark>');
+};
+
+const parseDate = (dateStr) => {
+  if (!dateStr) return null;
+  // SQLite 的 CURRENT_TIMESTAMP 不带 Z，需要补上以确保浏览器按 UTC 解析再转为本地时区
+  let normalized = dateStr;
+  if (typeof dateStr === 'string' && !dateStr.endsWith('Z') && !dateStr.includes('+')) {
+    normalized = dateStr.replace(' ', 'T') + 'Z';
+  }
+  return new Date(normalized);
+};
+
+const formatTime = (dateStr) => {
+  const date = parseDate(dateStr);
+  if (!date) return '-';
+  
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  const time = date.toLocaleTimeString(undefined, { hour12: false });
+  const ms = String(date.getMilliseconds()).padStart(3, '0');
+  return `${y}-${m}-${d} ${time}.${ms}`;
+};
+
+const calculateDuration = (start, end) => {
+  const startDate = parseDate(start);
+  const endDate = parseDate(end);
+  if (!startDate || !endDate) return null;
+  const duration = endDate - startDate;
+  return (duration / 1000).toFixed(2) + 's';
+};
+
+const formatJson = (str) => {
+  if (!str) return '';
+  try {
+    // 尝试解析为单一 JSON 对象
+    return JSON.stringify(JSON.parse(str), null, 2);
+  } catch (e) {
+    // 处理 SSE 格式或包含转义字符的字符串
+    try {
+      // 如果字符串本身包含转义的换行和引号，先尝试“解包”一层
+      // 某些情况下后端存入的是 JSON.stringify 后的字符串，导致双重转义
+      if (str.startsWith('"') && str.endsWith('"')) {
+        const unquoted = JSON.parse(str);
+        if (typeof unquoted === 'string') return formatJson(unquoted);
+      }
+
+      // 处理 SSE (Server-Sent Events) 格式
+      if (str.includes('event:') || str.includes('data:')) {
+        return str.split('\n').map(line => {
+          if (line.startsWith('data: ')) {
+            const dataStr = line.substring(6).trim();
+            try {
+              return `data: ${JSON.stringify(JSON.parse(dataStr), null, 2)}`;
+            } catch (err) {
+              return line;
+            }
+          }
+          return line;
+        }).join('\n');
+      }
+
+      // 如果只是带有 \n 等转义符的普通文本
+      return str.replace(/\\n/g, '\n').replace(/\\"/g, '"');
+    } catch (err2) {
+      return str;
+    }
+  }
+};
+
+onMounted(async () => {
+  const ok = await checkAuth();
+  if (ok && !mustChangePassword.value) {
+    await loadAllData();
+  }
+  startProxyHealthPolling();
+});
+
+watch(activeTab, (tab) => {
+  if (tab === 'stats') {
+    if (isAuthenticated.value) fetchStats();
+  }
+  if (tab === 'modelRules') {
+    if (isAuthenticated.value) fetchModelRules();
+  }
+  if (tab === 'models') {
+    if (isAuthenticated.value) fetchManagedModels();
+  }
+  if (tab === 'users') {
+    if (isAuthenticated.value) fetchAdminUsers();
+  }
+  if (tab === 'logs') {
+    if (isAuthenticated.value) fetchLogs();
+  }
+});
+
+watch(statsRange, () => {
+  if (activeTab.value === 'stats') {
+    if (isAuthenticated.value) fetchStats();
+  }
+});
+
+watch(statsProviderId, () => {
+  if (activeTab.value === 'stats') {
+    if (isAuthenticated.value) fetchStats();
+  }
+});
+
+watch(isAuthenticated, () => {
+  startProxyHealthPolling();
+});
+
+onUnmounted(() => {
+  disconnectSocket();
+  stopProxyHealthPolling();
+});
+</script>
+
+<template>
+  <div v-if="!isAuthenticated" class="min-h-screen bg-gray-50 flex items-center justify-center p-6">
+    <div class="w-full max-w-md bg-white rounded-2xl border border-gray-200 shadow-sm p-8">
+      <div class="flex items-center gap-3 mb-6">
+        <Settings class="w-8 h-8 text-blue-600" />
+        <div>
+          <h1 class="text-xl font-bold">LLM Proxy Admin</h1>
+          <p class="text-xs text-gray-400">登录后才能进行管理操作</p>
+        </div>
+      </div>
+      <div class="space-y-4">
+        <div>
+          <label class="block text-xs font-bold text-gray-400 uppercase mb-1">用户名</label>
+          <input v-model="loginForm.username" type="text" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+        </div>
+        <div>
+          <label class="block text-xs font-bold text-gray-400 uppercase mb-1">密码</label>
+          <input v-model="loginForm.password" type="password" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+        </div>
+      </div>
+      <button @click="login" class="w-full mt-6 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-bold">
+        登录
+      </button>
+      <p class="text-[10px] text-gray-400 mt-4">默认用户/密码：llmproxy / llmproxy（首次登录必须修改密码）</p>
+    </div>
+  </div>
+
+  <div v-else class="flex h-screen bg-gray-50 text-gray-900">
+    <!-- Sidebar -->
+    <div class="w-64 bg-white border-r border-gray-200 flex flex-col">
+      <div class="p-6 border-b border-gray-200">
+        <h1 class="text-xl font-bold flex items-center gap-2">
+          <Settings class="w-6 h-6 text-blue-600" />
+          LLM Proxy Admin
+        </h1>
+      </div>
+      <nav class="flex-1 p-4 space-y-2">
+        <button 
+          @click="activeTab = 'providers'"
+          :class="['w-full flex items-center gap-3 px-4 py-2 rounded-lg transition-colors', activeTab === 'providers' ? 'bg-blue-50 text-blue-600' : 'hover:bg-gray-100']"
+        >
+          <Settings class="w-5 h-5" />
+          <span class="flex-1 text-left whitespace-nowrap">厂商管理</span>
+          <span
+            v-if="activeProvider"
+            class="ml-auto max-w-[140px] px-1.5 py-1 bg-purple-50 text-purple-700 rounded text-[8px] leading-none font-bold uppercase tracking-tight whitespace-nowrap overflow-hidden text-ellipsis"
+            :title="activeProvider.name"
+          >
+            {{ activeProvider.name }}
+          </span>
+        </button>
+        <button 
+          @click="activeTab = 'keys'"
+          :class="['w-full flex items-center gap-3 px-4 py-2 rounded-lg transition-colors', activeTab === 'keys' ? 'bg-blue-50 text-blue-600' : 'hover:bg-gray-100']"
+        >
+          <LayoutGrid class="w-5 h-5" />
+          应用管理
+        </button>
+        <button 
+          @click="activeTab = 'models'"
+          :class="['w-full flex items-center gap-3 px-4 py-2 rounded-lg transition-colors', activeTab === 'models' ? 'bg-blue-50 text-blue-600' : 'hover:bg-gray-100']"
+        >
+          <Cpu class="w-5 h-5" />
+          <span class="flex-1 text-left whitespace-nowrap">模型管理</span>
+          <span
+            v-if="activeDefaultModel"
+            class="ml-auto max-w-[140px] px-1.5 py-1 bg-purple-50 text-purple-700 rounded text-[8px] leading-none font-bold uppercase tracking-tight whitespace-nowrap overflow-hidden text-ellipsis"
+            :title="activeDefaultModel.name"
+          >
+            {{ activeDefaultModel.name }}
+          </span>
+          <span
+            v-else
+            class="ml-auto max-w-[140px] px-1.5 py-1 bg-gray-100 text-gray-500 rounded text-[8px] leading-none font-bold uppercase tracking-tight whitespace-nowrap overflow-hidden text-ellipsis"
+          >
+            未设置
+          </span>
+        </button>
+        <button 
+          @click="activeTab = 'modelRules'"
+          :class="['w-full flex items-center gap-3 px-4 py-2 rounded-lg transition-colors', activeTab === 'modelRules' ? 'bg-blue-50 text-blue-600' : 'hover:bg-gray-100']"
+        >
+          <ArrowRightLeft class="w-5 h-5" />
+          <span class="flex-1 text-left whitespace-nowrap">模型规则</span>
+          <span
+            v-if="enabledModelRulesCount"
+            class="ml-auto max-w-[140px] px-1.5 py-1 bg-purple-50 text-purple-700 rounded text-[8px] leading-none font-bold uppercase tracking-tight whitespace-nowrap overflow-hidden text-ellipsis"
+          >
+            启用 {{ enabledModelRulesCount }}
+          </span>
+        </button>
+        <button 
+          @click="activeTab = 'logs'"
+          :class="['w-full flex items-center gap-3 px-4 py-2 rounded-lg transition-colors', activeTab === 'logs' ? 'bg-blue-50 text-blue-600' : 'hover:bg-gray-100']"
+        >
+          <History class="w-5 h-5" />
+          对话日志
+        </button>
+        <button 
+          @click="activeTab = 'stats'"
+          :class="['w-full flex items-center gap-3 px-4 py-2 rounded-lg transition-colors', activeTab === 'stats' ? 'bg-blue-50 text-blue-600' : 'hover:bg-gray-100']"
+        >
+          <BarChart3 class="w-5 h-5" />
+          统计
+        </button>
+        <button 
+          @click="activeTab = 'users'"
+          :class="['w-full flex items-center gap-3 px-4 py-2 rounded-lg transition-colors', activeTab === 'users' ? 'bg-blue-50 text-blue-600' : 'hover:bg-gray-100']"
+        >
+          <Users class="w-5 h-5" />
+          用户管理
+        </button>
+        <button 
+          @click="activeTab = 'help'"
+          :class="['w-full flex items-center gap-3 px-4 py-2 rounded-lg transition-colors', activeTab === 'help' ? 'bg-blue-50 text-blue-600' : 'hover:bg-gray-100']"
+        >
+          <BookOpen class="w-5 h-5" />
+          客户端帮助
+        </button>
+      </nav>
+      <div class="p-4 border-t border-gray-200">
+        <div class="flex items-center gap-2">
+          <span
+            :class="[
+              'w-2.5 h-2.5 rounded-full',
+              proxyHealth.status === 'up' ? 'bg-green-500' : (proxyHealth.status === 'down' ? 'bg-red-500' : 'bg-gray-300')
+            ]"
+          ></span>
+          <span class="text-xs font-bold text-gray-600">
+            {{ proxyHealth.status === 'up' ? 'Proxy 运行中' : (proxyHealth.status === 'down' ? 'Proxy 未运行' : 'Proxy 检测中') }}
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Main Content -->
+    <div class="flex-1 flex flex-col overflow-hidden">
+      <header class="h-16 bg-white border-b border-gray-200 flex items-center justify-between px-8">
+        <h2 class="text-lg font-semibold">{{ activeTab === 'providers' ? '厂商配置' : (activeTab === 'keys' ? '应用管理' : (activeTab === 'models' ? '模型管理' : (activeTab === 'modelRules' ? '模型规则' : (activeTab === 'stats' ? '统计' : (activeTab === 'users' ? '用户管理' : (activeTab === 'help' ? '客户端帮助' : '对话历史')))))) }}</h2>
+        <div class="flex items-center gap-4">
+          <div v-if="activeTab === 'logs'" class="relative">
+            <Search class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+            <input 
+              v-model="searchQuery"
+              type="text" 
+              placeholder="搜索关键词高亮..." 
+              class="pl-10 pr-4 py-2 bg-gray-100 border-none rounded-lg focus:ring-2 focus:ring-blue-500 text-sm w-64"
+            />
+          </div>
+          <div class="flex items-center gap-3">
+            <span class="text-xs font-bold text-gray-500">{{ authUser?.username }}</span>
+            <button @click="logout" class="px-3 py-1.5 text-xs font-bold rounded-lg border border-gray-200 hover:bg-gray-50 transition-colors">
+              退出登录
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <main class="flex-1 overflow-auto p-8">
+        <div v-if="activeTab === 'help'" class="space-y-6">
+          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-8">
+            <h3 class="text-lg font-bold text-gray-900 mb-2">快速开始</h3>
+            <p class="text-sm text-gray-600 leading-relaxed">LLMProxy 提供统一代理入口，客户端统一指向同一个 Base URL，通过模型名与后台策略决定最终路由到的厂商与模型。</p>
+            <div class="rounded-xl border border-gray-200 bg-gray-50 p-5 mt-6">
+              <p class="text-[10px] text-gray-400 font-bold uppercase mb-3">客户端设置</p>
+              <div class="space-y-2">
+                <div class="flex items-center gap-2">
+                  <span class="px-2 py-1 bg-purple-50 text-purple-700 rounded text-[10px] font-bold uppercase tracking-tight">Base URL</span>
+                  <code class="text-xs font-mono text-gray-700 break-all">http://{{ hostname }}:3000/proxy</code>
+                </div>
+                <div class="flex items-center gap-2">
+                  <span class="px-2 py-1 bg-purple-50 text-purple-700 rounded text-[10px] font-bold uppercase tracking-tight">API Key</span>
+                  <code class="text-xs font-mono text-gray-700 break-all">使用平台创建的应用 key</code>
+                </div>
+                <div class="flex items-center gap-2">
+                  <span class="px-2 py-1 bg-purple-50 text-purple-700 rounded text-[10px] font-bold uppercase tracking-tight">Model</span>
+                  <code class="text-xs font-mono text-gray-700 break-all">建议设置为 llmproxy</code>
+                </div>
+              </div>
+              <p class="text-[10px] text-gray-500 mt-3 leading-relaxed">建议客户端模型统一设置为 <span class="font-mono">llmproxy</span>，由代理平台统一管理模型与厂商切换。</p>
+            </div>
+            <div class="rounded-xl border border-gray-200 bg-gray-50 p-5 mt-6">
+              <p class="text-xs font-bold text-gray-500 mb-2">llmproxy 是什么？</p>
+              <p class="text-sm text-gray-700 leading-relaxed">当客户端把 Model 设置为 <span class="font-mono text-xs">llmproxy</span> 时，平台会自动选择实际模型：优先使用应用绑定模型，其次使用当前厂商默认模型。你可以在“厂商管理”快速切换当前生效厂商（默认厂商）。</p>
+            </div>
+          </div>
+
+          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-8">
+            <h3 class="text-lg font-bold text-gray-900 mb-2">如何获取客户端 Key</h3>
+            <div class="space-y-4 text-sm text-gray-700 leading-relaxed">
+              <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
+                <p class="text-xs font-bold text-gray-500 mb-2">创建应用并自动生成 Key</p>
+                <p>进入“应用管理”点击“创建应用”，平台会自动生成一个应用 key。客户端请求时使用该 key 作为 API Key。</p>
+              </div>
+              <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
+                <p class="text-xs font-bold text-gray-500 mb-2">厂商 Key 由平台统一托管</p>
+                <p>在“厂商管理”配置各厂商的托管 API Key。客户端只需要使用平台生成的应用 key，不直接持有厂商 key。</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-8">
+            <h3 class="text-lg font-bold text-gray-900 mb-2">对应用指定厂商与模型</h3>
+            <div class="space-y-4 text-sm text-gray-700 leading-relaxed">
+              <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
+                <p class="text-xs font-bold text-gray-500 mb-2">应用绑定（固定路由）</p>
+                <p>在“应用管理”中可以为某个应用单独绑定厂商与模型。绑定后，该应用的请求将优先使用自己的配置，不会受“厂商管理/模型管理”的切换影响。</p>
+              </div>
+              <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
+                <p class="text-xs font-bold text-gray-500 mb-2">默认路由（可快速切换）</p>
+                <p>若应用未绑定厂商与模型，则使用“厂商管理”当前生效厂商 + 该厂商默认模型。你可以在厂商管理中快速切换当前厂商，实现全局默认路由切换。</p>
+              </div>
+              <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
+                <p class="text-xs font-bold text-gray-500 mb-2">模型规则（强制转换）</p>
+                <p>当客户端请求 Model ≠ llmproxy 时，会先匹配“模型规则”进行强制转换（支持 * 通配符，大小写敏感）。客户端使用 llmproxy 时不参与规则匹配。</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-8">
+            <h3 class="text-lg font-bold text-gray-900 mb-2">常见问题</h3>
+            <div class="space-y-3 text-sm text-gray-700">
+              <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
+                <p class="font-bold text-gray-700 mb-1">为什么我设置了模型，但实际走了另一个模型？</p>
+                <p>若请求 model ≠ llmproxy，可能命中了模型规则被强制转换；若请求 model = llmproxy，则会按“应用绑定模型/厂商默认模型”选择实际模型。</p>
+              </div>
+              <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
+                <p class="font-bold text-gray-700 mb-1">如何看实际路由到的厂商/模型？</p>
+                <p>进入“对话日志”查看每条请求的 <span class="font-mono text-xs">model</span> 与 <span class="font-mono text-xs">actualModel</span>，以及目标 URL。</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Providers View -->
+        <div v-if="activeTab === 'providers'" class="space-y-6">
+          <div class="flex justify-between items-center">
+            <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">当前已添加的厂商</h3>
+            <div class="flex gap-2">
+              <button
+                @click="openExportDialog"
+                class="flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-sm border border-gray-200"
+              >
+                <Download class="w-4 h-4" />
+                导出
+              </button>
+              <button
+                @click="openImportDialog"
+                class="flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-sm border border-gray-200"
+              >
+                <Upload class="w-4 h-4" />
+                导入
+              </button>
+              <button
+                @click="showAddProvider = true"
+                class="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
+              >
+                <Plus class="w-4 h-4" />
+                添加厂商
+              </button>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+            <div 
+              v-for="p in providers" 
+              :key="p.id"
+              @click="!p.active && activateProvider(p.id)"
+              class="bg-white p-6 rounded-xl border border-gray-200 shadow-sm hover:shadow-md transition-shadow relative overflow-hidden cursor-pointer"
+              :class="{'border-blue-500 ring-1 ring-blue-500': p.active}"
+            >
+              <div v-if="p.active" class="absolute top-0 right-0 bg-blue-500 text-white px-2 py-1 text-[10px] font-bold rounded-bl-lg flex items-center gap-1">
+                <Check class="w-3 h-3" /> 生效中
+              </div>
+              
+              <div class="flex justify-between items-start mb-4">
+                <div>
+                  <h4 class="font-bold text-lg">{{ p.name }}</h4>
+                  <span class="text-xs px-2 py-0.5 bg-gray-100 text-gray-600 rounded-full border border-gray-200 uppercase">{{ p.type }}</span>
+                </div>
+                <div class="flex gap-2">
+                  <button 
+                    @click.stop="openEditModal(p)"
+                    class="p-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+                    title="编辑厂商"
+                  >
+                    <Pencil class="w-5 h-5" />
+                  </button>
+                  <button 
+                    v-if="!p.active"
+                    @click.stop="activateProvider(p.id)"
+                    class="p-2 text-green-600 hover:bg-green-50 rounded-lg transition-colors"
+                    title="设置为生效"
+                  >
+                    <CheckCircle2 class="w-5 h-5" />
+                  </button>
+                  <button 
+                    @click.stop="deleteProvider(p.id)"
+                    class="p-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                    title="删除"
+                  >
+                    <Trash2 class="w-5 h-5" />
+                  </button>
+                </div>
+              </div>
+              <div class="text-sm text-gray-500 break-all">
+                <span class="block font-medium text-gray-400 text-xs mb-1 uppercase">基础地址</span>
+                {{ p.baseUrl }}
+              </div>
+              <div class="text-sm text-gray-500 break-all mt-4">
+                <span class="block font-medium text-gray-400 text-xs mb-1 uppercase">托管 Key</span>
+                <span class="font-mono text-xs blur-sm hover:blur-none transition-all cursor-help">{{ p.apiKey || '未设置' }}</span>
+              </div>
+              <div class="text-sm text-gray-500 break-all mt-4">
+                <div class="flex justify-between items-center">
+                  <span class="block font-medium text-gray-400 text-xs uppercase">模型</span>
+                  <button
+                    @click.stop="openAddProviderModel(p)"
+                    class="text-xs font-bold text-blue-600 hover:underline"
+                  >
+                    添加模型
+                  </button>
+                </div>
+                <div class="flex flex-wrap gap-2 mt-2">
+                  <button
+                    v-for="m in (p.models || [])"
+                    :key="m.id"
+                    @click.stop="activateProviderModel(p.id, m.id)"
+                    :class="[
+                      'px-2 py-1 rounded text-[10px] font-bold uppercase tracking-tight border transition-colors',
+                      p.defaultModelId === m.id ? 'bg-purple-600 text-white border-purple-600 shadow-sm' : 'bg-purple-50 text-purple-700 border-purple-100 hover:border-purple-300'
+                    ]"
+                  >
+                    {{ m.name }}
+                  </button>
+                  <span v-if="!(p.models || []).length" class="text-gray-400 text-xs italic">未添加</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Apps View (Renamed from Keys) -->
+        <div v-if="activeTab === 'keys'" class="space-y-6">
+          <div class="flex justify-between items-center">
+            <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">应用管理</h3>
+            <button 
+              @click="showAddApp = true"
+              class="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
+            >
+              <Plus class="w-4 h-4" />
+              创建应用
+            </button>
+          </div>
+
+          <div class="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
+            <table class="w-full text-left text-sm">
+              <thead class="bg-gray-50 border-b border-gray-200">
+                <tr>
+                  <th class="px-6 py-4 font-semibold text-gray-600">应用名称</th>
+                  <th class="px-6 py-4 font-semibold text-gray-600">绑定厂商</th>
+                  <th class="px-6 py-4 font-semibold text-gray-600">绑定模型</th>
+                  <th class="px-6 py-4 font-semibold text-gray-600 text-right">操作</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-gray-200">
+                <tr v-for="k in clientKeys" :key="k.id" class="hover:bg-gray-50 transition-colors">
+                  <td class="px-6 py-4">
+                    <div class="font-medium text-gray-900">{{ k.name }}</div>
+                    <div class="font-mono text-[10px] text-gray-400 mt-0.5">{{ k.key }}</div>
+                  </td>
+                  <td class="px-6 py-4">
+                    <span v-if="k.providerId" class="px-2 py-1 bg-blue-50 text-blue-700 rounded text-[10px] font-bold border border-blue-100">
+                      {{ providers.find(p => p.id === k.providerId)?.name || '未知厂商' }}
+                    </span>
+                    <span v-else class="text-gray-400 text-xs italic">全局默认</span>
+                  </td>
+                  <td class="px-6 py-4">
+                    <template v-if="k.managedModelId">
+                      <div class="flex flex-wrap items-center gap-2">
+                        <span class="px-2 py-1 bg-green-50 text-green-700 rounded text-[10px] font-bold border border-green-100">
+                          {{ getModelCatalogEntry(k.managedModelId)?.name || '未知模型' }}
+                        </span>
+                      </div>
+                    </template>
+                    <span v-else class="text-gray-400 text-xs italic">默认</span>
+                  </td>
+                  <td class="px-6 py-4 text-right space-x-3">
+                    <button 
+                      @click="toggleKey(k.id)"
+                      :class="k.enabled ? 'text-amber-600' : 'text-green-600'"
+                      class="hover:underline font-medium text-xs"
+                    >
+                      {{ k.enabled ? '禁用' : '启用' }}
+                    </button>
+                    <button 
+                      @click="openEditClientApp(k)"
+                      class="text-blue-600 hover:underline font-medium text-xs"
+                    >
+                      配置
+                    </button>
+                    <button 
+                      @click="deleteClientApp(k.id)"
+                      class="text-red-600 hover:underline font-medium text-xs"
+                    >
+                      删除
+                    </button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Models View -->
+        <div v-if="activeTab === 'models'" class="space-y-6">
+          <div class="flex justify-between items-center">
+            <div class="space-y-1">
+              <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">当前厂商模型管理</h3>
+              <p class="text-[10px] text-gray-400">当前生效厂商：{{ activeProvider?.name || '-' }}（在此页面选择的默认模型会被记住并用于 llmproxy）</p>
+            </div>
+            <button 
+              @click="showAddModel = true"
+              class="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
+            >
+              <Plus class="w-4 h-4" />
+              添加模型
+            </button>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+            <div 
+              v-for="m in managedModels" 
+              :key="m.id"
+              @click="activeProviderDefaultModelId !== m.id && activateModel(m.id)"
+              class="bg-white p-6 rounded-xl border border-gray-200 shadow-sm hover:shadow-md transition-shadow relative overflow-hidden cursor-pointer"
+              :class="{'border-blue-500 ring-1 ring-blue-500': activeProviderDefaultModelId === m.id}"
+            >
+              <div v-if="activeProviderDefaultModelId === m.id" class="absolute top-0 right-0 bg-blue-500 text-white px-2 py-1 text-[10px] font-bold rounded-bl-lg flex items-center gap-1">
+                <Check class="w-3 h-3" /> 生效中
+              </div>
+              
+              <div class="flex justify-between items-start mb-4">
+                <div>
+                  <h4 class="font-bold text-lg">{{ m.name }}</h4>
+                </div>
+                <div class="flex gap-2">
+                  <button 
+                    v-if="activeProviderDefaultModelId !== m.id"
+                    @click.stop="activateModel(m.id)"
+                    class="p-2 text-green-600 hover:bg-green-50 rounded-lg transition-colors"
+                    title="设置为生效"
+                  >
+                    <CheckCircle2 class="w-5 h-5" />
+                  </button>
+                  <button 
+                    @click.stop="deleteModel(m.id)"
+                    class="p-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                    title="删除"
+                  >
+                    <Trash2 class="w-5 h-5" />
+                  </button>
+                </div>
+              </div>
+              <p class="text-[10px] text-gray-400">客户端请求模型为 <span class="font-bold text-green-600">llmproxy</span> 时，若应用未指定模型，将使用当前厂商的默认模型。</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Model Rules View -->
+        <div v-if="activeTab === 'modelRules'" class="space-y-6">
+          <div class="flex justify-between items-center">
+            <div class="space-y-1">
+              <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">模型规则管理</h3>
+              <p class="text-[10px] text-gray-400">支持 * 通配符，大小写敏感。按优先级从高到低匹配，命中第一条后强制转换模型。</p>
+            </div>
+            <button 
+              @click="showAddModelRule = true"
+              class="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
+            >
+              <Plus class="w-4 h-4" />
+              添加规则
+            </button>
+          </div>
+
+          <div class="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
+            <table class="w-full text-left text-sm">
+              <thead class="bg-gray-50 border-b border-gray-200">
+                <tr>
+                  <th class="px-6 py-4 font-semibold text-gray-600">优先级</th>
+                  <th class="px-6 py-4 font-semibold text-gray-600">匹配模式</th>
+                  <th class="px-6 py-4 font-semibold text-gray-600">转换为</th>
+                  <th class="px-6 py-4 font-semibold text-gray-600">状态</th>
+                  <th class="px-6 py-4 font-semibold text-gray-600 text-right">操作</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-gray-200">
+                <tr v-for="r in modelRules" :key="r.id" class="hover:bg-gray-50 transition-colors">
+                  <td class="px-6 py-4 font-mono text-xs text-gray-700">{{ r.priority }}</td>
+                  <td class="px-6 py-4 font-mono text-xs text-gray-700">{{ r.pattern }}</td>
+                  <td class="px-6 py-4 font-mono text-xs text-blue-700 font-medium">{{ r.targetModel }}</td>
+                  <td class="px-6 py-4">
+                    <span 
+                      v-if="r.enabled" 
+                      class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-green-50 text-green-700 border border-green-200"
+                    >
+                      <ShieldCheck class="w-3 h-3" />
+                      已启用
+                    </span>
+                    <span 
+                      v-else 
+                      class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-gray-50 text-gray-500 border border-gray-200"
+                    >
+                      <ShieldAlert class="w-3 h-3" />
+                      已禁用
+                    </span>
+                  </td>
+                  <td class="px-6 py-4 text-right space-x-3">
+                    <button 
+                      @click="toggleModelRule(r.id)"
+                      :class="r.enabled ? 'text-amber-600' : 'text-green-600'"
+                      class="hover:underline font-medium text-xs"
+                    >
+                      {{ r.enabled ? '禁用' : '启用' }}
+                    </button>
+                    <button 
+                      @click="editingModelRule = { ...r }"
+                      class="text-blue-600 hover:underline font-medium text-xs"
+                    >
+                      编辑
+                    </button>
+                    <button 
+                      @click="deleteModelRule(r.id)"
+                      class="text-red-600 hover:underline font-medium text-xs"
+                    >
+                      删除
+                    </button>
+                  </td>
+                </tr>
+                <tr v-if="!modelRules.length">
+                  <td colspan="5" class="px-6 py-10 text-center text-gray-400 text-sm">暂无规则</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Stats View -->
+        <div v-if="activeTab === 'stats'" class="space-y-6">
+          <div class="flex justify-between items-center">
+            <div class="flex items-center gap-3">
+              <button
+                @click="statsRange = '7d'"
+                :class="['px-3 py-1 rounded-full text-xs font-bold transition-all border', statsRange === '7d' ? 'bg-gray-900 text-white border-gray-900' : 'bg-white text-gray-600 border-gray-200 hover:border-gray-400']"
+              >
+                最近7天
+              </button>
+              <button
+                @click="statsRange = '30d'"
+                :class="['px-3 py-1 rounded-full text-xs font-bold transition-all border', statsRange === '30d' ? 'bg-gray-900 text-white border-gray-900' : 'bg-white text-gray-600 border-gray-200 hover:border-gray-400']"
+              >
+                最近30天
+              </button>
+              <button
+                @click="statsRange = '90d'"
+                :class="['px-3 py-1 rounded-full text-xs font-bold transition-all border', statsRange === '90d' ? 'bg-gray-900 text-white border-gray-900' : 'bg-white text-gray-600 border-gray-200 hover:border-gray-400']"
+              >
+                最近90天
+              </button>
+              <button
+                @click="statsRange = 'all'"
+                :class="['px-3 py-1 rounded-full text-xs font-bold transition-all border', statsRange === 'all' ? 'bg-gray-900 text-white border-gray-900' : 'bg-white text-gray-600 border-gray-200 hover:border-gray-400']"
+              >
+                全部时间
+              </button>
+              <div class="flex items-center gap-2 ml-2">
+                <span class="text-xs font-bold text-gray-400 uppercase">厂商</span>
+                <select v-model="statsProviderId" class="px-3 py-1.5 border border-gray-200 rounded-lg bg-white text-xs font-bold text-gray-700">
+                  <option value="all">全部</option>
+                  <option v-for="p in providers" :key="p.id" :value="p.id">{{ p.name }}</option>
+                </select>
+                <span class="text-[10px] text-gray-400">热力图不受影响</span>
+              </div>
+            </div>
+            <button
+              @click="fetchStats"
+              class="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm font-bold"
+            >
+              <Clock class="w-4 h-4" />
+              刷新
+            </button>
+          </div>
+
+          <div v-if="statsLoading" class="bg-white rounded-xl border border-gray-200 p-10 flex items-center justify-center text-gray-500">
+            <Loader2 class="w-6 h-6 animate-spin mr-3 text-blue-600" />
+            正在加载统计数据...
+          </div>
+
+          <div v-else class="space-y-6">
+            <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
+              <div class="bg-white p-5 rounded-xl border border-gray-200 shadow-sm">
+                <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">请求数</p>
+                <p class="text-2xl font-bold text-gray-900">{{ statsSummary ? formatNumber(statsSummary.requestCount) : '-' }}</p>
+              </div>
+              <div class="bg-white p-5 rounded-xl border border-gray-200 shadow-sm">
+                <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">错误数</p>
+                <p class="text-2xl font-bold text-red-600">{{ statsSummary ? formatNumber(statsSummary.errorCount) : '-' }}</p>
+              </div>
+              <div class="bg-white p-5 rounded-xl border border-gray-200 shadow-sm">
+                <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">错误率</p>
+                <p class="text-2xl font-bold text-amber-600">{{ statsSummary ? (statsSummary.errorRate * 100).toFixed(2) + '%' : '-' }}</p>
+              </div>
+              <div class="bg-white p-5 rounded-xl border border-gray-200 shadow-sm">
+                <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">Tokens</p>
+                <p class="text-2xl font-bold text-blue-700">{{ statsSummary ? formatNumber(statsSummary.tokensTotal) : '-' }}</p>
+              </div>
+              <div class="bg-white p-5 rounded-xl border border-gray-200 shadow-sm">
+                <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">平均耗时</p>
+                <p class="text-2xl font-bold text-green-700">{{ statsSummary ? formatMs(statsSummary.avgLatencyMs) : '-' }}</p>
+              </div>
+            </div>
+
+            <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+              <div class="flex justify-between items-center mb-4">
+                <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">活跃热力图（按天请求数）</h3>
+                <p class="text-xs text-gray-400">活跃天数：{{ statsSummary ? statsSummary.activeDays : '-' }}</p>
+              </div>
+              <VChart :option="heatmapOption" autoresize class="h-52" />
+              <div class="flex items-center justify-center gap-2 mt-4 text-[10px] font-bold text-gray-400">
+                <span>少</span>
+                <span class="w-3 h-3 rounded-sm border border-gray-200" style="background:#ebedf0" title="0 次"></span>
+                <span class="w-3 h-3 rounded-sm border border-gray-200" style="background:#9be9a8" title="1–4 次"></span>
+                <span class="w-3 h-3 rounded-sm border border-gray-200" style="background:#40c463" title="5–9 次"></span>
+                <span class="w-3 h-3 rounded-sm border border-gray-200" style="background:#30a14e" title="10–19 次"></span>
+                <span class="w-3 h-3 rounded-sm border border-gray-200" style="background:#216e39" title="≥ 20 次"></span>
+                <span>多</span>
+              </div>
+            </div>
+
+            <div class="grid grid-cols-1 xl:grid-cols-2 gap-6">
+              <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+                <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider mb-4">请求与错误趋势</h3>
+                <VChart :option="requestsOption" autoresize class="h-64" />
+              </div>
+              <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+                <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider mb-4">Tokens 趋势</h3>
+                <VChart :option="tokensOption" autoresize class="h-64" />
+              </div>
+            </div>
+
+            <div class="grid grid-cols-1 xl:grid-cols-2 gap-6">
+              <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+                <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider mb-4">平均耗时趋势</h3>
+                <VChart :option="latencyOption" autoresize class="h-64" />
+              </div>
+              <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+                <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider mb-4">模型占比（按 Tokens）</h3>
+                <VChart :option="modelPieOption" autoresize class="h-64" />
+              </div>
+            </div>
+
+            <div class="grid grid-cols-1 xl:grid-cols-2 gap-6">
+              <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+                <div class="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
+                  <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">慢请求 Top 10</h3>
+                </div>
+                <table class="w-full text-left text-sm">
+                  <thead class="bg-gray-50 border-b border-gray-200">
+                    <tr>
+                      <th class="px-6 py-3 font-semibold text-gray-600">应用</th>
+                      <th class="px-6 py-3 font-semibold text-gray-600">厂商</th>
+                      <th class="px-6 py-3 font-semibold text-gray-600">模型</th>
+                      <th class="px-6 py-3 font-semibold text-gray-600 text-right">耗时</th>
+                    </tr>
+                  </thead>
+                  <tbody class="divide-y divide-gray-200">
+                    <tr v-for="row in (statsData?.top?.slow || [])" :key="row.id" class="hover:bg-gray-50 transition-colors">
+                      <td class="px-6 py-3 text-gray-700">{{ row.appName }}</td>
+                      <td class="px-6 py-3 text-gray-700">{{ row.providerName }}</td>
+                      <td class="px-6 py-3 font-mono text-xs text-gray-600">
+                        <span v-if="!row.actualModel || row.requestedModel === row.actualModel">{{ row.requestedModel }}</span>
+                        <span v-else>{{ row.requestedModel }} → {{ row.actualModel }}</span>
+                      </td>
+                      <td class="px-6 py-3 text-right font-mono text-xs text-red-600 font-bold">{{ formatMs(row.latencyMs) }}</td>
+                    </tr>
+                    <tr v-if="!(statsData?.top?.slow || []).length">
+                      <td colspan="4" class="px-6 py-6 text-center text-gray-400 text-sm">暂无数据</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+                <div class="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
+                  <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">错误 Top 10（最近）</h3>
+                </div>
+                <table class="w-full text-left text-sm">
+                  <thead class="bg-gray-50 border-b border-gray-200">
+                    <tr>
+                      <th class="px-6 py-3 font-semibold text-gray-600">时间</th>
+                      <th class="px-6 py-3 font-semibold text-gray-600">应用</th>
+                      <th class="px-6 py-3 font-semibold text-gray-600">厂商</th>
+                      <th class="px-6 py-3 font-semibold text-gray-600">错误</th>
+                    </tr>
+                  </thead>
+                  <tbody class="divide-y divide-gray-200">
+                    <tr v-for="row in (statsData?.top?.errors || [])" :key="row.id" class="hover:bg-gray-50 transition-colors">
+                      <td class="px-6 py-3 text-gray-500 font-mono text-xs">{{ formatTime(row.requestAt) }}</td>
+                      <td class="px-6 py-3 text-gray-700">{{ row.appName }}</td>
+                      <td class="px-6 py-3 text-gray-700">{{ row.providerName }}</td>
+                      <td class="px-6 py-3 font-mono text-[10px] text-red-600 break-all">{{ row.errorMessage || '-' }}</td>
+                    </tr>
+                    <tr v-if="!(statsData?.top?.errors || []).length">
+                      <td colspan="4" class="px-6 py-6 text-center text-gray-400 text-sm">暂无数据</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div v-if="activeTab === 'users'" class="space-y-6">
+          <div class="flex justify-between items-center">
+            <div class="space-y-1">
+              <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">用户管理</h3>
+              <p class="text-[10px] text-gray-400">首次登录默认用户必须修改密码；支持创建/禁用/重置密码。</p>
+            </div>
+            <button 
+              @click="showAddAdminUser = true"
+              class="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
+            >
+              <Plus class="w-4 h-4" />
+              添加用户
+            </button>
+          </div>
+
+          <div class="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
+            <table class="w-full text-left text-sm">
+              <thead class="bg-gray-50 border-b border-gray-200">
+                <tr>
+                  <th class="px-6 py-4 font-semibold text-gray-600">用户名</th>
+                  <th class="px-6 py-4 font-semibold text-gray-600">状态</th>
+                  <th class="px-6 py-4 font-semibold text-gray-600">强制改密</th>
+                  <th class="px-6 py-4 font-semibold text-gray-600">创建时间</th>
+                  <th class="px-6 py-4 font-semibold text-gray-600 text-right">操作</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-gray-200">
+                <tr v-for="u in adminUsers" :key="u.id" class="hover:bg-gray-50 transition-colors">
+                  <td class="px-6 py-4 font-medium text-gray-900">{{ u.username }}</td>
+                  <td class="px-6 py-4">
+                    <span 
+                      v-if="u.enabled" 
+                      class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-green-50 text-green-700 border border-green-200"
+                    >
+                      <ShieldCheck class="w-3 h-3" />
+                      已启用
+                    </span>
+                    <span 
+                      v-else 
+                      class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-gray-50 text-gray-500 border border-gray-200"
+                    >
+                      <ShieldAlert class="w-3 h-3" />
+                      已禁用
+                    </span>
+                  </td>
+                  <td class="px-6 py-4">
+                    <span v-if="u.mustChangePassword" class="text-amber-600 font-bold text-xs">是</span>
+                    <span v-else class="text-gray-400 text-xs">否</span>
+                  </td>
+                  <td class="px-6 py-4 text-gray-500 font-mono text-xs">{{ formatTime(u.createdAt) }}</td>
+                  <td class="px-6 py-4 text-right space-x-3">
+                    <button 
+                      @click="editingAdminUser = { ...u }"
+                      class="text-blue-600 hover:underline font-medium text-xs"
+                    >
+                      编辑
+                    </button>
+                    <button 
+                      @click="resetPasswordUser = u; resetPasswordValue = ''"
+                      class="text-amber-600 hover:underline font-medium text-xs"
+                    >
+                      重置密码
+                    </button>
+                    <button 
+                      v-if="authUser && u.id !== authUser.id"
+                      @click="deleteAdminUser(u.id)"
+                      class="text-red-600 hover:underline font-medium text-xs"
+                    >
+                      删除
+                    </button>
+                  </td>
+                </tr>
+                <tr v-if="!adminUsers.length">
+                  <td colspan="5" class="px-6 py-10 text-center text-gray-400 text-sm">暂无用户</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Logs View -->
+        <div v-if="activeTab === 'logs'" class="space-y-4">
+          <div class="flex justify-between items-center mb-4">
+            <div class="flex flex-col gap-2">
+              <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">对话历史记录</h3>
+              <div class="flex flex-wrap gap-2">
+                <button 
+                  @click="selectedClientKey = 'all'; logsPage = 1; fetchLogs()"
+                  :class="['px-3 py-1 rounded-full text-xs font-bold transition-all border', 
+                    selectedClientKey === 'all' ? 'bg-gray-900 text-white border-gray-900' : 'bg-white text-gray-600 border-gray-200 hover:border-gray-400']"
+                >
+                  全部客户端
+                </button>
+                <button 
+                  v-for="key in clientKeys" 
+                  :key="key.id"
+                  @click="selectedClientKey = key.id; logsPage = 1; fetchLogs()"
+                  :class="['px-3 py-1 rounded-full text-xs font-bold transition-all border', 
+                    selectedClientKey === key.id ? 'bg-purple-600 text-white border-purple-600 shadow-sm' : 'bg-purple-50 text-purple-600 border-purple-100 hover:border-purple-300']"
+                >
+                  {{ key.name }}
+                </button>
+              </div>
+            </div>
+            <button 
+              @click="clearLogs"
+              class="flex items-center gap-2 px-4 py-2 bg-red-50 text-red-600 rounded-lg hover:bg-red-100 transition-colors text-sm font-bold border border-red-200"
+            >
+              <Trash2 class="w-4 h-4" />
+              清空对话日志
+            </button>
+          </div>
+          <div v-if="hasNewLogs" class="bg-blue-50 border border-blue-200 text-blue-700 rounded-lg px-4 py-3 flex items-center justify-between">
+            <div class="text-sm font-medium">有新日志到达</div>
+            <button @click="goToLatestLogs" class="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs font-bold hover:bg-blue-700 transition-colors">
+              加载最新
+            </button>
+          </div>
+          <div class="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
+            <table class="w-full text-left text-sm">
+              <thead class="bg-gray-50 border-b border-gray-200">
+                <tr>
+                  <th class="px-6 py-4 font-semibold text-gray-600">时间</th>
+                  <th class="px-6 py-4 font-semibold text-gray-600">客户端 Key</th>
+                  <th class="px-6 py-4 font-semibold text-gray-600">厂商</th>
+                  <th class="px-6 py-4 font-semibold text-gray-600">模型</th>
+                  <th class="px-6 py-4 font-semibold text-gray-600">状态</th>
+                  <th class="px-6 py-4 font-semibold text-gray-600 text-right">操作</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-gray-200">
+                <tr v-for="log in filteredLogs" :key="log.id" class="hover:bg-gray-50 transition-colors">
+                  <td class="px-6 py-4 text-gray-500 font-mono text-xs">{{ formatTime(log.requestAt || log.createdAt) }}</td>
+                  <td class="px-6 py-4">
+                    <span class="px-2 py-1 bg-purple-50 text-purple-700 rounded text-[10px] font-bold uppercase tracking-tight">{{ log.clientKeyName || '未知' }}</span>
+                  </td>
+                  <td class="px-6 py-4 font-medium">{{ log.providerName }}</td>
+                  <td class="px-6 py-4 font-mono text-xs">
+                    <template v-if="!log.actualModel || log.model === log.actualModel">
+                      <span :class="log.model === 'llmproxy' ? 'text-green-600 font-bold' : 'text-gray-600'">{{ log.model }}</span>
+                    </template>
+                    <template v-else>
+                      <span class="text-green-600 font-bold">{{ log.model }}</span>
+                      <span class="mx-2 text-gray-400">→</span>
+                      <span class="text-blue-600 font-medium">{{ log.actualModel }}</span>
+                    </template>
+                  </td>
+                  <td class="px-6 py-4">
+                    <span 
+                      v-if="log.status === 'waiting'" 
+                      class="inline-flex items-center gap-2 px-2.5 py-1 rounded-full text-xs font-medium bg-amber-50 text-amber-700 border border-amber-200"
+                    >
+                      <Loader2 class="w-3 h-3 animate-spin" />
+                      等待响应中
+                    </span>
+                    <span 
+                      v-else-if="log.status === 'completed'" 
+                      class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-green-50 text-green-700 border border-green-200"
+                    >
+                      <CheckCircle2 class="w-3 h-3" />
+                      已完成
+                    </span>
+                    <span 
+                      v-else 
+                      class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-red-50 text-red-700 border border-red-200"
+                    >
+                      错误
+                    </span>
+                  </td>
+                  <td class="px-6 py-4 text-right">
+                    <button 
+                      @click="selectedLog = log"
+                      class="text-blue-600 hover:underline font-medium"
+                    >
+                      查看详情
+                    </button>
+                  </td>
+                </tr>
+                <tr v-if="!filteredLogs.length">
+                  <td colspan="6" class="px-6 py-10 text-center text-gray-400 text-sm">暂无数据</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="flex items-center justify-between bg-white rounded-xl border border-gray-200 shadow-sm px-6 py-4">
+            <div class="flex items-center gap-3 text-xs text-gray-500">
+              <span>总计 {{ logsTotal }} 条</span>
+              <div class="flex items-center gap-2">
+                <span>每页</span>
+                <select v-model.number="logsPageSize" @change="logsPage = 1; fetchLogs()" class="px-2 py-1 border border-gray-200 rounded-lg bg-white text-xs">
+                  <option :value="20">20</option>
+                  <option :value="50">50</option>
+                  <option :value="100">100</option>
+                </select>
+              </div>
+            </div>
+            <div class="flex items-center gap-3">
+              <button @click="prevLogsPage" :disabled="logsPage <= 1" class="px-3 py-1.5 rounded-lg border border-gray-200 text-xs font-bold disabled:opacity-40 disabled:cursor-not-allowed hover:bg-gray-50 transition-colors">
+                上一页
+              </button>
+              <span class="text-xs text-gray-600 font-bold">第 {{ logsPage }} / {{ logsTotalPages }} 页</span>
+              <button @click="nextLogsPage" :disabled="logsPage >= logsTotalPages" class="px-3 py-1.5 rounded-lg border border-gray-200 text-xs font-bold disabled:opacity-40 disabled:cursor-not-allowed hover:bg-gray-50 transition-colors">
+                下一页
+              </button>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <!-- 导出对话框 -->
+    <div v-if="showExportDialog" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+      <div class="bg-white rounded-xl shadow-xl max-w-md w-full p-6">
+        <h3 class="text-lg font-semibold text-gray-900 mb-4">导出厂商配置</h3>
+
+        <div class="space-y-4">
+          <div class="flex items-center gap-3 p-4 bg-amber-50 border border-amber-200 rounded-lg">
+            <input
+              v-model="exportIncludeApiKey"
+              type="checkbox"
+              id="includeApiKey"
+              class="w-5 h-5 text-amber-600 rounded focus:ring-amber-500"
+            >
+            <label for="includeApiKey" class="text-sm">
+              <span class="font-medium text-gray-900">包含 API Key</span>
+              <p class="text-gray-600 mt-1">⚠️ 警告：导出的文件包含敏感信息，请勿随意分享或公开存储！</p>
+            </label>
+          </div>
+
+          <div class="p-4 bg-blue-50 border border-blue-200 rounded-lg">
+            <p class="text-sm text-gray-700">
+              导出内容包括：
+            </p>
+            <ul class="text-sm text-gray-600 mt-2 space-y-1 list-disc list-inside">
+              <li>厂商名称、类型、API 基础地址</li>
+              <li>激活状态</li>
+              <li>模型关联关系</li>
+              <li>默认模型设置</li>
+              <li v-if="exportIncludeApiKey" class="text-red-600 font-medium">API Key</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="flex gap-3 mt-6">
+          <button
+            @click="doExport"
+            class="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+          >
+            确认导出
+          </button>
+          <button
+            @click="showExportDialog = false"
+            class="flex-1 px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
+          >
+            取消
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 导入对话框 -->
+    <div v-if="showImportDialog" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+      <!-- 步骤1: 选择文件 -->
+      <div v-if="importStep === 'file'" class="bg-white rounded-xl shadow-xl max-w-md w-full p-6">
+        <h3 class="text-lg font-semibold text-gray-900 mb-4">导入厂商配置</h3>
+
+        <div
+          @dragover.prevent
+          @drop.prevent="handleImportDrop"
+          @click="$refs.importFileInput?.click()"
+          class="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center cursor-pointer hover:border-blue-400 hover:bg-blue-50 transition-colors"
+        >
+          <Upload class="w-12 h-12 mx-auto text-gray-400 mb-3" />
+          <p class="text-sm text-gray-600">拖放 JSON 文件到此处，或点击选择文件</p>
+          <p class="text-xs text-gray-400 mt-2">支持 .json 格式的厂商配置文件</p>
+        </div>
+        <input
+          ref="importFileInput"
+          type="file"
+          accept=".json"
+          @change="handleImportFileSelect"
+          class="hidden"
+        >
+
+        <div class="flex gap-3 mt-6">
+          <button
+            @click="showImportDialog = false"
+            class="flex-1 px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
+          >
+            取消
+          </button>
+        </div>
+      </div>
+
+      <!-- 步骤2: 处理冲突 -->
+      <div v-if="importStep === 'conflict'" class="bg-white rounded-xl shadow-xl max-w-lg w-full max-h-[80vh] overflow-y-auto p-6">
+        <h3 class="text-lg font-semibold text-gray-900 mb-2">处理冲突</h3>
+        <p class="text-sm text-gray-600 mb-4">以下厂商名称已存在，请选择处理方式：</p>
+
+        <div class="space-y-3">
+          <div
+            v-for="item in importConflicts"
+            :key="item.provider.name"
+            class="p-4 border border-gray-200 rounded-lg"
+          >
+            <div class="flex items-center justify-between mb-3">
+              <span class="font-medium text-gray-900">{{ item.provider.name }}</span>
+              <span class="text-xs px-2 py-1 bg-red-100 text-red-700 rounded-full">冲突</span>
+            </div>
+            <div class="flex gap-2">
+              <button
+                @click="importMergeStrategy[item.provider.name] = 'skip'"
+                :class="importMergeStrategy[item.provider.name] === 'skip' ? 'ring-2 ring-blue-500 bg-blue-50' : 'bg-gray-100'"
+                class="flex-1 px-3 py-2 rounded-lg text-sm font-medium transition-colors"
+              >
+                跳过
+              </button>
+              <button
+                @click="importMergeStrategy[item.provider.name] = 'overwrite'"
+                :class="importMergeStrategy[item.provider.name] === 'overwrite' ? 'ring-2 ring-blue-500 bg-blue-50' : 'bg-gray-100'"
+                class="flex-1 px-3 py-2 rounded-lg text-sm font-medium transition-colors"
+              >
+                覆盖
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="flex gap-3 mt-6">
+          <button
+            @click="doImport"
+            class="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+          >
+            确认导入
+          </button>
+          <button
+            @click="showImportDialog = false"
+            class="flex-1 px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
+          >
+            取消
+          </button>
+        </div>
+      </div>
+
+      <!-- 步骤3: 导入结果 -->
+      <div v-if="importStep === 'result'" class="bg-white rounded-xl shadow-xl max-w-md w-full p-6">
+        <h3 class="text-lg font-semibold text-gray-900 mb-4">导入完成</h3>
+
+        <div class="space-y-2 max-h-60 overflow-y-auto">
+          <div
+            v-for="result in importResults"
+            :key="result.name"
+            class="flex items-center justify-between p-3 rounded-lg"
+            :class="{
+              'bg-green-50': result.action === 'created',
+              'bg-amber-50': result.action === 'overwritten',
+              'bg-gray-50': result.action === 'skipped'
+            }"
+          >
+            <span class="font-medium">{{ result.name }}</span>
+            <span class="text-xs px-2 py-1 rounded-full" :class="{
+              'bg-green-200 text-green-800': result.action === 'created',
+              'bg-amber-200 text-amber-800': result.action === 'overwritten',
+              'bg-gray-200 text-gray-800': result.action === 'skipped'
+            }">
+              {{ result.action === 'created' ? '已创建' : result.action === 'overwritten' ? '已覆盖' : '已跳过' }}
+            </span>
+          </div>
+        </div>
+
+        <button
+          @click="closeImportDialog"
+          class="w-full mt-6 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+        >
+          关闭
+        </button>
+      </div>
+    </div>
+
+    <!-- Add/Edit Provider Modal -->
+    <div v-if="showAddProvider || editingProvider" class="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+      <div class="bg-white rounded-2xl w-full max-w-md p-8 shadow-2xl">
+        <h3 class="text-xl font-bold mb-6">{{ editingProvider ? '编辑厂商配置' : '添加厂商配置' }}</h3>
+        <div class="space-y-4">
+          <div>
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">厂商名称</label>
+            <input v-model="(editingProvider || newProvider).name" type="text" placeholder="例如: GPT-4 生产线" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+          </div>
+          <div>
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">厂商类型</label>
+            <select v-model="(editingProvider || newProvider).type" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none">
+              <option value="openai">OpenAI 兼容</option>
+              <option value="anthropic">Anthropic 兼容</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">基础地址 (Base URL)</label>
+            <input v-model="(editingProvider || newProvider).baseUrl" type="text" placeholder="https://api.openai.com" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+          </div>
+          <div>
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">托管 API Key</label>
+            <input v-model="(editingProvider || newProvider).apiKey" type="password" placeholder="sk-..." class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+          </div>
+        </div>
+        <div class="flex gap-3 mt-8">
+          <button @click="showAddProvider = false; editingProvider = null" class="flex-1 px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors">取消</button>
+          <button @click="editingProvider ? updateProvider() : addProvider()" class="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-bold">保存配置</button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="showAddProviderModel" class="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+      <div class="bg-white rounded-2xl w-full max-w-md p-8 shadow-2xl">
+        <h3 class="text-xl font-bold mb-6">为厂商添加模型</h3>
+        <div class="space-y-4">
+          <div>
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">厂商</label>
+            <div class="px-4 py-2 border border-gray-200 rounded-lg bg-gray-50 text-sm font-bold text-gray-700">{{ providerModelTargetProvider?.name || '-' }}</div>
+          </div>
+          <div>
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">模型名称</label>
+            <input v-model="newProviderModelName" type="text" placeholder="例如: glm-4.7" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+          </div>
+        </div>
+        <div class="flex gap-3 mt-8">
+          <button @click="showAddProviderModel = false; providerModelTargetProvider = null; newProviderModelName = ''" class="flex-1 px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors">取消</button>
+          <button @click="addProviderModel" class="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-bold">添加</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Add/Edit App Modal -->
+    <div v-if="showAddApp || editingApp" class="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+      <div class="bg-white rounded-2xl w-full max-w-md p-8 shadow-2xl">
+        <h3 class="text-xl font-bold mb-6">{{ editingApp ? '应用配置' : '创建新应用' }}</h3>
+        <div class="space-y-4">
+          <div>
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">应用名称</label>
+            <input v-model="(editingApp || newClientApp).name" type="text" placeholder="例如: 我的应用-1" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+          </div>
+          <div>
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">绑定厂商 (Provider)</label>
+            <select v-model="(editingApp || newClientApp).providerId" @change="onClientAppProviderChange(editingApp || newClientApp)" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none">
+              <option :value="null">默认厂商 (全局生效)</option>
+              <option v-for="p in providers" :key="p.id" :value="p.id">{{ p.name }}</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">绑定模型 (Model)</label>
+            <select v-model="(editingApp || newClientApp).managedModelId" :disabled="!(editingApp || newClientApp).providerId" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none disabled:bg-gray-50 disabled:text-gray-400 disabled:cursor-not-allowed">
+              <option
+                v-for="m in getModelOptionsForProvider((editingApp || newClientApp).providerId, (editingApp || newClientApp).managedModelId)"
+                :key="m.id"
+                :value="m.id"
+              >
+                {{ m.name }}
+              </option>
+            </select>
+            <p v-if="!(editingApp || newClientApp).providerId" class="text-[10px] text-gray-400 mt-2">选择默认厂商时，模型固定为默认。</p>
+            <p v-else-if="!(editingApp || newClientApp).managedModelId" class="text-[10px] text-red-600 mt-2">已选择厂商，必须选择该厂商中的一个模型。</p>
+          </div>
+        </div>
+        <p class="text-[10px] text-gray-400 mt-4 italic">当厂商为默认时，模型固定为默认；当绑定了厂商后，才允许为该应用指定模型。</p>
+        <div class="flex gap-3 mt-8">
+          <button @click="showAddApp = false; editingApp = null" class="flex-1 px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors">取消</button>
+          <button @click="editingApp ? updateClientApp() : addClientApp()" class="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-bold">保存应用</button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="showAddAdminUser || editingAdminUser" class="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+      <div class="bg-white rounded-2xl w-full max-w-md p-8 shadow-2xl">
+        <h3 class="text-xl font-bold mb-6">{{ editingAdminUser ? '编辑用户' : '添加用户' }}</h3>
+        <div class="space-y-4">
+          <div>
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">用户名</label>
+            <input v-model="(editingAdminUser || newAdminUser).username" type="text" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+          </div>
+          <div v-if="!editingAdminUser">
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">初始密码</label>
+            <input v-model="newAdminUser.password" type="password" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+            <p class="text-[10px] text-gray-400 mt-1">用户首次登录会被要求强制修改密码。</p>
+          </div>
+          <div class="flex items-center justify-between p-3 bg-gray-50 rounded-lg border border-gray-200">
+            <div>
+              <p class="text-xs font-bold text-gray-500">状态</p>
+              <p class="text-[10px] text-gray-400">禁用后无法登录</p>
+            </div>
+            <button
+              @click="(editingAdminUser || newAdminUser).enabled = (editingAdminUser || newAdminUser).enabled ? 0 : 1"
+              :class="(editingAdminUser || newAdminUser).enabled ? 'bg-green-50 text-green-700 border-green-200' : 'bg-gray-50 text-gray-500 border-gray-200'"
+              class="px-3 py-1.5 rounded-lg border text-xs font-bold"
+            >
+              {{ (editingAdminUser || newAdminUser).enabled ? '已启用' : '已禁用' }}
+            </button>
+          </div>
+        </div>
+        <div class="flex gap-3 mt-8">
+          <button @click="showAddAdminUser = false; editingAdminUser = null" class="flex-1 px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors">取消</button>
+          <button @click="editingAdminUser ? updateAdminUser() : addAdminUser()" class="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-bold">保存用户</button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="resetPasswordUser" class="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+      <div class="bg-white rounded-2xl w-full max-w-md p-8 shadow-2xl">
+        <h3 class="text-xl font-bold mb-2">重置密码</h3>
+        <p class="text-xs text-gray-500 mb-6">用户 {{ resetPasswordUser.username }} 下次登录将强制修改密码。</p>
+        <div class="space-y-4">
+          <div>
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">新密码</label>
+            <input v-model="resetPasswordValue" type="password" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+          </div>
+        </div>
+        <div class="flex gap-3 mt-8">
+          <button @click="resetPasswordUser = null; resetPasswordValue = ''" class="flex-1 px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors">取消</button>
+          <button @click="resetAdminPassword" class="flex-1 px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 transition-colors font-bold">确认重置</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Add/Edit Model Modal -->
+    <div v-if="showAddModel" class="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+      <div class="bg-white rounded-2xl w-full max-w-md p-8 shadow-2xl">
+        <h3 class="text-xl font-bold mb-6">添加模型</h3>
+        <div class="space-y-4">
+          <div>
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">模型名称</label>
+            <input v-model="newManagedModel.name" type="text" placeholder="例如: gpt-4o 或 claude-3-5-sonnet" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+          </div>
+        </div>
+        <p class="text-[10px] text-gray-400 mt-4">注意：模型名称必须是您当前生效厂商支持的名称。</p>
+        <div class="flex gap-3 mt-8">
+          <button @click="showAddModel = false" class="flex-1 px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors">取消</button>
+          <button @click="addManagedModel" class="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-bold">保存配置</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Add/Edit Model Rule Modal -->
+    <div v-if="showAddModelRule || editingModelRule" class="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+      <div class="bg-white rounded-2xl w-full max-w-md p-8 shadow-2xl">
+        <h3 class="text-xl font-bold mb-6">{{ editingModelRule ? '编辑模型规则' : '添加模型规则' }}</h3>
+        <div class="space-y-4">
+          <div>
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">匹配模式 (支持*)</label>
+            <input v-model="(editingModelRule || newModelRule).pattern" type="text" placeholder="例如: gpt-* 或 glm-4.7" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+          </div>
+          <div>
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">转换为 (Target Model)</label>
+            <input v-model="(editingModelRule || newModelRule).targetModel" type="text" placeholder="例如: gpt-4o 或 glm-4.7" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+          </div>
+          <div>
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">优先级</label>
+            <input v-model.number="(editingModelRule || newModelRule).priority" type="number" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+          </div>
+          <div v-if="editingModelRule" class="flex items-center justify-between p-3 bg-gray-50 rounded-lg border border-gray-200">
+            <div>
+              <p class="text-xs font-bold text-gray-500">状态</p>
+              <p class="text-[10px] text-gray-400">禁用后不会参与匹配</p>
+            </div>
+            <button
+              @click="editingModelRule.enabled = editingModelRule.enabled ? 0 : 1"
+              :class="editingModelRule.enabled ? 'bg-green-50 text-green-700 border-green-200' : 'bg-gray-50 text-gray-500 border-gray-200'"
+              class="px-3 py-1.5 rounded-lg border text-xs font-bold"
+            >
+              {{ editingModelRule.enabled ? '已启用' : '已禁用' }}
+            </button>
+          </div>
+        </div>
+        <p class="text-[10px] text-gray-400 mt-4">大小写敏感；按优先级从高到低匹配，命中第一条后生效。</p>
+        <div class="flex gap-3 mt-8">
+          <button @click="showAddModelRule = false; editingModelRule = null" class="flex-1 px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors">取消</button>
+          <button @click="editingModelRule ? updateModelRule() : addModelRule()" class="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-bold">保存规则</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Log Detail Modal -->
+    <div v-if="selectedLog" class="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+      <div class="bg-white rounded-2xl w-full max-w-4xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
+        <div class="p-6 border-b border-gray-200 flex justify-between items-center">
+          <div>
+            <h3 class="text-xl font-bold">对话详情</h3>
+            <p class="text-sm text-gray-500">
+              <span v-if="!selectedLog.actualModel || selectedLog.model === selectedLog.actualModel">{{ selectedLog.model }}</span>
+              <span v-else>{{ selectedLog.model }} → {{ selectedLog.actualModel }}</span>
+              @ {{ selectedLog.providerName }}
+            </p>
+          </div>
+          <button @click="selectedLog = null" class="p-2 hover:bg-gray-100 rounded-full transition-colors">
+            <X class="w-6 h-6 text-gray-400" />
+          </button>
+        </div>
+        <div class="flex-1 overflow-auto p-6 grid grid-cols-2 gap-6">
+          <div class="col-span-2 flex gap-4 mb-2">
+            <div class="flex-1 p-3 bg-gray-50 rounded-lg border border-gray-100">
+              <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">客户端密钥</p>
+              <p class="text-sm font-medium text-purple-700">{{ selectedLog.clientKeyName || '未知' }}</p>
+            </div>
+            <div class="flex-1 p-3 bg-gray-50 rounded-lg border border-gray-100">
+              <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">生效厂商</p>
+              <p class="text-sm font-medium text-blue-700">{{ selectedLog.providerName }}</p>
+            </div>
+            <div class="flex-1 p-3 bg-gray-50 rounded-lg border border-gray-100">
+              <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">响应耗时</p>
+              <p class="text-sm font-medium text-green-700">{{ calculateDuration(selectedLog.requestAt, selectedLog.responseAt) || '计算中...' }}</p>
+            </div>
+          </div>
+          <div class="col-span-2 space-y-2 mb-2">
+            <div class="p-3 bg-gray-50 rounded-lg border border-gray-100 flex items-center gap-3">
+              <span class="px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-[10px] font-bold uppercase">客户端 URL</span>
+              <code class="text-xs text-gray-600 font-mono flex-1 truncate">{{ selectedLog.clientUrl || '-' }}</code>
+            </div>
+            <div class="p-3 bg-gray-50 rounded-lg border border-gray-100 flex items-center gap-3">
+              <span class="px-2 py-0.5 bg-green-100 text-green-700 rounded text-[10px] font-bold uppercase">代理目标 URL</span>
+              <code class="text-xs text-gray-600 font-mono flex-1 truncate">{{ selectedLog.targetUrl || '-' }}</code>
+            </div>
+          </div>
+          <div class="space-y-4">
+            <div class="flex justify-between items-center">
+              <h4 class="text-xs font-bold text-gray-400 uppercase">请求正文 (JSON)</h4>
+              <span class="text-[10px] text-gray-400 font-mono">{{ formatTime(selectedLog.requestAt) }}</span>
+            </div>
+            <pre 
+              class="bg-gray-900 text-gray-100 p-4 rounded-xl overflow-auto text-xs leading-relaxed max-h-[600px]"
+              v-html="highlightText(formatJson(selectedLog.requestBody))"
+            ></pre>
+          </div>
+          <div class="space-y-4">
+            <div class="flex justify-between items-center">
+              <h4 class="text-xs font-bold text-gray-400 uppercase">响应正文 (JSON)</h4>
+              <span v-if="selectedLog.responseAt" class="text-[10px] text-gray-400 font-mono">{{ formatTime(selectedLog.responseAt) }}</span>
+            </div>
+            <div v-if="selectedLog.status === 'waiting'" class="h-[200px] flex flex-col items-center justify-center text-gray-400 gap-4 bg-gray-50 rounded-xl border border-dashed border-gray-200">
+              <Loader2 class="w-12 h-12 animate-spin text-blue-500" />
+              <p class="animate-pulse">正在等待厂商响应...</p>
+            </div>
+            <pre 
+              v-else
+              class="bg-gray-900 text-gray-100 p-4 rounded-xl overflow-auto text-xs leading-relaxed max-h-[600px]"
+              v-html="highlightText(formatJson(selectedLog.responseBody))"
+            ></pre>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="mustChangePassword" class="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+      <div class="bg-white rounded-2xl w-full max-w-md p-8 shadow-2xl">
+        <h3 class="text-xl font-bold mb-2">请先修改密码</h3>
+        <p class="text-xs text-gray-500 mb-6">首次登录必须修改默认密码后才能继续使用管理功能。</p>
+        <div class="space-y-4">
+          <div>
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">当前密码</label>
+            <input v-model="changePasswordForm.currentPassword" type="password" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+          </div>
+          <div>
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">新密码</label>
+            <input v-model="changePasswordForm.newPassword" type="password" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+          </div>
+          <div>
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">确认新密码</label>
+            <input v-model="changePasswordForm.confirmNewPassword" type="password" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+          </div>
+        </div>
+        <button @click="changePassword" class="w-full mt-6 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-bold">
+          修改密码并继续
+        </button>
+        <button @click="logout" class="w-full mt-3 px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors font-bold text-gray-700">
+          退出登录
+        </button>
+      </div>
+    </div>
+  </div>
+</template>
+
+<style>
+@import './style.css';
+
+mark {
+  background-color: #fef08a; /* yellow-200 */
+  color: #854d0e; /* yellow-900 */
+  border-radius: 2px;
+  padding: 0 2px;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #e2e8f0;
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #cbd5e1;
+}
+</style>

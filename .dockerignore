@@ -1,0 +1,8 @@
+node_modules
+client/node_modules
+client/dist
+database.sqlite
+.git
+.DS_Store
+npm-debug.log
+client/npm-debug.log
