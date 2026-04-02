@@ -178,6 +178,8 @@ const importConflicts = ref([]);
 const importMergeStrategy = ref({});
 const importStep = ref('file');
 const importResults = ref([]);
+const showGlobalImportDialog = ref(false);
+const globalImportData = ref(null);
 
 const filteredLogs = ref([]);
 
@@ -746,6 +748,76 @@ const closeImportDialog = () => {
   showImportDialog.value = false;
 };
 
+const exportGlobalConfig = async () => {
+  try {
+    const response = await fetch(`${API_BASE}/config/export`, {
+      headers: { 'Authorization': `Bearer ${authToken.value}` }
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `llmproxy-config-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    alert('导出全局配置失败：' + err.message);
+  }
+};
+
+const openGlobalImportDialog = () => {
+  globalImportData.value = null;
+  showGlobalImportDialog.value = true;
+};
+
+const handleGlobalImportFileSelect = (e) => {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (evt) => {
+    try {
+      const data = JSON.parse(evt.target.result);
+      const config = data?.config || data?.data?.config;
+      if (!config || typeof config !== 'object') {
+        throw new Error('文件中缺少 config 字段');
+      }
+      globalImportData.value = data;
+    } catch (err) {
+      alert('解析全局配置失败：' + err.message);
+    }
+  };
+  reader.readAsText(file);
+};
+
+const doGlobalImport = async () => {
+  if (!globalImportData.value) {
+    alert('请先选择有效的全局配置文件');
+    return;
+  }
+  if (!confirm('将覆盖当前所有业务配置（厂商、模型、应用、规则），不影响管理员账号。确定继续？')) {
+    return;
+  }
+  try {
+    const response = await fetch(`${API_BASE}/config/import`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${authToken.value}`
+      },
+      body: JSON.stringify({ data: globalImportData.value })
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result?.error || `HTTP ${response.status}`);
+    await loadAllData();
+    showGlobalImportDialog.value = false;
+    alert('全局配置导入成功');
+  } catch (err) {
+    alert('导入全局配置失败：' + err.message);
+  }
+};
+
 const openEditModal = (provider) => {
   editingProvider.value = { ...provider };
 };
@@ -1009,7 +1081,7 @@ watch(activeTab, (tab) => {
   if (tab === 'models') {
     if (isAuthenticated.value) fetchManagedModels();
   }
-  if (tab === 'users') {
+  if (tab === 'config') {
     if (isAuthenticated.value) fetchAdminUsers();
   }
   if (tab === 'logs') {
@@ -1157,11 +1229,11 @@ onUnmounted(() => {
           统计
         </button>
         <button 
-          @click="activeTab = 'users'"
-          :class="['w-full flex items-center gap-3 px-4 py-2 rounded-lg transition-colors', activeTab === 'users' ? 'bg-blue-50 text-blue-600' : 'hover:bg-gray-100']"
+          @click="activeTab = 'config'"
+          :class="['w-full flex items-center gap-3 px-4 py-2 rounded-lg transition-colors', activeTab === 'config' ? 'bg-blue-50 text-blue-600' : 'hover:bg-gray-100']"
         >
           <Users class="w-5 h-5" />
-          用户管理
+          配置管理
         </button>
         <button 
           @click="activeTab = 'help'"
@@ -1196,7 +1268,7 @@ onUnmounted(() => {
           >
             <Menu class="w-5 h-5" />
           </button>
-          <h2 class="text-base sm:text-lg font-semibold truncate">{{ activeTab === 'providers' ? '厂商配置' : (activeTab === 'keys' ? '应用管理' : (activeTab === 'models' ? '模型管理' : (activeTab === 'modelRules' ? '模型规则' : (activeTab === 'stats' ? '统计' : (activeTab === 'users' ? '用户管理' : (activeTab === 'help' ? '客户端帮助' : '对话历史')))))) }}</h2>
+          <h2 class="text-base sm:text-lg font-semibold truncate">{{ activeTab === 'providers' ? '厂商配置' : (activeTab === 'keys' ? '应用管理' : (activeTab === 'models' ? '模型管理' : (activeTab === 'modelRules' ? '模型规则' : (activeTab === 'stats' ? '统计' : (activeTab === 'config' ? '配置管理' : (activeTab === 'help' ? '客户端帮助' : '对话历史')))))) }}</h2>
         </div>
         <div class="flex items-center gap-4">
           <div v-if="activeTab === 'logs'" class="relative hidden md:block">
@@ -1788,7 +1860,32 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <div v-if="activeTab === 'users'" class="space-y-6">
+        <div v-if="activeTab === 'config'" class="space-y-6">
+          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+            <div class="flex flex-col lg:flex-row gap-4 lg:items-center lg:justify-between">
+              <div>
+                <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">全局配置导入/导出</h3>
+                <p class="text-xs text-gray-400 mt-1">可导入导出厂商、模型、应用、模型规则等业务配置，不包含管理员用户名和密码。</p>
+              </div>
+              <div class="flex flex-wrap gap-2">
+                <button
+                  @click="exportGlobalConfig"
+                  class="flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-sm border border-gray-200"
+                >
+                  <Download class="w-4 h-4" />
+                  导出全局配置
+                </button>
+                <button
+                  @click="openGlobalImportDialog"
+                  class="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
+                >
+                  <Upload class="w-4 h-4" />
+                  导入全局配置
+                </button>
+              </div>
+            </div>
+          </div>
+
           <div class="flex flex-col sm:flex-row gap-3 sm:justify-between sm:items-center">
             <div class="space-y-1">
               <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">用户管理</h3>
@@ -2168,6 +2265,44 @@ onUnmounted(() => {
         >
           关闭
         </button>
+      </div>
+    </div>
+
+    <!-- 全局配置导入对话框 -->
+    <div v-if="showGlobalImportDialog" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+      <div class="bg-white rounded-xl shadow-xl max-w-lg w-full p-6">
+        <h3 class="text-lg font-semibold text-gray-900 mb-2">导入全局配置</h3>
+        <p class="text-sm text-gray-600 mb-4">将覆盖当前业务配置（厂商、模型、应用、规则），不影响管理员用户名和密码。</p>
+
+        <div class="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 mb-4">
+          导入前建议先执行“导出全局配置”作为备份。
+        </div>
+
+        <input
+          type="file"
+          accept=".json"
+          @change="handleGlobalImportFileSelect"
+          class="block w-full text-sm text-gray-700 file:mr-3 file:px-3 file:py-2 file:rounded-lg file:border-0 file:bg-gray-100 file:text-gray-700 hover:file:bg-gray-200"
+        />
+        <p class="text-xs text-gray-500 mt-2">
+          {{ globalImportData ? '已选择并解析配置文件，可执行导入。' : '请选择导出的全局配置 JSON 文件。' }}
+        </p>
+
+        <div class="flex gap-3 mt-6">
+          <button
+            @click="doGlobalImport"
+            :disabled="!globalImportData"
+            class="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            确认导入
+          </button>
+          <button
+            @click="showGlobalImportDialog = false"
+            class="flex-1 px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
+          >
+            取消
+          </button>
+        </div>
       </div>
     </div>
 

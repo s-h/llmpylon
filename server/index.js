@@ -536,6 +536,120 @@ app.post('/api/providers/import', async (req, res) => {
     res.json({ results });
 });
 
+// 导出全局配置（不包含管理员用户/密码）
+app.get('/api/config/export', async (req, res) => {
+    const providers = await db.all(
+        'SELECT id, name, type, baseUrl, apiKey, defaultModelId, active FROM providers ORDER BY id ASC'
+    );
+    const managedModels = await db.all(
+        'SELECT id, name, active FROM managed_models ORDER BY id ASC'
+    );
+    const providerModels = await db.all(
+        'SELECT providerId, modelId FROM provider_models ORDER BY providerId ASC, modelId ASC'
+    );
+    const apps = await db.all(
+        'SELECT id, name, key, enabled, providerId, managedModelId FROM client_keys ORDER BY id ASC'
+    );
+    const modelRules = await db.all(
+        'SELECT id, pattern, targetModel, priority, enabled FROM model_rules ORDER BY priority DESC, id ASC'
+    );
+
+    res.json({
+        version: '1.0',
+        exportedAt: new Date().toISOString(),
+        config: {
+            providers,
+            managedModels,
+            providerModels,
+            apps,
+            modelRules
+        }
+    });
+});
+
+// 导入全局配置（覆盖当前配置，不包含管理员用户/密码）
+app.post('/api/config/import', async (req, res) => {
+    const payload = req.body?.data?.config || req.body?.config;
+    if (!payload || typeof payload !== 'object') {
+        return res.status(400).json({ error: 'Invalid data format' });
+    }
+
+    const providers = Array.isArray(payload.providers) ? payload.providers : [];
+    const managedModels = Array.isArray(payload.managedModels) ? payload.managedModels : [];
+    const providerModels = Array.isArray(payload.providerModels) ? payload.providerModels : [];
+    const apps = Array.isArray(payload.apps) ? payload.apps : [];
+    const modelRules = Array.isArray(payload.modelRules) ? payload.modelRules : [];
+
+    try {
+        await db.exec('BEGIN TRANSACTION');
+
+        // 清理旧配置（保留 admin_users/admin_sessions/conversation_logs/stats_events）
+        await db.run('UPDATE providers SET defaultModelId = NULL');
+        await db.run('DELETE FROM provider_models');
+        await db.run('DELETE FROM client_keys');
+        await db.run('DELETE FROM model_rules');
+        await db.run('DELETE FROM providers');
+        await db.run('DELETE FROM managed_models');
+
+        for (const m of managedModels) {
+            await db.run(
+                'INSERT INTO managed_models (id, name, active) VALUES (?, ?, ?)',
+                [m.id, m.name, m.active ? 1 : 0]
+            );
+        }
+
+        for (const p of providers) {
+            await db.run(
+                'INSERT INTO providers (id, name, type, baseUrl, apiKey, defaultModelId, active) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                [p.id, p.name, p.type, p.baseUrl, p.apiKey || null, p.defaultModelId || null, p.active ? 1 : 0]
+            );
+        }
+
+        for (const pm of providerModels) {
+            await db.run(
+                'INSERT OR IGNORE INTO provider_models (providerId, modelId) VALUES (?, ?)',
+                [pm.providerId, pm.modelId]
+            );
+        }
+
+        for (const a of apps) {
+            await db.run(
+                'INSERT INTO client_keys (id, name, key, enabled, providerId, managedModelId) VALUES (?, ?, ?, ?, ?, ?)',
+                [a.id, a.name, a.key, a.enabled ? 1 : 0, a.providerId || null, a.managedModelId || null]
+            );
+        }
+
+        for (const r of modelRules) {
+            await db.run(
+                'INSERT INTO model_rules (id, pattern, targetModel, priority, enabled) VALUES (?, ?, ?, ?, ?)',
+                [r.id, r.pattern, r.targetModel, Number.isFinite(Number(r.priority)) ? Number(r.priority) : 0, r.enabled ? 1 : 0]
+            );
+        }
+
+        // 保证最多一个 active provider
+        const activeProviders = await db.all('SELECT id FROM providers WHERE active = 1 ORDER BY id ASC');
+        if (activeProviders.length > 1) {
+            const keepId = activeProviders[0].id;
+            await db.run('UPDATE providers SET active = 0 WHERE id <> ?', [keepId]);
+        }
+
+        await db.exec('COMMIT');
+        res.json({
+            ok: true,
+            counts: {
+                providers: providers.length,
+                managedModels: managedModels.length,
+                providerModels: providerModels.length,
+                apps: apps.length,
+                modelRules: modelRules.length
+            }
+        });
+    } catch (err) {
+        await db.exec('ROLLBACK');
+        res.status(500).json({ error: err.message || 'Import failed' });
+    }
+});
+
 // Client Keys API (Now Apps API)
 app.get('/api/keys', async (req, res) => {
     const keys = await db.all('SELECT * FROM client_keys');
