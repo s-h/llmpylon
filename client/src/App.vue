@@ -26,6 +26,7 @@ import {
   Users,
   BookOpen,
   X,
+  Menu,
   ShieldCheck,
   ShieldAlert,
   Pencil,
@@ -149,9 +150,20 @@ const logsPageSize = ref(50);
 const logsTotal = ref(0);
 const logsTotalPages = ref(1);
 const hasNewLogs = ref(false);
+const mobileMenuOpen = ref(false);
+const isMobileViewport = ref(window.innerWidth < 1024);
 
 const proxyHealth = ref({ status: 'unknown', lastCheckAt: null });
 let proxyHealthTimer = null;
+let resizeTimer = null;
+
+const handleWindowResize = () => {
+  if (resizeTimer) clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    isMobileViewport.value = window.innerWidth < 1024;
+    if (!isMobileViewport.value) mobileMenuOpen.value = false;
+  }, 120);
+};
 
 const showAddProviderModel = ref(false);
 const providerModelTargetProvider = ref(null);
@@ -248,6 +260,10 @@ const getModelOptionsForProvider = (providerId, selectedModelId) => {
 
 const updateFilteredLogs = () => {
   filteredLogs.value = logs.value;
+};
+
+const closeSidebarIfMobile = () => {
+  if (isMobileViewport.value) mobileMenuOpen.value = false;
 };
 
 const handleLogUpdate = (data) => {
@@ -971,14 +987,19 @@ const formatJson = (str) => {
 };
 
 onMounted(async () => {
+  window.addEventListener('resize', handleWindowResize);
+  handleWindowResize();
+
   const ok = await checkAuth();
   if (ok && !mustChangePassword.value) {
     await loadAllData();
   }
   startProxyHealthPolling();
+
 });
 
 watch(activeTab, (tab) => {
+  closeSidebarIfMobile();
   if (tab === 'stats') {
     if (isAuthenticated.value) fetchStats();
   }
@@ -1013,6 +1034,8 @@ watch(isAuthenticated, () => {
 });
 
 onUnmounted(() => {
+  window.removeEventListener('resize', handleWindowResize);
+  if (resizeTimer) clearTimeout(resizeTimer);
   disconnectSocket();
   stopProxyHealthPolling();
 });
@@ -1045,9 +1068,19 @@ onUnmounted(() => {
     </div>
   </div>
 
-  <div v-else class="flex h-screen bg-gray-50 text-gray-900">
+  <div v-else class="relative flex h-screen bg-gray-50 text-gray-900 overflow-hidden">
+    <div
+      v-if="mobileMenuOpen"
+      class="fixed inset-0 z-30 bg-black/40 lg:hidden"
+      @click="mobileMenuOpen = false"
+    ></div>
     <!-- Sidebar -->
-    <div class="w-64 bg-white border-r border-gray-200 flex flex-col">
+    <div
+      :class="[
+        'w-64 bg-white border-r border-gray-200 flex flex-col fixed inset-y-0 left-0 z-40 transform transition-transform duration-200 lg:static lg:translate-x-0',
+        mobileMenuOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'
+      ]"
+    >
       <div class="p-6 border-b border-gray-200">
         <h1 class="text-xl font-bold flex items-center gap-2">
           <Settings class="w-6 h-6 text-blue-600" />
@@ -1155,10 +1188,18 @@ onUnmounted(() => {
 
     <!-- Main Content -->
     <div class="flex-1 flex flex-col overflow-hidden">
-      <header class="h-16 bg-white border-b border-gray-200 flex items-center justify-between px-8">
-        <h2 class="text-lg font-semibold">{{ activeTab === 'providers' ? '厂商配置' : (activeTab === 'keys' ? '应用管理' : (activeTab === 'models' ? '模型管理' : (activeTab === 'modelRules' ? '模型规则' : (activeTab === 'stats' ? '统计' : (activeTab === 'users' ? '用户管理' : (activeTab === 'help' ? '客户端帮助' : '对话历史')))))) }}</h2>
+      <header class="h-16 bg-white border-b border-gray-200 flex items-center justify-between px-4 sm:px-6 lg:px-8">
+        <div class="flex items-center gap-3 min-w-0">
+          <button
+            @click="mobileMenuOpen = true"
+            class="inline-flex lg:hidden p-2 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50"
+          >
+            <Menu class="w-5 h-5" />
+          </button>
+          <h2 class="text-base sm:text-lg font-semibold truncate">{{ activeTab === 'providers' ? '厂商配置' : (activeTab === 'keys' ? '应用管理' : (activeTab === 'models' ? '模型管理' : (activeTab === 'modelRules' ? '模型规则' : (activeTab === 'stats' ? '统计' : (activeTab === 'users' ? '用户管理' : (activeTab === 'help' ? '客户端帮助' : '对话历史')))))) }}</h2>
+        </div>
         <div class="flex items-center gap-4">
-          <div v-if="activeTab === 'logs'" class="relative">
+          <div v-if="activeTab === 'logs'" class="relative hidden md:block">
             <Search class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
             <input 
               v-model="searchQuery"
@@ -1167,16 +1208,16 @@ onUnmounted(() => {
               class="pl-10 pr-4 py-2 bg-gray-100 border-none rounded-lg focus:ring-2 focus:ring-blue-500 text-sm w-64"
             />
           </div>
-          <div class="flex items-center gap-3">
-            <span class="text-xs font-bold text-gray-500">{{ authUser?.username }}</span>
-            <button @click="logout" class="px-3 py-1.5 text-xs font-bold rounded-lg border border-gray-200 hover:bg-gray-50 transition-colors">
+          <div class="flex items-center gap-2 sm:gap-3">
+            <span class="hidden sm:inline text-xs font-bold text-gray-500">{{ authUser?.username }}</span>
+            <button @click="logout" class="px-2.5 sm:px-3 py-1.5 text-xs font-bold rounded-lg border border-gray-200 hover:bg-gray-50 transition-colors whitespace-nowrap">
               退出登录
             </button>
           </div>
         </div>
       </header>
 
-      <main class="flex-1 overflow-auto p-8">
+      <main class="flex-1 overflow-auto p-4 sm:p-6 lg:p-8">
         <div v-if="activeTab === 'help'" class="space-y-6">
           <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-8">
             <h3 class="text-lg font-bold text-gray-900 mb-2">快速开始</h3>
@@ -1254,9 +1295,9 @@ onUnmounted(() => {
 
         <!-- Providers View -->
         <div v-if="activeTab === 'providers'" class="space-y-6">
-          <div class="flex justify-between items-center">
+          <div class="flex flex-col sm:flex-row gap-3 sm:gap-4 sm:justify-between sm:items-center">
             <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">当前已添加的厂商</h3>
-            <div class="flex gap-2">
+            <div class="flex flex-wrap gap-2">
               <button
                 @click="openExportDialog"
                 class="flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-sm border border-gray-200"
@@ -1362,7 +1403,7 @@ onUnmounted(() => {
 
         <!-- Apps View (Renamed from Keys) -->
         <div v-if="activeTab === 'keys'" class="space-y-6">
-          <div class="flex justify-between items-center">
+          <div class="flex flex-col sm:flex-row gap-3 sm:justify-between sm:items-center">
             <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">应用管理</h3>
             <button 
               @click="showAddApp = true"
@@ -1374,7 +1415,8 @@ onUnmounted(() => {
           </div>
 
           <div class="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
-            <table class="w-full text-left text-sm">
+            <div class="overflow-x-auto">
+            <table class="w-full min-w-[680px] text-left text-sm">
               <thead class="bg-gray-50 border-b border-gray-200">
                 <tr>
                   <th class="px-6 py-4 font-semibold text-gray-600">应用名称</th>
@@ -1429,12 +1471,13 @@ onUnmounted(() => {
                 </tr>
               </tbody>
             </table>
+            </div>
           </div>
         </div>
 
         <!-- Models View -->
         <div v-if="activeTab === 'models'" class="space-y-6">
-          <div class="flex justify-between items-center">
+          <div class="flex flex-col sm:flex-row gap-3 sm:justify-between sm:items-center">
             <div class="space-y-1">
               <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">当前厂商模型管理</h3>
               <p class="text-[10px] text-gray-400">当前生效厂商：{{ activeProvider?.name || '-' }}（在此页面选择的默认模型会被记住并用于 llmproxy）</p>
@@ -1504,7 +1547,8 @@ onUnmounted(() => {
           </div>
 
           <div class="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
-            <table class="w-full text-left text-sm">
+            <div class="overflow-x-auto">
+            <table class="w-full min-w-[720px] text-left text-sm">
               <thead class="bg-gray-50 border-b border-gray-200">
                 <tr>
                   <th class="px-6 py-4 font-semibold text-gray-600">优先级</th>
@@ -1562,13 +1606,14 @@ onUnmounted(() => {
                 </tr>
               </tbody>
             </table>
+            </div>
           </div>
         </div>
 
         <!-- Stats View -->
         <div v-if="activeTab === 'stats'" class="space-y-6">
-          <div class="flex justify-between items-center">
-            <div class="flex items-center gap-3">
+          <div class="flex flex-col lg:flex-row gap-3 lg:justify-between lg:items-center">
+            <div class="flex flex-wrap items-center gap-2 sm:gap-3">
               <button
                 @click="statsRange = '7d'"
                 :class="['px-3 py-1 rounded-full text-xs font-bold transition-all border', statsRange === '7d' ? 'bg-gray-900 text-white border-gray-900' : 'bg-white text-gray-600 border-gray-200 hover:border-gray-400']"
@@ -1593,7 +1638,7 @@ onUnmounted(() => {
               >
                 全部时间
               </button>
-              <div class="flex items-center gap-2 ml-2">
+              <div class="flex items-center gap-2 sm:ml-2">
                 <span class="text-xs font-bold text-gray-400 uppercase">厂商</span>
                 <select v-model="statsProviderId" class="px-3 py-1.5 border border-gray-200 rounded-lg bg-white text-xs font-bold text-gray-700">
                   <option value="all">全部</option>
@@ -1604,7 +1649,7 @@ onUnmounted(() => {
             </div>
             <button
               @click="fetchStats"
-              class="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm font-bold"
+              class="self-start lg:self-auto flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm font-bold"
             >
               <Clock class="w-4 h-4" />
               刷新
@@ -1684,7 +1729,8 @@ onUnmounted(() => {
                 <div class="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
                   <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">慢请求 Top 10</h3>
                 </div>
-                <table class="w-full text-left text-sm">
+                <div class="overflow-x-auto">
+                <table class="w-full min-w-[640px] text-left text-sm">
                   <thead class="bg-gray-50 border-b border-gray-200">
                     <tr>
                       <th class="px-6 py-3 font-semibold text-gray-600">应用</th>
@@ -1708,12 +1754,14 @@ onUnmounted(() => {
                     </tr>
                   </tbody>
                 </table>
+                </div>
               </div>
               <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
                 <div class="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
                   <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">错误 Top 10（最近）</h3>
                 </div>
-                <table class="w-full text-left text-sm">
+                <div class="overflow-x-auto">
+                <table class="w-full min-w-[700px] text-left text-sm">
                   <thead class="bg-gray-50 border-b border-gray-200">
                     <tr>
                       <th class="px-6 py-3 font-semibold text-gray-600">时间</th>
@@ -1734,13 +1782,14 @@ onUnmounted(() => {
                     </tr>
                   </tbody>
                 </table>
+                </div>
               </div>
             </div>
           </div>
         </div>
 
         <div v-if="activeTab === 'users'" class="space-y-6">
-          <div class="flex justify-between items-center">
+          <div class="flex flex-col sm:flex-row gap-3 sm:justify-between sm:items-center">
             <div class="space-y-1">
               <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">用户管理</h3>
               <p class="text-[10px] text-gray-400">首次登录默认用户必须修改密码；支持创建/禁用/重置密码。</p>
@@ -1755,7 +1804,8 @@ onUnmounted(() => {
           </div>
 
           <div class="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
-            <table class="w-full text-left text-sm">
+            <div class="overflow-x-auto">
+            <table class="w-full min-w-[760px] text-left text-sm">
               <thead class="bg-gray-50 border-b border-gray-200">
                 <tr>
                   <th class="px-6 py-4 font-semibold text-gray-600">用户名</th>
@@ -1816,12 +1866,13 @@ onUnmounted(() => {
                 </tr>
               </tbody>
             </table>
+            </div>
           </div>
         </div>
 
         <!-- Logs View -->
         <div v-if="activeTab === 'logs'" class="space-y-4">
-          <div class="flex justify-between items-center mb-4">
+          <div class="flex flex-col lg:flex-row gap-3 lg:justify-between lg:items-center mb-4">
             <div class="flex flex-col gap-2">
               <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">对话历史记录</h3>
               <div class="flex flex-wrap gap-2">
@@ -1858,7 +1909,8 @@ onUnmounted(() => {
             </button>
           </div>
           <div class="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
-            <table class="w-full text-left text-sm">
+            <div class="overflow-x-auto">
+            <table class="w-full min-w-[920px] text-left text-sm">
               <thead class="bg-gray-50 border-b border-gray-200">
                 <tr>
                   <th class="px-6 py-4 font-semibold text-gray-600">时间</th>
@@ -1922,9 +1974,10 @@ onUnmounted(() => {
                 </tr>
               </tbody>
             </table>
+            </div>
           </div>
-          <div class="flex items-center justify-between bg-white rounded-xl border border-gray-200 shadow-sm px-6 py-4">
-            <div class="flex items-center gap-3 text-xs text-gray-500">
+          <div class="flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between bg-white rounded-xl border border-gray-200 shadow-sm px-4 sm:px-6 py-4">
+            <div class="flex flex-wrap items-center gap-3 text-xs text-gray-500">
               <span>总计 {{ logsTotal }} 条</span>
               <div class="flex items-center gap-2">
                 <span>每页</span>
@@ -2333,8 +2386,8 @@ onUnmounted(() => {
             <X class="w-6 h-6 text-gray-400" />
           </button>
         </div>
-        <div class="flex-1 overflow-auto p-6 grid grid-cols-2 gap-6">
-          <div class="col-span-2 flex gap-4 mb-2">
+        <div class="flex-1 overflow-auto p-4 sm:p-6 grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div class="lg:col-span-2 flex flex-col sm:flex-row gap-4 mb-2">
             <div class="flex-1 p-3 bg-gray-50 rounded-lg border border-gray-100">
               <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">客户端密钥</p>
               <p class="text-sm font-medium text-purple-700">{{ selectedLog.clientKeyName || '未知' }}</p>
@@ -2348,7 +2401,7 @@ onUnmounted(() => {
               <p class="text-sm font-medium text-green-700">{{ calculateDuration(selectedLog.requestAt, selectedLog.responseAt) || '计算中...' }}</p>
             </div>
           </div>
-          <div class="col-span-2 space-y-2 mb-2">
+          <div class="lg:col-span-2 space-y-2 mb-2">
             <div class="p-3 bg-gray-50 rounded-lg border border-gray-100 flex items-center gap-3">
               <span class="px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-[10px] font-bold uppercase">客户端 URL</span>
               <code class="text-xs text-gray-600 font-mono flex-1 truncate">{{ selectedLog.clientUrl || '-' }}</code>
