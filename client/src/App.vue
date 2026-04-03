@@ -271,7 +271,11 @@ const closeSidebarIfMobile = () => {
 const handleLogUpdate = (data) => {
   const index = logs.value.findIndex(l => l.id === data.id);
   if (index !== -1) {
-    const updatedLog = { ...logs.value[index], ...data };
+    const current = logs.value[index];
+    const nextResponseBody = data.appendResponseChunk
+      ? `${current.responseBody || ''}${data.streamChunk || ''}`
+      : (data.responseBody !== undefined ? data.responseBody : current.responseBody);
+    const updatedLog = { ...current, ...data, responseBody: nextResponseBody };
     logs.value.splice(index, 1, updatedLog);
     updateFilteredLogs();
     if (selectedLog.value && selectedLog.value.id === data.id) {
@@ -2561,11 +2565,11 @@ onUnmounted(() => {
               <h4 class="text-xs font-bold text-gray-400 uppercase">响应正文 (JSON)</h4>
               <span v-if="selectedLog.responseAt" class="text-[10px] text-gray-400 font-mono">{{ formatTime(selectedLog.responseAt) }}</span>
             </div>
-            <div v-if="selectedLog.status === 'waiting'" class="h-[200px] flex flex-col items-center justify-center text-gray-400 gap-4 bg-gray-50 rounded-xl border border-dashed border-gray-200">
+            <div v-if="selectedLog.status === 'waiting' && !selectedLog.responseBody" class="h-[200px] flex flex-col items-center justify-center text-gray-400 gap-4 bg-gray-50 rounded-xl border border-dashed border-gray-200">
               <Loader2 class="w-12 h-12 animate-spin text-blue-500" />
               <p class="animate-pulse">正在等待厂商响应...</p>
             </div>
-            <pre 
+            <pre
               v-else
               class="bg-gray-900 text-gray-100 p-4 rounded-xl overflow-auto text-xs leading-relaxed max-h-[600px]"
               v-html="highlightText(formatJson(selectedLog.responseBody))"

@@ -1233,6 +1233,209 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
     io.to('admins').emit('log_update', { id: logId, status: 'waiting', providerName: provider.name, clientKeyId: clientKeyData.id, clientKeyName: clientKeyData.name, requestAt, clientUrl, actualModel });
 
     let targetUrl = '';
+    if (stream) {
+        try {
+            let targetBody = { ...req.body, model: actualModel };
+            let upstreamHeaders = {};
+
+            if (provider.type === 'openai') {
+                if (isClientAnthropic && !isClientOpenAI) {
+                    const msg = 'Streaming protocol conversion (Anthropic -> OpenAI) is not supported';
+                    const responseAt = new Date().toISOString();
+                    await db.run(
+                        'UPDATE conversation_logs SET responseBody = ?, status = ?, responseAt = ?, targetUrl = ? WHERE id = ?',
+                        [msg, 'error', responseAt, targetUrl, logId]
+                    );
+                    io.to('admins').emit('log_update', { id: logId, status: 'error', responseBody: msg, responseAt, targetUrl });
+                    return res.status(400).json({ error: msg });
+                }
+                targetUrl = provider.baseUrl.replace(/\/+$/, '');
+                if (pathSuffix === '/' || pathSuffix === '/chat/completions' || pathSuffix === '/completions') {
+                    if (!targetUrl.match(/\/v\d+$/) && !targetUrl.match(/\/v\d+\/.*$/)) {
+                        if (!targetUrl.endsWith('/v1')) targetUrl += '/v1';
+                    }
+                    targetUrl += '/chat/completions';
+                } else {
+                    targetUrl += pathSuffix;
+                }
+                upstreamHeaders = {
+                    'Authorization': `Bearer ${provider.apiKey}`,
+                    'Content-Type': 'application/json',
+                    'Accept': 'text/event-stream'
+                };
+            } else if (provider.type === 'anthropic') {
+                if (isClientOpenAI || !isClientAnthropic) {
+                    const msg = 'Streaming protocol conversion (OpenAI -> Anthropic) is not supported';
+                    const responseAt = new Date().toISOString();
+                    await db.run(
+                        'UPDATE conversation_logs SET responseBody = ?, status = ?, responseAt = ?, targetUrl = ? WHERE id = ?',
+                        [msg, 'error', responseAt, targetUrl, logId]
+                    );
+                    io.to('admins').emit('log_update', { id: logId, status: 'error', responseBody: msg, responseAt, targetUrl });
+                    return res.status(400).json({ error: msg });
+                }
+                targetUrl = provider.baseUrl.replace(/\/+$/, '');
+                if (pathSuffix === '/' || pathSuffix === '/messages') {
+                    if (!targetUrl.match(/\/v\d+$/) && !targetUrl.match(/\/v\d+\/.*$/)) {
+                        if (!targetUrl.endsWith('/v1')) targetUrl += '/v1';
+                    }
+                    targetUrl += '/messages';
+                } else {
+                    targetUrl += pathSuffix;
+                }
+                upstreamHeaders = {
+                    'x-api-key': provider.apiKey,
+                    'anthropic-version': req.headers['anthropic-version'] || '2023-06-01',
+                    'content-type': 'application/json',
+                    'accept': 'text/event-stream'
+                };
+                if (req.headers['anthropic-beta']) {
+                    upstreamHeaders['anthropic-beta'] = req.headers['anthropic-beta'];
+                }
+            } else {
+                return res.status(400).json({ error: `Unsupported provider type: ${provider.type}` });
+            }
+
+            if (req.headers['user-agent']) {
+                upstreamHeaders['User-Agent'] = req.headers['user-agent'];
+            }
+
+            const upstream = await axiosInstance.post(targetUrl, targetBody, {
+                headers: upstreamHeaders,
+                responseType: 'stream',
+                validateStatus: () => true
+            });
+
+            res.status(upstream.status);
+            const passHeaders = [
+                'content-type',
+                'cache-control',
+                'connection',
+                'transfer-encoding',
+                'x-request-id',
+                'anthropic-request-id'
+            ];
+            for (const h of passHeaders) {
+                if (upstream.headers[h]) {
+                    res.setHeader(h, upstream.headers[h]);
+                }
+            }
+
+            let responseData = '';
+            let pendingChunkForLog = '';
+            let lastEmitTs = 0;
+            const emitPendingChunk = () => {
+                if (!pendingChunkForLog) return;
+                io.to('admins').emit('log_update', {
+                    id: logId,
+                    status: 'waiting',
+                    targetUrl,
+                    appendResponseChunk: true,
+                    streamChunk: pendingChunkForLog
+                });
+                pendingChunkForLog = '';
+                lastEmitTs = Date.now();
+            };
+
+            await new Promise((resolve, reject) => {
+                const src = upstream.data;
+                let ended = false;
+
+                src.on('data', (chunk) => {
+                    const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
+                    responseData += text;
+                    pendingChunkForLog += text;
+                    res.write(chunk);
+                    if (Date.now() - lastEmitTs > 180) emitPendingChunk();
+                });
+
+                src.on('end', () => {
+                    ended = true;
+                    emitPendingChunk();
+                    resolve();
+                });
+
+                src.on('error', (err) => {
+                    if (ended) return;
+                    reject(err);
+                });
+
+                res.on('close', () => {
+                    if (!res.writableEnded) {
+                        src.destroy(new Error('Client disconnected'));
+                    }
+                });
+            });
+
+            if (!res.writableEnded) {
+                res.end();
+            }
+
+            const responseAt = new Date().toISOString();
+            const status = upstream.status >= 200 && upstream.status < 300 ? 'completed' : 'error';
+            await db.run(
+                'UPDATE conversation_logs SET responseBody = ?, status = ?, responseAt = ?, targetUrl = ? WHERE id = ?',
+                [responseData, status, responseAt, targetUrl, logId]
+            );
+
+            const latencyMs = new Date(responseAt) - new Date(requestAt);
+            const usage = extractUsage(responseData);
+            await db.run(
+                `INSERT INTO stats_events (appId, providerId, requestedModel, actualModel, status, requestAt, responseAt, latencyMs, tokensIn, tokensOut, tokensTotal, errorMessage)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [
+                    clientKeyData.id,
+                    provider.id,
+                    model || 'unknown',
+                    actualModel || null,
+                    status,
+                    requestAt,
+                    responseAt,
+                    Number.isFinite(latencyMs) ? latencyMs : null,
+                    usage.tokensIn,
+                    usage.tokensOut,
+                    usage.tokensTotal,
+                    status === 'error' ? `Upstream status ${upstream.status}` : null
+                ]
+            );
+
+            io.to('admins').emit('log_update', { id: logId, status, responseBody: responseData, responseAt, targetUrl });
+            return;
+        } catch (error) {
+            const responseAt = new Date().toISOString();
+            const errorBody = error?.message || 'Streaming proxy failed';
+            await db.run(
+                'UPDATE conversation_logs SET responseBody = ?, status = ?, responseAt = ?, targetUrl = ? WHERE id = ?',
+                [errorBody, 'error', responseAt, targetUrl || error.config?.url, logId]
+            );
+            const latencyMs = new Date(responseAt) - new Date(requestAt);
+            await db.run(
+                `INSERT INTO stats_events (appId, providerId, requestedModel, actualModel, status, requestAt, responseAt, latencyMs, tokensIn, tokensOut, tokensTotal, errorMessage)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [
+                    clientKeyData.id,
+                    provider.id,
+                    model || 'unknown',
+                    actualModel || null,
+                    'error',
+                    requestAt,
+                    responseAt,
+                    Number.isFinite(latencyMs) ? latencyMs : null,
+                    0,
+                    0,
+                    0,
+                    error?.message || 'Streaming proxy failed'
+                ]
+            );
+            io.to('admins').emit('log_update', { id: logId, status: 'error', responseBody: errorBody, responseAt, targetUrl: targetUrl || error.config?.url });
+            if (!res.headersSent) {
+                return res.status(error.response?.status || 500).json(error.response?.data || { error: errorBody });
+            }
+            if (!res.writableEnded) res.end();
+            return;
+        }
+    }
+
     try {
         let response;
         if (provider.type === 'openai') {
