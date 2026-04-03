@@ -156,6 +156,7 @@ const isMobileViewport = ref(window.innerWidth < 1024);
 const proxyHealth = ref({ status: 'unknown', lastCheckAt: null });
 let proxyHealthTimer = null;
 let resizeTimer = null;
+let durationTimer = null;
 
 const handleWindowResize = () => {
   if (resizeTimer) clearTimeout(resizeTimer);
@@ -180,6 +181,7 @@ const importStep = ref('file');
 const importResults = ref([]);
 const showGlobalImportDialog = ref(false);
 const globalImportData = ref(null);
+const nowMs = ref(Date.now());
 
 const filteredLogs = ref([]);
 
@@ -754,7 +756,9 @@ const closeImportDialog = () => {
 
 const exportGlobalConfig = async () => {
   try {
-    const response = await fetch(`${API_BASE}/config/export`, {
+    if (!confirm('确认导出全局配置吗？')) return;
+    const includeSecrets = confirm('是否包含厂商 API Key 和应用密钥？\n选择“取消”则导出时自动清空密钥字段。');
+    const response = await fetch(`${API_BASE}/config/export?includeSecrets=${includeSecrets ? 1 : 0}`, {
       headers: { 'Authorization': `Bearer ${authToken.value}` }
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -1018,10 +1022,41 @@ const formatTime = (dateStr) => {
 
 const calculateDuration = (start, end) => {
   const startDate = parseDate(start);
-  const endDate = parseDate(end);
-  if (!startDate || !endDate) return null;
+  const endDate = parseDate(end) || new Date(nowMs.value);
+  if (!startDate) return null;
   const duration = endDate - startDate;
   return (duration / 1000).toFixed(2) + 's';
+};
+
+const formatStreamResponseBody = (str) => {
+  if (!str || (!str.includes('event:') && !str.includes('data:'))) return null;
+  const chunks = [];
+  for (const line of str.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('data:')) continue;
+    const dataStr = trimmed.replace(/^data:\s*/, '').trim();
+    if (!dataStr || dataStr === '[DONE]') continue;
+    try {
+      const obj = JSON.parse(dataStr);
+      const thinking = obj?.delta?.thinking;
+      const anthropicText = obj?.delta?.text;
+      const openaiText = obj?.choices?.[0]?.delta?.content;
+      const outputText = obj?.content_block?.text;
+      if (typeof thinking === 'string' && thinking) chunks.push(thinking);
+      else if (typeof anthropicText === 'string' && anthropicText) chunks.push(anthropicText);
+      else if (typeof openaiText === 'string' && openaiText) chunks.push(openaiText);
+      else if (typeof outputText === 'string' && outputText) chunks.push(outputText);
+    } catch {
+      chunks.push(dataStr);
+    }
+  }
+  return chunks.length ? chunks.join('') : null;
+};
+
+const formatResponseForDisplay = (str) => {
+  const streamText = formatStreamResponseBody(str);
+  if (streamText) return streamText;
+  return formatJson(str);
 };
 
 const formatJson = (str) => {
@@ -1065,6 +1100,9 @@ const formatJson = (str) => {
 onMounted(async () => {
   window.addEventListener('resize', handleWindowResize);
   handleWindowResize();
+  durationTimer = setInterval(() => {
+    nowMs.value = Date.now();
+  }, 500);
 
   const ok = await checkAuth();
   if (ok && !mustChangePassword.value) {
@@ -1112,6 +1150,7 @@ watch(isAuthenticated, () => {
 onUnmounted(() => {
   window.removeEventListener('resize', handleWindowResize);
   if (resizeTimer) clearTimeout(resizeTimer);
+  if (durationTimer) clearInterval(durationTimer);
   disconnectSocket();
   stopProxyHealthPolling();
 });
@@ -2011,13 +2050,14 @@ onUnmounted(() => {
           </div>
           <div class="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
             <div class="overflow-x-auto">
-            <table class="w-full min-w-[920px] text-left text-sm">
+            <table class="w-full min-w-[980px] text-left text-sm">
               <thead class="bg-gray-50 border-b border-gray-200">
                 <tr>
                   <th class="px-6 py-4 font-semibold text-gray-600">时间</th>
                   <th class="px-6 py-4 font-semibold text-gray-600">客户端 Key</th>
                   <th class="px-6 py-4 font-semibold text-gray-600">厂商</th>
                   <th class="px-6 py-4 font-semibold text-gray-600">模型</th>
+                  <th class="px-6 py-4 font-semibold text-gray-600">耗时</th>
                   <th class="px-6 py-4 font-semibold text-gray-600">状态</th>
                   <th class="px-6 py-4 font-semibold text-gray-600 text-right">操作</th>
                 </tr>
@@ -2038,6 +2078,9 @@ onUnmounted(() => {
                       <span class="mx-2 text-gray-400">→</span>
                       <span class="text-blue-600 font-medium">{{ log.actualModel }}</span>
                     </template>
+                  </td>
+                  <td class="px-6 py-4 text-gray-700 font-mono text-xs">
+                    {{ calculateDuration(log.requestAt || log.createdAt, log.responseAt) || '-' }}
                   </td>
                   <td class="px-6 py-4">
                     <span 
@@ -2071,7 +2114,7 @@ onUnmounted(() => {
                   </td>
                 </tr>
                 <tr v-if="!filteredLogs.length">
-                  <td colspan="6" class="px-6 py-10 text-center text-gray-400 text-sm">暂无数据</td>
+                  <td colspan="7" class="px-6 py-10 text-center text-gray-400 text-sm">暂无数据</td>
                 </tr>
               </tbody>
             </table>
@@ -2572,7 +2615,7 @@ onUnmounted(() => {
             <pre
               v-else
               class="bg-gray-900 text-gray-100 p-4 rounded-xl overflow-auto text-xs leading-relaxed max-h-[600px]"
-              v-html="highlightText(formatJson(selectedLog.responseBody))"
+              v-html="highlightText(formatResponseForDisplay(selectedLog.responseBody))"
             ></pre>
           </div>
         </div>

@@ -538,6 +538,7 @@ app.post('/api/providers/import', async (req, res) => {
 
 // 导出全局配置（不包含管理员用户/密码）
 app.get('/api/config/export', async (req, res) => {
+    const includeSecrets = String(req.query.includeSecrets || '') === '1';
     const providers = await db.all(
         'SELECT id, name, type, baseUrl, apiKey, defaultModelId, active FROM providers ORDER BY id ASC'
     );
@@ -553,15 +554,22 @@ app.get('/api/config/export', async (req, res) => {
     const modelRules = await db.all(
         'SELECT id, pattern, targetModel, priority, enabled FROM model_rules ORDER BY priority DESC, id ASC'
     );
+    const safeProviders = includeSecrets
+        ? providers
+        : providers.map((p) => ({ ...p, apiKey: '' }));
+    const safeApps = includeSecrets
+        ? apps
+        : apps.map((a) => ({ ...a, key: '' }));
 
     res.json({
         version: '1.0',
+        includeSecrets,
         exportedAt: new Date().toISOString(),
         config: {
-            providers,
+            providers: safeProviders,
             managedModels,
             providerModels,
-            apps,
+            apps: safeApps,
             modelRules
         }
     });
