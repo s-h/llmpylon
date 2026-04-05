@@ -1028,87 +1028,6 @@ const calculateDuration = (start, end) => {
   return (duration / 1000).toFixed(2) + 's';
 };
 
-const aggregateStreamResponse = (str) => {
-  if (!str || (!str.includes('event:') && !str.includes('data:'))) return null;
-  const lines = str.split('\n');
-  const events = [];
-  const merged = { thinking: '', text: '' };
-  let currentEvent = null;
-
-  const sanitizeDataObject = (obj) => {
-    const cloned = JSON.parse(JSON.stringify(obj));
-    const pickText = (value, bucket) => {
-      if (typeof value === 'string' && value) merged[bucket] += value;
-    };
-
-    if (cloned?.delta) {
-      pickText(cloned.delta.thinking, 'thinking');
-      pickText(cloned.delta.text, 'text');
-      if (typeof cloned.delta.thinking === 'string') delete cloned.delta.thinking;
-      if (typeof cloned.delta.text === 'string') delete cloned.delta.text;
-    }
-    if (cloned?.content_block) {
-      pickText(cloned.content_block.text, 'text');
-      if (typeof cloned.content_block.text === 'string') delete cloned.content_block.text;
-    }
-    if (Array.isArray(cloned?.choices)) {
-      cloned.choices = cloned.choices.map((c) => {
-        const item = { ...c };
-        if (item?.delta) {
-          pickText(item.delta.content, 'text');
-          if (typeof item.delta.content === 'string') delete item.delta.content;
-        }
-        return item;
-      });
-    }
-    return cloned;
-  };
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    if (trimmed.startsWith('event:')) {
-      currentEvent = trimmed.substring(6).trim();
-      continue;
-    }
-    if (!trimmed.startsWith('data:')) continue;
-
-    const dataStr = trimmed.substring(5).trim();
-    if (!dataStr || dataStr === '[DONE]') continue;
-    try {
-      const dataObj = JSON.parse(dataStr);
-      events.push({
-        event: currentEvent || null,
-        data: sanitizeDataObject(dataObj)
-      });
-    } catch {
-      events.push({
-        event: currentEvent || null,
-        data: dataStr
-      });
-    }
-  }
-
-  if (!events.length) return null;
-  return {
-    stream: {
-      format: 'sse',
-      eventCount: events.length,
-      events
-    },
-    mergedContent: {
-      thinking: merged.thinking,
-      text: merged.text
-    }
-  };
-};
-
-const formatResponseForDisplay = (str) => {
-  const aggregated = aggregateStreamResponse(str);
-  if (aggregated) return JSON.stringify(aggregated, null, 2);
-  return formatJson(str);
-};
-
 const formatJson = (str) => {
   if (!str) return '';
   try {
@@ -2665,7 +2584,7 @@ onUnmounted(() => {
             <pre
               v-else
               class="bg-gray-900 text-gray-100 p-4 rounded-xl overflow-auto text-xs leading-relaxed max-h-[600px]"
-              v-html="highlightText(formatResponseForDisplay(selectedLog.responseBody))"
+              v-html="highlightText(formatJson(selectedLog.responseBody))"
             ></pre>
           </div>
         </div>
