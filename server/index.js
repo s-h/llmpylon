@@ -321,8 +321,8 @@ app.get('/api/providers', async (req, res) => {
 
 app.post('/api/providers', async (req, res) => {
     const { name, type, baseUrl, apiKey } = req.body;
-    await db.run('INSERT INTO providers (name, type, baseUrl, apiKey) VALUES (?, ?, ?, ?)', [name, type, baseUrl, apiKey]);
-    res.sendStatus(201);
+    const result = await db.run('INSERT INTO providers (name, type, baseUrl, apiKey) VALUES (?, ?, ?, ?)', [name, type, baseUrl, apiKey]);
+    res.status(201).json({ id: result.lastID });
 });
 
 app.put('/api/providers/:id', async (req, res) => {

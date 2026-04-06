@@ -32,6 +32,7 @@ import {
   Pencil,
   Download,
   Upload,
+  Copy,
   Activity,
   AlertTriangle,
   Percent,
@@ -176,6 +177,12 @@ const showAddProviderModel = ref(false);
 const providerModelTargetProvider = ref(null);
 const newProviderModelName = ref('');
 
+const showCopyProviderDialog = ref(false);
+const copyProviderForm = ref({ name: '', type: 'openai', baseUrl: '', apiKey: '' });
+const copyProviderModelNames = ref([]);
+const copyDefaultModelName = ref('');
+const newCopyModelRow = ref('');
+
 // 导入/导出相关状态
 const showExportDialog = ref(false);
 const exportIncludeApiKey = ref(false);
@@ -249,6 +256,18 @@ const activeDefaultModel = computed(() => {
 });
 
 const enabledModelRulesCount = computed(() => modelRules.value.filter(r => r.enabled).length);
+
+const copyModelNamesForSelect = computed(() => {
+  const out = [];
+  const seen = new Set();
+  for (const s of copyProviderModelNames.value) {
+    const t = (s || '').trim();
+    if (!t || seen.has(t)) continue;
+    seen.add(t);
+    out.push(t);
+  }
+  return out;
+});
 
 const getModelOptionsForProvider = (providerId, selectedModelId) => {
   const selectedEntry = getModelCatalogEntry(selectedModelId);
@@ -834,6 +853,84 @@ const doGlobalImport = async () => {
 
 const openEditModal = (provider) => {
   editingProvider.value = { ...provider };
+};
+
+const openCopyProviderDialog = (p) => {
+  copyProviderForm.value = {
+    name: `${p.name} 副本`,
+    type: p.type || 'openai',
+    baseUrl: p.baseUrl || '',
+    apiKey: p.apiKey || ''
+  };
+  copyProviderModelNames.value = (p.models || []).map((m) => m.name);
+  const def = (p.models || []).find((m) => m.id === p.defaultModelId);
+  copyDefaultModelName.value = def ? def.name : (copyModelNamesForSelect.value[0] || '');
+  newCopyModelRow.value = '';
+  showCopyProviderDialog.value = true;
+};
+
+const closeCopyProviderDialog = () => {
+  showCopyProviderDialog.value = false;
+  newCopyModelRow.value = '';
+};
+
+const removeCopyModelAt = (idx) => {
+  const removed = (copyProviderModelNames.value[idx] || '').trim();
+  copyProviderModelNames.value.splice(idx, 1);
+  if (removed && copyDefaultModelName.value === removed) {
+    const rest = copyModelNamesForSelect.value;
+    copyDefaultModelName.value = rest[0] || '';
+  }
+};
+
+const addCopyModelRow = () => {
+  const n = newCopyModelRow.value.trim();
+  if (!n) return;
+  copyProviderModelNames.value.push(n);
+  newCopyModelRow.value = '';
+  if (!copyDefaultModelName.value) copyDefaultModelName.value = n;
+};
+
+const submitCopyProvider = async () => {
+  const name = copyProviderForm.value.name?.trim();
+  if (!name) {
+    alert('请填写新厂商名称');
+    return;
+  }
+  const modelsOrdered = [];
+  const seen = new Set();
+  for (const raw of copyProviderModelNames.value) {
+    const m = (raw || '').trim();
+    if (!m || seen.has(m)) continue;
+    seen.add(m);
+    modelsOrdered.push(m);
+  }
+  try {
+    const res = await axios.post(`${API_BASE}/providers`, {
+      name,
+      type: copyProviderForm.value.type,
+      baseUrl: copyProviderForm.value.baseUrl,
+      apiKey: copyProviderForm.value.apiKey || null
+    });
+    const newId = res.data?.id;
+    if (!newId) {
+      alert('创建厂商失败：服务端未返回新厂商 ID，请确认已更新后端。');
+      return;
+    }
+    const nameToId = {};
+    for (const mname of modelsOrdered) {
+      const r = await axios.post(`${API_BASE}/providers/${newId}/models`, { name: mname });
+      nameToId[mname] = r.data.modelId;
+    }
+    const defPick = copyDefaultModelName.value?.trim();
+    if (defPick && modelsOrdered.includes(defPick) && nameToId[defPick]) {
+      await axios.put(`${API_BASE}/providers/${newId}/models/${nameToId[defPick]}/activate`);
+    }
+    closeCopyProviderDialog();
+    await fetchProviders();
+  } catch (err) {
+    alert(err.response?.data?.error || err.response?.data?.message || err.message);
+  }
 };
 
 const addClientApp = async () => {
@@ -1436,6 +1533,14 @@ onUnmounted(() => {
                     title="编辑厂商"
                   >
                     <Pencil class="w-5 h-5" />
+                  </button>
+                  <button
+                    type="button"
+                    @click.stop="openCopyProviderDialog(p)"
+                    class="p-2 text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
+                    title="复制厂商"
+                  >
+                    <Copy class="w-5 h-5" />
                   </button>
                   <button 
                     v-if="!p.active"
@@ -2415,6 +2520,75 @@ onUnmounted(() => {
           >
             取消
           </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Copy Provider Modal -->
+    <div v-if="showCopyProviderDialog" class="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50 overflow-y-auto">
+      <div class="bg-white rounded-2xl w-full max-w-lg p-8 shadow-2xl my-8 max-h-[90vh] overflow-y-auto">
+        <h3 class="text-xl font-bold mb-1">复制厂商</h3>
+        <p class="text-xs text-gray-500 mb-6">填写新厂商名称；基础地址、托管 Key、类型默认与源厂商一致，可直接修改。模型列表默认与源一致，可自行增删；保存后会创建新厂商并关联模型。</p>
+        <div class="space-y-4">
+          <div>
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">新厂商名称 <span class="text-red-500">*</span></label>
+            <input v-model="copyProviderForm.name" type="text" placeholder="例如：生产环境-OpenAI" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+          </div>
+          <div>
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">厂商类型</label>
+            <select v-model="copyProviderForm.type" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none">
+              <option value="openai">OpenAI 兼容</option>
+              <option value="anthropic">Anthropic 兼容</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">基础地址 (Base URL)</label>
+            <input v-model="copyProviderForm.baseUrl" type="text" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+          </div>
+          <div>
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">托管 API Key</label>
+            <input v-model="copyProviderForm.apiKey" type="password" placeholder="默认已填入源厂商 Key，可修改" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+          </div>
+          <div>
+            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">默认模型（保存后生效）</label>
+            <select v-model="copyDefaultModelName" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none text-sm">
+              <option value="">暂不设置默认（创建后在卡片上点选）</option>
+              <option v-for="n in copyModelNamesForSelect" :key="'def-' + n" :value="n">{{ n }}</option>
+            </select>
+          </div>
+          <div>
+            <div class="flex justify-between items-center mb-2">
+              <span class="text-xs font-bold text-gray-400 uppercase">模型列表</span>
+            </div>
+            <div class="space-y-2 max-h-48 overflow-y-auto rounded-lg border border-gray-100 p-2 bg-gray-50/80">
+              <div v-for="(row, idx) in copyProviderModelNames" :key="'cm-' + idx" class="flex gap-2 items-center">
+                <input
+                  v-model="copyProviderModelNames[idx]"
+                  type="text"
+                  placeholder="模型名"
+                  class="flex-1 min-w-0 px-3 py-2 text-sm border border-gray-200 rounded-lg bg-white focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                />
+                <button type="button" @click="removeCopyModelAt(idx)" class="shrink-0 p-2 text-red-600 hover:bg-red-50 rounded-lg" title="删除">
+                  <Trash2 class="w-4 h-4" />
+                </button>
+              </div>
+              <p v-if="!copyProviderModelNames.length" class="text-xs text-gray-400 py-2 text-center">暂无模型，可在下方添加</p>
+            </div>
+            <div class="flex gap-2 mt-2">
+              <input
+                v-model="newCopyModelRow"
+                type="text"
+                placeholder="新模型名称"
+                class="flex-1 px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
+                @keydown.enter.prevent="addCopyModelRow"
+              />
+              <button type="button" @click="addCopyModelRow" class="px-3 py-2 text-sm font-bold bg-gray-100 border border-gray-200 rounded-lg hover:bg-gray-200">添加</button>
+            </div>
+          </div>
+        </div>
+        <div class="flex gap-3 mt-8">
+          <button type="button" @click="closeCopyProviderDialog" class="flex-1 px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors">取消</button>
+          <button type="button" @click="submitCopyProvider" class="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-bold">创建副本</button>
         </div>
       </div>
     </div>
