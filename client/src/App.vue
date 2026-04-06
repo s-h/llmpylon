@@ -244,7 +244,12 @@ const modelCatalogMap = computed(() => {
 });
 
 const getModelCatalogEntry = (id) => {
-  if (!id) return null;
+  if (id === null || id === undefined || id === '') return null;
+  const n = Number(id);
+  if (!Number.isNaN(n)) {
+    const hit = modelCatalogMap.value.get(n);
+    if (hit) return hit;
+  }
   return modelCatalogMap.value.get(id) || null;
 };
 
@@ -275,13 +280,19 @@ const getModelOptionsForProvider = (providerId, selectedModelId) => {
   if (selectedEntry) {
     options.push({ id: selectedEntry.id, name: selectedEntry.name, providers: selectedEntry.providers || [], _selected: true });
   }
+  const hasProvider =
+    providerId !== null && providerId !== undefined && providerId !== '';
+  const pid = hasProvider ? Number(providerId) : null;
+  const pidOk = hasProvider && !Number.isNaN(pid);
+
   for (const m of modelsCatalog.value) {
-    if (selectedEntry && m.id === selectedEntry.id) continue;
-    if (!providerId) {
+    if (selectedEntry && Number(m.id) === Number(selectedEntry.id)) continue;
+    if (!hasProvider) {
       options.push(m);
       continue;
     }
-    const supported = (m.providers || []).some(p => p.id === providerId);
+    if (!pidOk) continue;
+    const supported = (m.providers || []).some((p) => Number(p.id) === pid);
     if (supported) options.push(m);
   }
   return options;
@@ -928,6 +939,7 @@ const submitCopyProvider = async () => {
     }
     closeCopyProviderDialog();
     await fetchProviders();
+    await fetchModelsCatalog();
   } catch (err) {
     alert(err.response?.data?.error || err.response?.data?.message || err.message);
   }
