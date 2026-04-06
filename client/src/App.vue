@@ -31,7 +31,13 @@ import {
   ShieldAlert,
   Pencil,
   Download,
-  Upload
+  Upload,
+  Activity,
+  AlertTriangle,
+  Percent,
+  Zap,
+  Timer,
+  TrendingUp
 } from 'lucide-vue-next';
 
 use([CanvasRenderer, CalendarComponent, GridComponent, LegendComponent, TooltipComponent, VisualMapComponent, HeatmapChart, LineChart, PieChart]);
@@ -1695,177 +1701,268 @@ onUnmounted(() => {
         </div>
 
         <!-- Stats View -->
-        <div v-if="activeTab === 'stats'" class="space-y-6">
-          <div class="flex flex-col lg:flex-row gap-3 lg:justify-between lg:items-center">
-            <div class="flex flex-wrap items-center gap-2 sm:gap-3">
+        <div v-if="activeTab === 'stats'" class="space-y-8">
+          <div class="relative overflow-hidden rounded-2xl border border-slate-200/90 bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 p-6 text-white shadow-xl shadow-slate-900/15 sm:p-8">
+            <div class="pointer-events-none absolute -right-24 -top-24 h-64 w-64 rounded-full bg-cyan-500/15 blur-3xl" />
+            <div class="pointer-events-none absolute -bottom-20 -left-16 h-56 w-56 rounded-full bg-indigo-500/10 blur-3xl" />
+            <div class="relative flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
+              <div class="max-w-xl">
+                <p class="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">Analytics</p>
+                <h3 class="mt-1.5 text-2xl font-bold tracking-tight sm:text-3xl">使用统计</h3>
+                <p class="mt-2 text-sm leading-relaxed text-slate-400">请求量、错误与 Token 消耗趋势；可按时间范围筛选，厂商筛选影响下方图表（热力图除外）。</p>
+              </div>
               <button
-                @click="statsRange = '7d'"
-                :class="['px-3 py-1 rounded-full text-xs font-bold transition-all border', statsRange === '7d' ? 'bg-gray-900 text-white border-gray-900' : 'bg-white text-gray-600 border-gray-200 hover:border-gray-400']"
+                type="button"
+                @click="fetchStats"
+                class="inline-flex shrink-0 items-center gap-2 rounded-xl border border-white/15 bg-white/10 px-4 py-2.5 text-sm font-semibold text-white backdrop-blur-sm transition hover:bg-white/15"
               >
-                最近7天
+                <Clock class="h-4 w-4 opacity-90" />
+                刷新数据
               </button>
-              <button
-                @click="statsRange = '30d'"
-                :class="['px-3 py-1 rounded-full text-xs font-bold transition-all border', statsRange === '30d' ? 'bg-gray-900 text-white border-gray-900' : 'bg-white text-gray-600 border-gray-200 hover:border-gray-400']"
-              >
-                最近30天
-              </button>
-              <button
-                @click="statsRange = '90d'"
-                :class="['px-3 py-1 rounded-full text-xs font-bold transition-all border', statsRange === '90d' ? 'bg-gray-900 text-white border-gray-900' : 'bg-white text-gray-600 border-gray-200 hover:border-gray-400']"
-              >
-                最近90天
-              </button>
-              <button
-                @click="statsRange = 'all'"
-                :class="['px-3 py-1 rounded-full text-xs font-bold transition-all border', statsRange === 'all' ? 'bg-gray-900 text-white border-gray-900' : 'bg-white text-gray-600 border-gray-200 hover:border-gray-400']"
-              >
-                全部时间
-              </button>
-              <div class="flex items-center gap-2 sm:ml-2">
-                <span class="text-xs font-bold text-gray-400 uppercase">厂商</span>
-                <select v-model="statsProviderId" class="px-3 py-1.5 border border-gray-200 rounded-lg bg-white text-xs font-bold text-gray-700">
-                  <option value="all">全部</option>
-                  <option v-for="p in providers" :key="p.id" :value="p.id">{{ p.name }}</option>
-                </select>
-                <span class="text-[10px] text-gray-400">热力图不受影响</span>
-              </div>
-            </div>
-            <button
-              @click="fetchStats"
-              class="self-start lg:self-auto flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm font-bold"
-            >
-              <Clock class="w-4 h-4" />
-              刷新
-            </button>
-          </div>
-
-          <div v-if="statsLoading" class="bg-white rounded-xl border border-gray-200 p-10 flex items-center justify-center text-gray-500">
-            <Loader2 class="w-6 h-6 animate-spin mr-3 text-blue-600" />
-            正在加载统计数据...
-          </div>
-
-          <div v-else class="space-y-6">
-            <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
-              <div class="bg-white p-5 rounded-xl border border-gray-200 shadow-sm">
-                <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">请求数</p>
-                <p class="text-2xl font-bold text-gray-900">{{ statsSummary ? formatNumber(statsSummary.requestCount) : '-' }}</p>
-              </div>
-              <div class="bg-white p-5 rounded-xl border border-gray-200 shadow-sm">
-                <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">错误数</p>
-                <p class="text-2xl font-bold text-red-600">{{ statsSummary ? formatNumber(statsSummary.errorCount) : '-' }}</p>
-              </div>
-              <div class="bg-white p-5 rounded-xl border border-gray-200 shadow-sm">
-                <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">错误率</p>
-                <p class="text-2xl font-bold text-amber-600">{{ statsSummary ? (statsSummary.errorRate * 100).toFixed(2) + '%' : '-' }}</p>
-              </div>
-              <div class="bg-white p-5 rounded-xl border border-gray-200 shadow-sm">
-                <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">Tokens</p>
-                <p class="text-2xl font-bold text-blue-700">{{ statsSummary ? formatNumber(statsSummary.tokensTotal) : '-' }}</p>
-              </div>
-              <div class="bg-white p-5 rounded-xl border border-gray-200 shadow-sm">
-                <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">平均耗时</p>
-                <p class="text-2xl font-bold text-green-700">{{ statsSummary ? formatMs(statsSummary.avgLatencyMs) : '-' }}</p>
-              </div>
             </div>
 
-            <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
-              <div class="flex justify-between items-center mb-4">
-                <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">活跃热力图（按天请求数）</h3>
-                <p class="text-xs text-gray-400">活跃天数：{{ statsSummary ? statsSummary.activeDays : '-' }}</p>
+            <div class="relative mt-6 flex flex-col gap-4 rounded-xl border border-white/10 bg-white/[0.06] p-4 backdrop-blur-md sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
+              <div class="flex flex-wrap gap-1.5">
+                <button
+                  type="button"
+                  @click="statsRange = '7d'"
+                  :class="[
+                    'rounded-lg px-3 py-2 text-xs font-semibold transition',
+                    statsRange === '7d'
+                      ? 'bg-white text-slate-900 shadow-sm'
+                      : 'text-slate-300 hover:bg-white/10 hover:text-white'
+                  ]"
+                >
+                  7 天
+                </button>
+                <button
+                  type="button"
+                  @click="statsRange = '30d'"
+                  :class="[
+                    'rounded-lg px-3 py-2 text-xs font-semibold transition',
+                    statsRange === '30d'
+                      ? 'bg-white text-slate-900 shadow-sm'
+                      : 'text-slate-300 hover:bg-white/10 hover:text-white'
+                  ]"
+                >
+                  30 天
+                </button>
+                <button
+                  type="button"
+                  @click="statsRange = '90d'"
+                  :class="[
+                    'rounded-lg px-3 py-2 text-xs font-semibold transition',
+                    statsRange === '90d'
+                      ? 'bg-white text-slate-900 shadow-sm'
+                      : 'text-slate-300 hover:bg-white/10 hover:text-white'
+                  ]"
+                >
+                  90 天
+                </button>
+                <button
+                  type="button"
+                  @click="statsRange = 'all'"
+                  :class="[
+                    'rounded-lg px-3 py-2 text-xs font-semibold transition',
+                    statsRange === 'all'
+                      ? 'bg-white text-slate-900 shadow-sm'
+                      : 'text-slate-300 hover:bg-white/10 hover:text-white'
+                  ]"
+                >
+                  全部
+                </button>
+              </div>
+              <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+                <label class="flex items-center gap-2 text-xs font-medium text-slate-300">
+                  <span class="whitespace-nowrap">厂商</span>
+                  <select
+                    v-model="statsProviderId"
+                    class="min-w-[8rem] rounded-lg border border-white/15 bg-slate-900/40 px-3 py-2 text-xs font-semibold text-white outline-none ring-0 focus:border-cyan-400/50"
+                  >
+                    <option value="all" class="text-slate-900">全部</option>
+                    <option v-for="p in providers" :key="p.id" :value="p.id" class="text-slate-900">{{ p.name }}</option>
+                  </select>
+                </label>
+                <span class="text-[11px] text-slate-500">热力图不受厂商筛选影响</span>
+              </div>
+            </div>
+          </div>
+
+          <div v-if="statsLoading" class="flex min-h-[220px] flex-col items-center justify-center gap-4 rounded-2xl border border-slate-200/90 bg-slate-50/80 p-12 text-slate-600">
+            <Loader2 class="h-8 w-8 animate-spin text-cyan-600" />
+            <p class="text-sm font-medium">正在加载统计数据…</p>
+          </div>
+
+          <div v-else class="space-y-8">
+            <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
+              <div class="group relative overflow-hidden rounded-2xl border border-slate-200/90 bg-white p-5 shadow-sm transition hover:border-slate-300 hover:shadow-md">
+                <div class="flex items-start justify-between gap-3">
+                  <div class="rounded-xl bg-blue-50 p-2.5 text-blue-600">
+                    <Activity class="h-5 w-5" />
+                  </div>
+                </div>
+                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-slate-500">请求数</p>
+                <p class="mt-1 text-3xl font-bold tabular-nums tracking-tight text-slate-900">{{ statsSummary ? formatNumber(statsSummary.requestCount) : '—' }}</p>
+              </div>
+              <div class="group relative overflow-hidden rounded-2xl border border-slate-200/90 bg-white p-5 shadow-sm transition hover:border-slate-300 hover:shadow-md">
+                <div class="flex items-start justify-between gap-3">
+                  <div class="rounded-xl bg-rose-50 p-2.5 text-rose-600">
+                    <AlertTriangle class="h-5 w-5" />
+                  </div>
+                </div>
+                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-slate-500">错误数</p>
+                <p class="mt-1 text-3xl font-bold tabular-nums tracking-tight text-rose-600">{{ statsSummary ? formatNumber(statsSummary.errorCount) : '—' }}</p>
+              </div>
+              <div class="group relative overflow-hidden rounded-2xl border border-slate-200/90 bg-white p-5 shadow-sm transition hover:border-slate-300 hover:shadow-md">
+                <div class="flex items-start justify-between gap-3">
+                  <div class="rounded-xl bg-amber-50 p-2.5 text-amber-600">
+                    <Percent class="h-5 w-5" />
+                  </div>
+                </div>
+                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-slate-500">错误率</p>
+                <p class="mt-1 text-3xl font-bold tabular-nums tracking-tight text-amber-600">{{ statsSummary ? (statsSummary.errorRate * 100).toFixed(2) + '%' : '—' }}</p>
+              </div>
+              <div class="group relative overflow-hidden rounded-2xl border border-slate-200/90 bg-white p-5 shadow-sm transition hover:border-slate-300 hover:shadow-md">
+                <div class="flex items-start justify-between gap-3">
+                  <div class="rounded-xl bg-cyan-50 p-2.5 text-cyan-600">
+                    <Zap class="h-5 w-5" />
+                  </div>
+                </div>
+                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-slate-500">Tokens</p>
+                <p class="mt-1 text-3xl font-bold tabular-nums tracking-tight text-cyan-700">{{ statsSummary ? formatNumber(statsSummary.tokensTotal) : '—' }}</p>
+              </div>
+              <div class="group relative overflow-hidden rounded-2xl border border-slate-200/90 bg-white p-5 shadow-sm transition hover:border-slate-300 hover:shadow-md sm:col-span-2 xl:col-span-1">
+                <div class="flex items-start justify-between gap-3">
+                  <div class="rounded-xl bg-emerald-50 p-2.5 text-emerald-600">
+                    <Timer class="h-5 w-5" />
+                  </div>
+                </div>
+                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-slate-500">平均耗时</p>
+                <p class="mt-1 text-3xl font-bold tabular-nums tracking-tight text-emerald-700">{{ statsSummary ? formatMs(statsSummary.avgLatencyMs) : '—' }}</p>
+              </div>
+            </div>
+
+            <div class="rounded-2xl border border-slate-200/90 bg-white p-6 shadow-sm">
+              <div class="mb-5 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <div class="flex items-center gap-2">
+                  <span class="flex h-9 w-9 items-center justify-center rounded-xl bg-slate-900 text-white">
+                    <BarChart3 class="h-4 w-4" />
+                  </span>
+                  <div>
+                    <h3 class="text-sm font-semibold text-slate-900">活跃热力图</h3>
+                    <p class="text-xs text-slate-500">按天请求量分布（近一年）</p>
+                  </div>
+                </div>
+                <span class="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-600">
+                  活跃天数 {{ statsSummary ? statsSummary.activeDays : '—' }}
+                </span>
               </div>
               <VChart :option="heatmapOption" autoresize class="h-52" />
-              <div class="flex items-center justify-center gap-2 mt-4 text-[10px] font-bold text-gray-400">
+              <div class="mt-4 flex flex-wrap items-center justify-center gap-2 text-[10px] font-semibold uppercase tracking-wide text-slate-400">
                 <span>少</span>
-                <span class="w-3 h-3 rounded-sm border border-gray-200" style="background:#ebedf0" title="0 次"></span>
-                <span class="w-3 h-3 rounded-sm border border-gray-200" style="background:#9be9a8" title="1–4 次"></span>
-                <span class="w-3 h-3 rounded-sm border border-gray-200" style="background:#40c463" title="5–9 次"></span>
-                <span class="w-3 h-3 rounded-sm border border-gray-200" style="background:#30a14e" title="10–19 次"></span>
-                <span class="w-3 h-3 rounded-sm border border-gray-200" style="background:#216e39" title="≥ 20 次"></span>
+                <span class="h-3 w-3 rounded-sm border border-slate-200/80" style="background:#ebedf0" title="0 次"></span>
+                <span class="h-3 w-3 rounded-sm border border-slate-200/80" style="background:#9be9a8" title="1–4 次"></span>
+                <span class="h-3 w-3 rounded-sm border border-slate-200/80" style="background:#40c463" title="5–9 次"></span>
+                <span class="h-3 w-3 rounded-sm border border-slate-200/80" style="background:#30a14e" title="10–19 次"></span>
+                <span class="h-3 w-3 rounded-sm border border-slate-200/80" style="background:#216e39" title="≥ 20 次"></span>
                 <span>多</span>
               </div>
             </div>
 
-            <div class="grid grid-cols-1 xl:grid-cols-2 gap-6">
-              <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
-                <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider mb-4">请求与错误趋势</h3>
+            <div class="grid grid-cols-1 gap-6 xl:grid-cols-2">
+              <div class="rounded-2xl border border-slate-200/90 bg-white p-6 shadow-sm">
+                <div class="mb-4 flex items-center gap-2">
+                  <TrendingUp class="h-4 w-4 text-slate-400" />
+                  <h3 class="text-sm font-semibold text-slate-900">请求与错误趋势</h3>
+                </div>
                 <VChart :option="requestsOption" autoresize class="h-64" />
               </div>
-              <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
-                <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider mb-4">Tokens 趋势</h3>
+              <div class="rounded-2xl border border-slate-200/90 bg-white p-6 shadow-sm">
+                <div class="mb-4 flex items-center gap-2">
+                  <Zap class="h-4 w-4 text-slate-400" />
+                  <h3 class="text-sm font-semibold text-slate-900">Tokens 趋势</h3>
+                </div>
                 <VChart :option="tokensOption" autoresize class="h-64" />
               </div>
             </div>
 
-            <div class="grid grid-cols-1 xl:grid-cols-2 gap-6">
-              <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
-                <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider mb-4">平均耗时趋势</h3>
+            <div class="grid grid-cols-1 gap-6 xl:grid-cols-2">
+              <div class="rounded-2xl border border-slate-200/90 bg-white p-6 shadow-sm">
+                <div class="mb-4 flex items-center gap-2">
+                  <Timer class="h-4 w-4 text-slate-400" />
+                  <h3 class="text-sm font-semibold text-slate-900">平均耗时趋势</h3>
+                </div>
                 <VChart :option="latencyOption" autoresize class="h-64" />
               </div>
-              <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
-                <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider mb-4">模型占比（按 Tokens）</h3>
+              <div class="rounded-2xl border border-slate-200/90 bg-white p-6 shadow-sm">
+                <div class="mb-4 flex items-center gap-2">
+                  <Cpu class="h-4 w-4 text-slate-400" />
+                  <h3 class="text-sm font-semibold text-slate-900">模型占比（按 Tokens）</h3>
+                </div>
                 <VChart :option="modelPieOption" autoresize class="h-64" />
               </div>
             </div>
 
-            <div class="grid grid-cols-1 xl:grid-cols-2 gap-6">
-              <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-                <div class="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
-                  <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">慢请求 Top 10</h3>
+            <div class="grid grid-cols-1 gap-6 xl:grid-cols-2">
+              <div class="overflow-hidden rounded-2xl border border-slate-200/90 bg-white shadow-sm">
+                <div class="flex items-center justify-between border-b border-slate-100 bg-slate-50/80 px-5 py-4">
+                  <h3 class="text-sm font-semibold text-slate-900">慢请求 Top 10</h3>
+                  <span class="text-xs text-slate-500">按耗时降序</span>
                 </div>
                 <div class="overflow-x-auto">
-                <table class="w-full min-w-[640px] text-left text-sm">
-                  <thead class="bg-gray-50 border-b border-gray-200">
-                    <tr>
-                      <th class="px-6 py-3 font-semibold text-gray-600">应用</th>
-                      <th class="px-6 py-3 font-semibold text-gray-600">厂商</th>
-                      <th class="px-6 py-3 font-semibold text-gray-600">模型</th>
-                      <th class="px-6 py-3 font-semibold text-gray-600 text-right">耗时</th>
-                    </tr>
-                  </thead>
-                  <tbody class="divide-y divide-gray-200">
-                    <tr v-for="row in (statsData?.top?.slow || [])" :key="row.id" class="hover:bg-gray-50 transition-colors">
-                      <td class="px-6 py-3 text-gray-700">{{ row.appName }}</td>
-                      <td class="px-6 py-3 text-gray-700">{{ row.providerName }}</td>
-                      <td class="px-6 py-3 font-mono text-xs text-gray-600">
-                        <span v-if="!row.actualModel || row.requestedModel === row.actualModel">{{ row.requestedModel }}</span>
-                        <span v-else>{{ row.requestedModel }} → {{ row.actualModel }}</span>
-                      </td>
-                      <td class="px-6 py-3 text-right font-mono text-xs text-red-600 font-bold">{{ formatMs(row.latencyMs) }}</td>
-                    </tr>
-                    <tr v-if="!(statsData?.top?.slow || []).length">
-                      <td colspan="4" class="px-6 py-6 text-center text-gray-400 text-sm">暂无数据</td>
-                    </tr>
-                  </tbody>
-                </table>
+                  <table class="w-full min-w-[640px] text-left text-sm">
+                    <thead>
+                      <tr class="border-b border-slate-100 bg-white text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        <th class="px-5 py-3">应用</th>
+                        <th class="px-5 py-3">厂商</th>
+                        <th class="px-5 py-3">模型</th>
+                        <th class="px-5 py-3 text-right">耗时</th>
+                      </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-100">
+                      <tr v-for="row in (statsData?.top?.slow || [])" :key="row.id" class="transition hover:bg-slate-50/80">
+                        <td class="px-5 py-3 font-medium text-slate-800">{{ row.appName }}</td>
+                        <td class="px-5 py-3 text-slate-600">{{ row.providerName }}</td>
+                        <td class="px-5 py-3 font-mono text-xs text-slate-600">
+                          <span v-if="!row.actualModel || row.requestedModel === row.actualModel">{{ row.requestedModel }}</span>
+                          <span v-else>{{ row.requestedModel }} → {{ row.actualModel }}</span>
+                        </td>
+                        <td class="px-5 py-3 text-right font-mono text-xs font-bold text-rose-600">{{ formatMs(row.latencyMs) }}</td>
+                      </tr>
+                      <tr v-if="!(statsData?.top?.slow || []).length">
+                        <td colspan="4" class="px-5 py-10 text-center text-sm text-slate-400">暂无数据</td>
+                      </tr>
+                    </tbody>
+                  </table>
                 </div>
               </div>
-              <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-                <div class="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
-                  <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">错误 Top 10（最近）</h3>
+              <div class="overflow-hidden rounded-2xl border border-slate-200/90 bg-white shadow-sm">
+                <div class="flex items-center justify-between border-b border-slate-100 bg-slate-50/80 px-5 py-4">
+                  <h3 class="text-sm font-semibold text-slate-900">错误 Top 10</h3>
+                  <span class="text-xs text-slate-500">最近错误记录</span>
                 </div>
                 <div class="overflow-x-auto">
-                <table class="w-full min-w-[700px] text-left text-sm">
-                  <thead class="bg-gray-50 border-b border-gray-200">
-                    <tr>
-                      <th class="px-6 py-3 font-semibold text-gray-600">时间</th>
-                      <th class="px-6 py-3 font-semibold text-gray-600">应用</th>
-                      <th class="px-6 py-3 font-semibold text-gray-600">厂商</th>
-                      <th class="px-6 py-3 font-semibold text-gray-600">错误</th>
-                    </tr>
-                  </thead>
-                  <tbody class="divide-y divide-gray-200">
-                    <tr v-for="row in (statsData?.top?.errors || [])" :key="row.id" class="hover:bg-gray-50 transition-colors">
-                      <td class="px-6 py-3 text-gray-500 font-mono text-xs">{{ formatTime(row.requestAt) }}</td>
-                      <td class="px-6 py-3 text-gray-700">{{ row.appName }}</td>
-                      <td class="px-6 py-3 text-gray-700">{{ row.providerName }}</td>
-                      <td class="px-6 py-3 font-mono text-[10px] text-red-600 break-all">{{ row.errorMessage || '-' }}</td>
-                    </tr>
-                    <tr v-if="!(statsData?.top?.errors || []).length">
-                      <td colspan="4" class="px-6 py-6 text-center text-gray-400 text-sm">暂无数据</td>
-                    </tr>
-                  </tbody>
-                </table>
+                  <table class="w-full min-w-[700px] text-left text-sm">
+                    <thead>
+                      <tr class="border-b border-slate-100 bg-white text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        <th class="px-5 py-3">时间</th>
+                        <th class="px-5 py-3">应用</th>
+                        <th class="px-5 py-3">厂商</th>
+                        <th class="px-5 py-3">错误</th>
+                      </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-100">
+                      <tr v-for="row in (statsData?.top?.errors || [])" :key="row.id" class="transition hover:bg-slate-50/80">
+                        <td class="px-5 py-3 font-mono text-xs text-slate-500">{{ formatTime(row.requestAt) }}</td>
+                        <td class="px-5 py-3 font-medium text-slate-800">{{ row.appName }}</td>
+                        <td class="px-5 py-3 text-slate-600">{{ row.providerName }}</td>
+                        <td class="px-5 py-3 font-mono text-[11px] leading-relaxed text-rose-600 break-all">{{ row.errorMessage || '-' }}</td>
+                      </tr>
+                      <tr v-if="!(statsData?.top?.errors || []).length">
+                        <td colspan="4" class="px-5 py-10 text-center text-sm text-slate-400">暂无数据</td>
+                      </tr>
+                    </tbody>
+                  </table>
                 </div>
               </div>
             </div>
