@@ -235,6 +235,20 @@ const formatMs = (ms) => {
   return `${(num / 1000).toFixed(2)}s`;
 };
 
+const formatBytes = (n) => {
+  if (n === null || n === undefined) return '-';
+  const num = Number(n);
+  if (!Number.isFinite(num) || num < 0) return '-';
+  if (num < 1024) return `${num} B`;
+  if (num < 1024 * 1024) return `${(num / 1024).toFixed(1)} KB`;
+  return `${(num / (1024 * 1024)).toFixed(2)} MB`;
+};
+
+const formatLogLatency = (log) => {
+  if (log.latencyMs != null && Number.isFinite(Number(log.latencyMs))) return formatMs(log.latencyMs);
+  return calculateDuration(log.requestAt || log.createdAt, log.responseAt) || '-';
+};
+
 const modelCatalogMap = computed(() => {
   const map = new Map();
   for (const m of modelsCatalog.value) {
@@ -307,20 +321,21 @@ const closeSidebarIfMobile = () => {
 };
 
 const handleLogUpdate = (data) => {
-  const index = logs.value.findIndex(l => l.id === data.id);
+  const { appendResponseChunk, streamChunk, ...rest } = data;
+  const index = logs.value.findIndex(l => l.id === rest.id);
   if (index !== -1) {
     const current = logs.value[index];
-    const nextResponseBody = data.appendResponseChunk
-      ? `${current.responseBody || ''}${data.streamChunk || ''}`
-      : (data.responseBody !== undefined ? data.responseBody : current.responseBody);
-    const updatedLog = { ...current, ...data, responseBody: nextResponseBody };
+    const nextResponseBody = appendResponseChunk
+      ? `${current.responseBody || ''}${streamChunk || ''}`
+      : (rest.responseBody !== undefined ? rest.responseBody : current.responseBody);
+    const updatedLog = { ...current, ...rest, responseBody: nextResponseBody };
     logs.value.splice(index, 1, updatedLog);
     updateFilteredLogs();
-    if (selectedLog.value && selectedLog.value.id === data.id) {
+    if (selectedLog.value && selectedLog.value.id === rest.id) {
       selectedLog.value = updatedLog;
     }
   } else {
-    if (logsPage.value === 1 && (selectedClientKey.value === 'all' || Number(data.clientKeyId) === Number(selectedClientKey.value))) {
+    if (logsPage.value === 1 && (selectedClientKey.value === 'all' || Number(rest.clientKeyId) === Number(selectedClientKey.value))) {
       fetchLogs();
     } else {
       hasNewLogs.value = true;
@@ -2233,13 +2248,14 @@ onUnmounted(() => {
           </div>
           <div class="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
             <div class="overflow-x-auto">
-            <table class="w-full min-w-[980px] text-left text-sm">
+            <table class="w-full min-w-[1100px] text-left text-sm">
               <thead class="bg-gray-50 border-b border-gray-200">
                 <tr>
                   <th class="px-6 py-4 font-semibold text-gray-600">时间</th>
                   <th class="px-6 py-4 font-semibold text-gray-600">客户端 Key</th>
                   <th class="px-6 py-4 font-semibold text-gray-600">厂商</th>
                   <th class="px-6 py-4 font-semibold text-gray-600">模型</th>
+                  <th class="px-6 py-4 font-semibold text-gray-600">路径</th>
                   <th class="px-6 py-4 font-semibold text-gray-600">耗时</th>
                   <th class="px-6 py-4 font-semibold text-gray-600">状态</th>
                   <th class="px-6 py-4 font-semibold text-gray-600 text-right">操作</th>
@@ -2262,8 +2278,12 @@ onUnmounted(() => {
                       <span class="text-blue-600 font-medium">{{ log.actualModel }}</span>
                     </template>
                   </td>
+                  <td class="px-6 py-4 text-gray-600 font-mono text-[10px] max-w-[200px]">
+                    <span class="text-gray-400">{{ log.httpMethod || 'POST' }}</span>
+                    <span class="block truncate text-gray-700" :title="log.requestPath || ''">{{ log.requestPath || '—' }}</span>
+                  </td>
                   <td class="px-6 py-4 text-gray-700 font-mono text-xs">
-                    {{ calculateDuration(log.requestAt || log.createdAt, log.responseAt) || '-' }}
+                    {{ formatLogLatency(log) }}
                   </td>
                   <td class="px-6 py-4">
                     <span 
@@ -2286,6 +2306,9 @@ onUnmounted(() => {
                     >
                       错误
                     </span>
+                    <p v-if="Number(log.isStream) === 1" class="mt-1 text-[9px] text-gray-500 font-mono">
+                      流式<span v-if="Number(log.streamBroken) === 1" class="text-red-600"> · 流中断</span>
+                    </p>
                   </td>
                   <td class="px-6 py-4 text-right">
                     <button 
@@ -2297,7 +2320,7 @@ onUnmounted(() => {
                   </td>
                 </tr>
                 <tr v-if="!filteredLogs.length">
-                  <td colspan="7" class="px-6 py-10 text-center text-gray-400 text-sm">暂无数据</td>
+                  <td colspan="8" class="px-6 py-10 text-center text-gray-400 text-sm">暂无数据</td>
                 </tr>
               </tbody>
             </table>
@@ -2821,7 +2844,7 @@ onUnmounted(() => {
           </button>
         </div>
         <div class="flex-1 overflow-auto p-4 sm:p-6 grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <div class="lg:col-span-2 flex flex-col sm:flex-row gap-4 mb-2">
+            <div class="lg:col-span-2 flex flex-col sm:flex-row gap-4 mb-2">
             <div class="flex-1 p-3 bg-gray-50 rounded-lg border border-gray-100">
               <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">客户端密钥</p>
               <p class="text-sm font-medium text-purple-700">{{ selectedLog.clientKeyName || '未知' }}</p>
@@ -2832,7 +2855,44 @@ onUnmounted(() => {
             </div>
             <div class="flex-1 p-3 bg-gray-50 rounded-lg border border-gray-100">
               <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">响应耗时</p>
-              <p class="text-sm font-medium text-green-700">{{ calculateDuration(selectedLog.requestAt, selectedLog.responseAt) || '计算中...' }}</p>
+              <p class="text-sm font-medium text-green-700">{{ formatLogLatency(selectedLog) || '计算中...' }}</p>
+            </div>
+          </div>
+          <div class="lg:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-3 mb-2 text-xs">
+            <div class="p-3 bg-gray-50 rounded-lg border border-gray-100">
+              <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">HTTP</p>
+              <p class="font-mono text-gray-800">{{ selectedLog.httpMethod || 'POST' }} <span class="text-gray-500">{{ selectedLog.requestPath || '—' }}</span></p>
+            </div>
+            <div class="p-3 bg-gray-50 rounded-lg border border-gray-100">
+              <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">客户端 IP</p>
+              <p class="font-mono text-gray-800">{{ selectedLog.clientIp || '—' }}</p>
+            </div>
+            <div class="p-3 bg-gray-50 rounded-lg border border-gray-100 sm:col-span-2">
+              <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">User-Agent（客户端）</p>
+              <p class="font-mono text-gray-700 break-all">{{ selectedLog.clientUserAgent || '—' }}</p>
+            </div>
+            <div class="p-3 bg-gray-50 rounded-lg border border-gray-100 sm:col-span-2">
+              <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">User-Agent（发往上游）</p>
+              <p class="font-mono text-gray-700 break-all">{{ selectedLog.proxyUserAgent || '—' }}</p>
+            </div>
+            <div class="p-3 bg-gray-50 rounded-lg border border-gray-100">
+              <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">流式 / 中断</p>
+              <p class="text-gray-800">
+                {{ Number(selectedLog.isStream) === 1 ? '是' : '否' }}
+                <span v-if="Number(selectedLog.isStream) === 1 && Number(selectedLog.streamBroken) === 1" class="text-red-600 font-bold"> · 流中断</span>
+              </p>
+            </div>
+            <div class="p-3 bg-gray-50 rounded-lg border border-gray-100">
+              <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">上游 / 客户端 HTTP 状态</p>
+              <p class="font-mono text-gray-800">{{ selectedLog.upstreamStatus ?? '—' }} / {{ selectedLog.clientStatus ?? '—' }}</p>
+            </div>
+            <div class="p-3 bg-gray-50 rounded-lg border border-gray-100">
+              <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">请求体 / 响应体</p>
+              <p class="font-mono text-gray-800">{{ formatBytes(selectedLog.requestBytes) }} / {{ formatBytes(selectedLog.responseBytes) }}</p>
+            </div>
+            <div class="p-3 bg-gray-50 rounded-lg border border-gray-100">
+              <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">Token（入 / 出 / 计）</p>
+              <p class="font-mono text-gray-800">{{ formatNumber(selectedLog.tokensIn) }} / {{ formatNumber(selectedLog.tokensOut) }} / {{ formatNumber(selectedLog.tokensTotal) }}</p>
             </div>
           </div>
           <div class="lg:col-span-2 space-y-2 mb-2">

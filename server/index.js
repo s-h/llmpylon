@@ -90,6 +90,25 @@ function extractUsage(payload) {
     return lastUsage || { tokensIn: 0, tokensOut: 0, tokensTotal: 0 };
 }
 
+function getClientIp(req) {
+    const xff = req.headers['x-forwarded-for'];
+    if (typeof xff === 'string' && xff.trim()) {
+        return xff.split(',')[0].trim();
+    }
+    if (Array.isArray(xff) && xff.length) {
+        return String(xff[0]).split(',')[0].trim();
+    }
+    const xr = req.headers['x-real-ip'];
+    if (typeof xr === 'string' && xr.trim()) return xr.trim();
+    return req.socket?.remoteAddress || req.ip || '';
+}
+
+function pickOutgoingUserAgent(headers) {
+    if (!headers || typeof headers !== 'object') return null;
+    const v = headers['User-Agent'] ?? headers['user-agent'];
+    return v != null && String(v).trim() ? String(v) : null;
+}
+
 function normalizeStatsRange(range) {
     const now = new Date();
     if (!range || range === '30d') return { range: '30d', from: new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000), to: now };
@@ -1225,23 +1244,69 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
     console.log(`[Proxy] Client Key: ${mask(authHeader)}`);
     console.log(`[Proxy] Provider Key: ${mask(provider.apiKey)}`);
 
-    // Extract path suffix after /proxy
+    // Extract path suffix after /proxy (no query string — easier endpoint aggregation)
     let pathSuffix = req.url.substring('/proxy'.length) || '/';
+    const qIdx = pathSuffix.indexOf('?');
+    if (qIdx >= 0) pathSuffix = pathSuffix.slice(0, qIdx);
+    pathSuffix = pathSuffix || '/';
+    if (!pathSuffix.startsWith('/')) pathSuffix = `/${pathSuffix}`;
 
     // Create log entry
     const requestAt = new Date().toISOString();
     const clientUrl = req.url;
+    const clientUserAgent = req.headers['user-agent'] ? String(req.headers['user-agent']) : null;
+    const clientIp = getClientIp(req);
+    const httpMethod = req.method;
+    const requestPath = pathSuffix;
+    const isStreamFlag = stream ? 1 : 0;
+    const requestBodySerialized = JSON.stringify(req.body);
+    const requestBytes = Buffer.byteLength(requestBodySerialized, 'utf8');
     const logResult = await db.run(
-        'INSERT INTO conversation_logs (providerId, clientKeyId, model, actualModel, requestBody, status, requestAt, clientUrl) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-        [provider.id, clientKeyData.id, model || 'unknown', actualModel, JSON.stringify(req.body), 'waiting', requestAt, clientUrl]
+        `INSERT INTO conversation_logs (
+            providerId, clientKeyId, model, actualModel, requestBody, status, requestAt, clientUrl,
+            clientUserAgent, clientIp, httpMethod, requestPath, isStream, requestBytes
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+            provider.id,
+            clientKeyData.id,
+            model || 'unknown',
+            actualModel,
+            requestBodySerialized,
+            'waiting',
+            requestAt,
+            clientUrl,
+            clientUserAgent,
+            clientIp,
+            httpMethod,
+            requestPath,
+            isStreamFlag,
+            requestBytes
+        ]
     );
     const logId = logResult.lastID;
 
     // Notify frontend: waiting for response
-    io.to('admins').emit('log_update', { id: logId, status: 'waiting', providerName: provider.name, clientKeyId: clientKeyData.id, clientKeyName: clientKeyData.name, requestAt, clientUrl, actualModel });
+    io.to('admins').emit('log_update', {
+        id: logId,
+        status: 'waiting',
+        providerName: provider.name,
+        clientKeyId: clientKeyData.id,
+        clientKeyName: clientKeyData.name,
+        requestAt,
+        clientUrl,
+        actualModel,
+        clientUserAgent,
+        clientIp,
+        httpMethod,
+        requestPath,
+        isStream: isStreamFlag,
+        requestBytes
+    });
 
     let targetUrl = '';
     if (stream) {
+        let streamBytesTotal = 0;
+        let proxyUserAgent = null;
         try {
             let targetBody = { ...req.body, model: actualModel };
             let upstreamHeaders = {};
@@ -1250,11 +1315,26 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                 if (isClientAnthropic && !isClientOpenAI) {
                     const msg = 'Streaming protocol conversion (Anthropic -> OpenAI) is not supported';
                     const responseAt = new Date().toISOString();
+                    const latencyMs = new Date(responseAt) - new Date(requestAt);
+                    const rb = Buffer.byteLength(msg, 'utf8');
                     await db.run(
-                        'UPDATE conversation_logs SET responseBody = ?, status = ?, responseAt = ?, targetUrl = ? WHERE id = ?',
-                        [msg, 'error', responseAt, targetUrl, logId]
+                        `UPDATE conversation_logs SET responseBody = ?, status = ?, responseAt = ?, targetUrl = ?, proxyUserAgent = ?, latencyMs = ?, upstreamStatus = ?, clientStatus = ?, responseBytes = ?, streamBroken = ?, tokensIn = ?, tokensOut = ?, tokensTotal = ? WHERE id = ?`,
+                        [msg, 'error', responseAt, targetUrl, null, Number.isFinite(latencyMs) ? Math.round(latencyMs) : null, null, 400, rb, 0, 0, 0, 0, logId]
                     );
-                    io.to('admins').emit('log_update', { id: logId, status: 'error', responseBody: msg, responseAt, targetUrl });
+                    io.to('admins').emit('log_update', {
+                        id: logId,
+                        status: 'error',
+                        responseBody: msg,
+                        responseAt,
+                        targetUrl,
+                        latencyMs: Number.isFinite(latencyMs) ? Math.round(latencyMs) : null,
+                        clientStatus: 400,
+                        responseBytes: rb,
+                        streamBroken: 0,
+                        tokensIn: 0,
+                        tokensOut: 0,
+                        tokensTotal: 0
+                    });
                     return res.status(400).json({ error: msg });
                 }
                 targetUrl = provider.baseUrl.replace(/\/+$/, '');
@@ -1275,11 +1355,26 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                 if (isClientOpenAI || !isClientAnthropic) {
                     const msg = 'Streaming protocol conversion (OpenAI -> Anthropic) is not supported';
                     const responseAt = new Date().toISOString();
+                    const latencyMs = new Date(responseAt) - new Date(requestAt);
+                    const rb = Buffer.byteLength(msg, 'utf8');
                     await db.run(
-                        'UPDATE conversation_logs SET responseBody = ?, status = ?, responseAt = ?, targetUrl = ? WHERE id = ?',
-                        [msg, 'error', responseAt, targetUrl, logId]
+                        `UPDATE conversation_logs SET responseBody = ?, status = ?, responseAt = ?, targetUrl = ?, proxyUserAgent = ?, latencyMs = ?, upstreamStatus = ?, clientStatus = ?, responseBytes = ?, streamBroken = ?, tokensIn = ?, tokensOut = ?, tokensTotal = ? WHERE id = ?`,
+                        [msg, 'error', responseAt, targetUrl, null, Number.isFinite(latencyMs) ? Math.round(latencyMs) : null, null, 400, rb, 0, 0, 0, 0, logId]
                     );
-                    io.to('admins').emit('log_update', { id: logId, status: 'error', responseBody: msg, responseAt, targetUrl });
+                    io.to('admins').emit('log_update', {
+                        id: logId,
+                        status: 'error',
+                        responseBody: msg,
+                        responseAt,
+                        targetUrl,
+                        latencyMs: Number.isFinite(latencyMs) ? Math.round(latencyMs) : null,
+                        clientStatus: 400,
+                        responseBytes: rb,
+                        streamBroken: 0,
+                        tokensIn: 0,
+                        tokensOut: 0,
+                        tokensTotal: 0
+                    });
                     return res.status(400).json({ error: msg });
                 }
                 targetUrl = provider.baseUrl.replace(/\/+$/, '');
@@ -1301,12 +1396,36 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                     upstreamHeaders['anthropic-beta'] = req.headers['anthropic-beta'];
                 }
             } else {
-                return res.status(400).json({ error: `Unsupported provider type: ${provider.type}` });
+                const msg = `Unsupported provider type: ${provider.type}`;
+                const responseAt = new Date().toISOString();
+                const latencyMs = new Date(responseAt) - new Date(requestAt);
+                const rb = Buffer.byteLength(msg, 'utf8');
+                await db.run(
+                    `UPDATE conversation_logs SET responseBody = ?, status = ?, responseAt = ?, targetUrl = ?, proxyUserAgent = ?, latencyMs = ?, upstreamStatus = ?, clientStatus = ?, responseBytes = ?, streamBroken = ?, tokensIn = ?, tokensOut = ?, tokensTotal = ? WHERE id = ?`,
+                    [msg, 'error', responseAt, targetUrl, null, Number.isFinite(latencyMs) ? Math.round(latencyMs) : null, null, 400, rb, 0, 0, 0, 0, logId]
+                );
+                io.to('admins').emit('log_update', {
+                    id: logId,
+                    status: 'error',
+                    responseBody: msg,
+                    responseAt,
+                    targetUrl,
+                    latencyMs: Number.isFinite(latencyMs) ? Math.round(latencyMs) : null,
+                    clientStatus: 400,
+                    responseBytes: rb,
+                    streamBroken: 0,
+                    tokensIn: 0,
+                    tokensOut: 0,
+                    tokensTotal: 0
+                });
+                return res.status(400).json({ error: msg });
             }
 
             if (req.headers['user-agent']) {
                 upstreamHeaders['User-Agent'] = req.headers['user-agent'];
             }
+
+            proxyUserAgent = pickOutgoingUserAgent(upstreamHeaders);
 
             const upstream = await axiosInstance.post(targetUrl, targetBody, {
                 headers: upstreamHeaders,
@@ -1351,6 +1470,7 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
 
                 src.on('data', (chunk) => {
                     const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
+                    streamBytesTotal += Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(text, 'utf8');
                     responseData += text;
                     pendingChunkForLog += text;
                     res.write(chunk);
@@ -1381,13 +1501,29 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
 
             const responseAt = new Date().toISOString();
             const status = upstream.status >= 200 && upstream.status < 300 ? 'completed' : 'error';
-            await db.run(
-                'UPDATE conversation_logs SET responseBody = ?, status = ?, responseAt = ?, targetUrl = ? WHERE id = ?',
-                [responseData, status, responseAt, targetUrl, logId]
-            );
-
             const latencyMs = new Date(responseAt) - new Date(requestAt);
             const usage = extractUsage(responseData);
+            const clientStatus = upstream.status;
+            await db.run(
+                `UPDATE conversation_logs SET responseBody = ?, status = ?, responseAt = ?, targetUrl = ?, proxyUserAgent = ?, latencyMs = ?, upstreamStatus = ?, clientStatus = ?, responseBytes = ?, streamBroken = ?, tokensIn = ?, tokensOut = ?, tokensTotal = ? WHERE id = ?`,
+                [
+                    responseData,
+                    status,
+                    responseAt,
+                    targetUrl,
+                    proxyUserAgent,
+                    Number.isFinite(latencyMs) ? Math.round(latencyMs) : null,
+                    upstream.status,
+                    clientStatus,
+                    streamBytesTotal,
+                    0,
+                    usage.tokensIn,
+                    usage.tokensOut,
+                    usage.tokensTotal,
+                    logId
+                ]
+            );
+
             await db.run(
                 `INSERT INTO stats_events (appId, providerId, requestedModel, actualModel, status, requestAt, responseAt, latencyMs, tokensIn, tokensOut, tokensTotal, errorMessage)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -1399,7 +1535,7 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                     status,
                     requestAt,
                     responseAt,
-                    Number.isFinite(latencyMs) ? latencyMs : null,
+                    Number.isFinite(latencyMs) ? Math.round(latencyMs) : null,
                     usage.tokensIn,
                     usage.tokensOut,
                     usage.tokensTotal,
@@ -1407,16 +1543,50 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                 ]
             );
 
-            io.to('admins').emit('log_update', { id: logId, status, responseBody: responseData, responseAt, targetUrl });
+            io.to('admins').emit('log_update', {
+                id: logId,
+                status,
+                responseBody: responseData,
+                responseAt,
+                targetUrl,
+                proxyUserAgent,
+                latencyMs: Number.isFinite(latencyMs) ? Math.round(latencyMs) : null,
+                upstreamStatus: upstream.status,
+                clientStatus,
+                responseBytes: streamBytesTotal,
+                streamBroken: 0,
+                tokensIn: usage.tokensIn,
+                tokensOut: usage.tokensOut,
+                tokensTotal: usage.tokensTotal
+            });
             return;
         } catch (error) {
             const responseAt = new Date().toISOString();
             const errorBody = error?.message || 'Streaming proxy failed';
-            await db.run(
-                'UPDATE conversation_logs SET responseBody = ?, status = ?, responseAt = ?, targetUrl = ? WHERE id = ?',
-                [errorBody, 'error', responseAt, targetUrl || error.config?.url, logId]
-            );
             const latencyMs = new Date(responseAt) - new Date(requestAt);
+            const cfgUa = pickOutgoingUserAgent(error.config?.headers);
+            const upstreamStatus = error.response?.status ?? null;
+            const clientStatus = res.headersSent ? (res.statusCode || error.response?.status || 500) : (error.response?.status || 500);
+            const usage = extractUsage(error.response?.data);
+            await db.run(
+                `UPDATE conversation_logs SET responseBody = ?, status = ?, responseAt = ?, targetUrl = ?, proxyUserAgent = ?, latencyMs = ?, upstreamStatus = ?, clientStatus = ?, responseBytes = ?, streamBroken = ?, tokensIn = ?, tokensOut = ?, tokensTotal = ? WHERE id = ?`,
+                [
+                    errorBody,
+                    'error',
+                    responseAt,
+                    targetUrl || error.config?.url,
+                    cfgUa,
+                    Number.isFinite(latencyMs) ? Math.round(latencyMs) : null,
+                    upstreamStatus,
+                    clientStatus,
+                    streamBytesTotal,
+                    1,
+                    usage.tokensIn,
+                    usage.tokensOut,
+                    usage.tokensTotal,
+                    logId
+                ]
+            );
             await db.run(
                 `INSERT INTO stats_events (appId, providerId, requestedModel, actualModel, status, requestAt, responseAt, latencyMs, tokensIn, tokensOut, tokensTotal, errorMessage)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -1428,14 +1598,29 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                     'error',
                     requestAt,
                     responseAt,
-                    Number.isFinite(latencyMs) ? latencyMs : null,
-                    0,
-                    0,
-                    0,
+                    Number.isFinite(latencyMs) ? Math.round(latencyMs) : null,
+                    usage.tokensIn,
+                    usage.tokensOut,
+                    usage.tokensTotal,
                     error?.message || 'Streaming proxy failed'
                 ]
             );
-            io.to('admins').emit('log_update', { id: logId, status: 'error', responseBody: errorBody, responseAt, targetUrl: targetUrl || error.config?.url });
+            io.to('admins').emit('log_update', {
+                id: logId,
+                status: 'error',
+                responseBody: errorBody,
+                responseAt,
+                targetUrl: targetUrl || error.config?.url,
+                proxyUserAgent: cfgUa,
+                latencyMs: Number.isFinite(latencyMs) ? Math.round(latencyMs) : null,
+                upstreamStatus,
+                clientStatus,
+                responseBytes: streamBytesTotal,
+                streamBroken: 1,
+                tokensIn: usage.tokensIn,
+                tokensOut: usage.tokensOut,
+                tokensTotal: usage.tokensTotal
+            });
             if (!res.headersSent) {
                 return res.status(error.response?.status || 500).json(error.response?.data || { error: errorBody });
             }
@@ -1446,6 +1631,7 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
 
     try {
         let response;
+        let proxyUserAgent = null;
         if (provider.type === 'openai') {
             // Target is OpenAI
             let targetBody = { ...req.body, model: actualModel };
@@ -1487,6 +1673,8 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
             if (req.headers['user-agent']) {
                 openaiHeaders['User-Agent'] = req.headers['user-agent'];
             }
+
+            proxyUserAgent = pickOutgoingUserAgent(openaiHeaders);
 
             response = await axiosInstance.post(targetUrl, targetBody, {
                 headers: openaiHeaders
@@ -1550,6 +1738,8 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                 anthropicHeaders['User-Agent'] = req.headers['user-agent'];
             }
 
+            proxyUserAgent = pickOutgoingUserAgent(anthropicHeaders);
+
             response = await axiosInstance.post(targetUrl, targetBody, {
                 headers: anthropicHeaders
             });
@@ -1581,13 +1771,30 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
         // Update log
         const responseAt = new Date().toISOString();
         const responseData = typeof response.data === 'string' ? response.data : JSON.stringify(response.data);
-        await db.run(
-            'UPDATE conversation_logs SET responseBody = ?, status = ?, responseAt = ?, targetUrl = ? WHERE id = ?',
-            [responseData, 'completed', responseAt, targetUrl, logId]
-        );
-
         const latencyMs = new Date(responseAt) - new Date(requestAt);
         const usage = extractUsage(response.data);
+        const responseBytes = Buffer.byteLength(responseData, 'utf8');
+        const upstreamStatus = response.status;
+        const clientStatus = response.status;
+        await db.run(
+            `UPDATE conversation_logs SET responseBody = ?, status = ?, responseAt = ?, targetUrl = ?, proxyUserAgent = ?, latencyMs = ?, upstreamStatus = ?, clientStatus = ?, responseBytes = ?, streamBroken = 0, tokensIn = ?, tokensOut = ?, tokensTotal = ? WHERE id = ?`,
+            [
+                responseData,
+                'completed',
+                responseAt,
+                targetUrl,
+                proxyUserAgent,
+                Number.isFinite(latencyMs) ? Math.round(latencyMs) : null,
+                upstreamStatus,
+                clientStatus,
+                responseBytes,
+                usage.tokensIn,
+                usage.tokensOut,
+                usage.tokensTotal,
+                logId
+            ]
+        );
+
         await db.run(
             `INSERT INTO stats_events (appId, providerId, requestedModel, actualModel, status, requestAt, responseAt, latencyMs, tokensIn, tokensOut, tokensTotal, errorMessage)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -1608,7 +1815,22 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
         );
 
         // Notify frontend: completed
-        io.to('admins').emit('log_update', { id: logId, status: 'completed', responseBody: responseData, responseAt, targetUrl });
+        io.to('admins').emit('log_update', {
+            id: logId,
+            status: 'completed',
+            responseBody: responseData,
+            responseAt,
+            targetUrl,
+            proxyUserAgent,
+            latencyMs: Number.isFinite(latencyMs) ? Math.round(latencyMs) : null,
+            upstreamStatus,
+            clientStatus,
+            responseBytes,
+            streamBroken: 0,
+            tokensIn: usage.tokensIn,
+            tokensOut: usage.tokensOut,
+            tokensTotal: usage.tokensTotal
+        });
 
         res.json(response.data);
 
@@ -1625,13 +1847,31 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
         });
         const errorData = error.response?.data || { error: error.message };
         const errorBody = typeof errorData === 'string' ? errorData : JSON.stringify(errorData);
-        await db.run(
-            'UPDATE conversation_logs SET responseBody = ?, status = ?, responseAt = ?, targetUrl = ? WHERE id = ?',
-            [errorBody, 'error', responseAt, targetUrl || error.config?.url, logId]
-        );
-
         const latencyMs = new Date(responseAt) - new Date(requestAt);
         const usage = extractUsage(error.response?.data);
+        const responseBytes = Buffer.byteLength(errorBody, 'utf8');
+        const cfgUa = pickOutgoingUserAgent(error.config?.headers);
+        const upstreamStatus = error.response?.status ?? null;
+        const clientStatus = error.response?.status || 500;
+        await db.run(
+            `UPDATE conversation_logs SET responseBody = ?, status = ?, responseAt = ?, targetUrl = ?, proxyUserAgent = ?, latencyMs = ?, upstreamStatus = ?, clientStatus = ?, responseBytes = ?, streamBroken = 0, tokensIn = ?, tokensOut = ?, tokensTotal = ? WHERE id = ?`,
+            [
+                errorBody,
+                'error',
+                responseAt,
+                targetUrl || error.config?.url,
+                cfgUa,
+                Number.isFinite(latencyMs) ? Math.round(latencyMs) : null,
+                upstreamStatus,
+                clientStatus,
+                responseBytes,
+                usage.tokensIn,
+                usage.tokensOut,
+                usage.tokensTotal,
+                logId
+            ]
+        );
+
         await db.run(
             `INSERT INTO stats_events (appId, providerId, requestedModel, actualModel, status, requestAt, responseAt, latencyMs, tokensIn, tokensOut, tokensTotal, errorMessage)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -1651,7 +1891,22 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
             ]
         );
 
-        io.to('admins').emit('log_update', { id: logId, status: 'error', responseBody: errorBody, responseAt, targetUrl: targetUrl || error.config?.url });
+        io.to('admins').emit('log_update', {
+            id: logId,
+            status: 'error',
+            responseBody: errorBody,
+            responseAt,
+            targetUrl: targetUrl || error.config?.url,
+            proxyUserAgent: cfgUa,
+            latencyMs: Number.isFinite(latencyMs) ? Math.round(latencyMs) : null,
+            upstreamStatus,
+            clientStatus,
+            responseBytes,
+            streamBroken: 0,
+            tokensIn: usage.tokensIn,
+            tokensOut: usage.tokensOut,
+            tokensTotal: usage.tokensTotal
+        });
         res.status(error.response?.status || 500).json(errorData);
     }
 });

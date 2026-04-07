@@ -193,6 +193,30 @@ async function setupDb() {
         await db.exec('ALTER TABLE conversation_logs ADD COLUMN actualModel TEXT');
     }
 
+    const logCols2 = await db.all('PRAGMA table_info(conversation_logs)');
+    const lcn = logCols2.map((c) => c.name);
+    const addLogCol = async (name, ddl) => {
+        if (!lcn.includes(name)) {
+            await db.exec(`ALTER TABLE conversation_logs ADD COLUMN ${name} ${ddl}`);
+            lcn.push(name);
+        }
+    };
+    await addLogCol('clientUserAgent', 'TEXT');
+    await addLogCol('proxyUserAgent', 'TEXT');
+    await addLogCol('clientIp', 'TEXT');
+    await addLogCol('httpMethod', 'TEXT');
+    await addLogCol('requestPath', 'TEXT');
+    await addLogCol('isStream', 'INTEGER DEFAULT 0');
+    await addLogCol('streamBroken', 'INTEGER DEFAULT 0');
+    await addLogCol('requestBytes', 'INTEGER');
+    await addLogCol('responseBytes', 'INTEGER');
+    await addLogCol('latencyMs', 'INTEGER');
+    await addLogCol('upstreamStatus', 'INTEGER');
+    await addLogCol('clientStatus', 'INTEGER');
+    await addLogCol('tokensIn', 'INTEGER');
+    await addLogCol('tokensOut', 'INTEGER');
+    await addLogCol('tokensTotal', 'INTEGER');
+
     const adminUserCols = await db.all('PRAGMA table_info(admin_users)');
     const adminUserColNames = adminUserCols.map(c => c.name);
     if (!adminUserColNames.includes('mustChangePassword')) {
