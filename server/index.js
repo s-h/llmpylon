@@ -36,29 +36,72 @@ app.use((req, res, next) => {
 
 let db;
 
-function extractUsage(payload) {
-    const pickFromUsage = (usage) => {
-        if (!usage || typeof usage !== 'object') return null;
-        if (typeof usage.prompt_tokens === 'number' || typeof usage.completion_tokens === 'number' || typeof usage.total_tokens === 'number') {
-            const tokensIn = typeof usage.prompt_tokens === 'number' ? usage.prompt_tokens : 0;
-            const tokensOut = typeof usage.completion_tokens === 'number' ? usage.completion_tokens : 0;
-            const tokensTotal = typeof usage.total_tokens === 'number' ? usage.total_tokens : (tokensIn + tokensOut);
-            return { tokensIn, tokensOut, tokensTotal };
-        }
-        if (typeof usage.input_tokens === 'number' || typeof usage.output_tokens === 'number') {
-            const tokensIn = typeof usage.input_tokens === 'number' ? usage.input_tokens : 0;
-            const tokensOut = typeof usage.output_tokens === 'number' ? usage.output_tokens : 0;
-            const tokensTotal = tokensIn + tokensOut;
-            return { tokensIn, tokensOut, tokensTotal };
-        }
-        return null;
-    };
+function tokNum(v) {
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
+    if (typeof v === 'string' && v.trim() !== '') {
+        const n = Number(v);
+        if (Number.isFinite(n)) return n;
+    }
+    return null;
+}
 
+function pickFromUsage(usage) {
+    if (!usage || typeof usage !== 'object') return null;
+    const pt = tokNum(usage.prompt_tokens);
+    const ct = tokNum(usage.completion_tokens);
+    const tt = tokNum(usage.total_tokens);
+    if (pt !== null || ct !== null || tt !== null) {
+        const tokensIn = pt ?? 0;
+        const tokensOut = ct ?? 0;
+        const tokensTotal = tt !== null ? tt : tokensIn + tokensOut;
+        return { tokensIn, tokensOut, tokensTotal };
+    }
+    const it = tokNum(usage.input_tokens);
+    const ot = tokNum(usage.output_tokens);
+    if (it !== null || ot !== null) {
+        const tokensIn = it ?? 0;
+        const tokensOut = ot ?? 0;
+        return { tokensIn, tokensOut, tokensTotal: tokensIn + tokensOut };
+    }
+    return null;
+}
+
+function usageFromStreamChunk(obj) {
+    if (!obj || typeof obj !== 'object') return null;
+    let u = pickFromUsage(obj.usage);
+    if (!u && obj.message && typeof obj.message === 'object') {
+        u = pickFromUsage(obj.message.usage);
+    }
+    if (!u && obj.delta && typeof obj.delta === 'object') {
+        u = pickFromUsage(obj.delta.usage);
+    }
+    return u;
+}
+
+function mergeUsageMax(a, b) {
+    if (!b) return a;
+    if (!a) return { ...b };
+    return {
+        tokensIn: Math.max(a.tokensIn, b.tokensIn),
+        tokensOut: Math.max(a.tokensOut, b.tokensOut),
+        tokensTotal: Math.max(a.tokensTotal, b.tokensTotal)
+    };
+}
+
+function finalizeUsage(u) {
+    if (!u) return { tokensIn: 0, tokensOut: 0, tokensTotal: 0 };
+    let { tokensIn, tokensOut, tokensTotal } = u;
+    const sum = tokensIn + tokensOut;
+    if (tokensTotal < sum) tokensTotal = sum;
+    return { tokensIn, tokensOut, tokensTotal };
+}
+
+function extractUsage(payload) {
     if (!payload) return { tokensIn: 0, tokensOut: 0, tokensTotal: 0 };
 
     if (typeof payload === 'object') {
-        const usage = pickFromUsage(payload.usage);
-        return usage || { tokensIn: 0, tokensOut: 0, tokensTotal: 0 };
+        const u = usageFromStreamChunk(payload) || pickFromUsage(payload.usage);
+        return finalizeUsage(u);
     }
 
     if (typeof payload !== 'string') return { tokensIn: 0, tokensOut: 0, tokensTotal: 0 };
@@ -66,13 +109,13 @@ function extractUsage(payload) {
     try {
         const json = JSON.parse(payload);
         if (json && typeof json === 'object') {
-            const usage = pickFromUsage(json.usage);
-            return usage || { tokensIn: 0, tokensOut: 0, tokensTotal: 0 };
+            const u = usageFromStreamChunk(json) || pickFromUsage(json.usage);
+            return finalizeUsage(u);
         }
     } catch (e) {
     }
 
-    let lastUsage = null;
+    let agg = null;
     const lines = payload.split('\n');
     for (const line of lines) {
         const trimmed = line.trim();
@@ -81,13 +124,13 @@ function extractUsage(payload) {
         if (!dataStr || dataStr === '[DONE]') continue;
         try {
             const obj = JSON.parse(dataStr);
-            const usage = pickFromUsage(obj?.usage);
-            if (usage) lastUsage = usage;
+            const u = usageFromStreamChunk(obj);
+            if (u) agg = mergeUsageMax(agg, u);
         } catch (e) {
         }
     }
 
-    return lastUsage || { tokensIn: 0, tokensOut: 0, tokensTotal: 0 };
+    return finalizeUsage(agg);
 }
 
 function getClientIp(req) {
@@ -107,6 +150,48 @@ function pickOutgoingUserAgent(headers) {
     if (!headers || typeof headers !== 'object') return null;
     const v = headers['User-Agent'] ?? headers['user-agent'];
     return v != null && String(v).trim() ? String(v) : null;
+}
+
+const APP_SETTINGS_KEYS = {
+    LOG_RETENTION_DAYS: 'log_retention_days',
+    STATS_RETENTION_DAYS: 'stats_retention_days'
+};
+
+async function getAppSettingInt(key, defaultVal) {
+    const row = await db.get('SELECT value FROM app_settings WHERE key = ?', [key]);
+    if (row == null || row.value === undefined || row.value === '') return defaultVal;
+    const n = parseInt(String(row.value), 10);
+    return Number.isFinite(n) && n >= 0 ? n : defaultVal;
+}
+
+async function setAppSetting(key, val) {
+    await db.run(
+        'INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+        [key, String(val)]
+    );
+}
+
+async function runRetentionPurge() {
+    if (!db) return;
+    const logDays = await getAppSettingInt(APP_SETTINGS_KEYS.LOG_RETENTION_DAYS, 0);
+    const statsDays = await getAppSettingInt(APP_SETTINGS_KEYS.STATS_RETENTION_DAYS, 0);
+    const now = Date.now();
+    if (logDays > 0) {
+        const cutoff = new Date(now - logDays * 86400000).toISOString();
+        const r = await db.run(
+            'DELETE FROM conversation_logs WHERE COALESCE(requestAt, createdAt) IS NOT NULL AND COALESCE(requestAt, createdAt) < ?',
+            [cutoff]
+        );
+        if (r.changes > 0) console.log(`[Retention] Removed ${r.changes} conversation_logs (older than ${logDays}d)`);
+    }
+    if (statsDays > 0) {
+        const cutoff = new Date(now - statsDays * 86400000).toISOString();
+        const r = await db.run(
+            'DELETE FROM stats_events WHERE COALESCE(requestAt, createdAt) IS NOT NULL AND COALESCE(requestAt, createdAt) < ?',
+            [cutoff]
+        );
+        if (r.changes > 0) console.log(`[Retention] Removed ${r.changes} stats_events (older than ${statsDays}d)`);
+    }
 }
 
 function normalizeStatsRange(range) {
@@ -756,6 +841,29 @@ app.delete('/api/logs', async (req, res) => {
         console.error('[API] Error clearing logs:', err);
         res.status(500).json({ error: err.message });
     }
+});
+
+app.get('/api/settings', async (req, res) => {
+    const logRetentionDays = await getAppSettingInt(APP_SETTINGS_KEYS.LOG_RETENTION_DAYS, 0);
+    const statsRetentionDays = await getAppSettingInt(APP_SETTINGS_KEYS.STATS_RETENTION_DAYS, 0);
+    res.json({ logRetentionDays, statsRetentionDays });
+});
+
+app.put('/api/settings', async (req, res) => {
+    const body = req.body || {};
+    let logRetentionDays = Math.max(0, parseInt(body.logRetentionDays, 10));
+    let statsRetentionDays = Math.max(0, parseInt(body.statsRetentionDays, 10));
+    if (!Number.isFinite(logRetentionDays)) logRetentionDays = 0;
+    if (!Number.isFinite(statsRetentionDays)) statsRetentionDays = 0;
+    await setAppSetting(APP_SETTINGS_KEYS.LOG_RETENTION_DAYS, logRetentionDays);
+    await setAppSetting(APP_SETTINGS_KEYS.STATS_RETENTION_DAYS, statsRetentionDays);
+    await runRetentionPurge();
+    res.json({ logRetentionDays, statsRetentionDays });
+});
+
+app.post('/api/stats/clear', async (req, res) => {
+    const r = await db.run('DELETE FROM stats_events');
+    res.json({ ok: true, changes: r.changes });
 });
 
 app.get('/api/models/catalog', async (req, res) => {
@@ -1930,6 +2038,10 @@ if (fs.existsSync(clientIndexFile)) {
 
 async function start() {
     db = await setupDb();
+    await runRetentionPurge().catch((e) => console.error('[Retention]', e));
+    setInterval(() => {
+        runRetentionPurge().catch((e) => console.error('[Retention]', e));
+    }, 6 * 60 * 60 * 1000);
     const PORT = process.env.PORT || 3000;
     server.listen(PORT, () => {
         console.log(`Server running on port ${PORT}`);

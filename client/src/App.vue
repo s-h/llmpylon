@@ -194,6 +194,8 @@ const importStep = ref('file');
 const importResults = ref([]);
 const showGlobalImportDialog = ref(false);
 const globalImportData = ref(null);
+const appSettings = ref({ logRetentionDays: 0, statsRetentionDays: 0 });
+const appSettingsSaving = ref(false);
 const nowMs = ref(Date.now());
 
 const filteredLogs = ref([]);
@@ -611,6 +613,46 @@ const fetchLogs = async () => {
 const fetchAdminUsers = async () => {
   const res = await axios.get(`${API_BASE}/users`);
   adminUsers.value = res.data;
+};
+
+const fetchAppSettings = async () => {
+  try {
+    const res = await axios.get(`${API_BASE}/settings`);
+    appSettings.value = {
+      logRetentionDays: Math.max(0, Number(res.data.logRetentionDays) || 0),
+      statsRetentionDays: Math.max(0, Number(res.data.statsRetentionDays) || 0)
+    };
+  } catch (e) {
+    console.error('fetchAppSettings', e);
+  }
+};
+
+const saveAppSettings = async () => {
+  appSettingsSaving.value = true;
+  try {
+    const res = await axios.put(`${API_BASE}/settings`, {
+      logRetentionDays: Math.max(0, Number(appSettings.value.logRetentionDays) || 0),
+      statsRetentionDays: Math.max(0, Number(appSettings.value.statsRetentionDays) || 0)
+    });
+    appSettings.value.logRetentionDays = res.data.logRetentionDays;
+    appSettings.value.statsRetentionDays = res.data.statsRetentionDays;
+    alert('已保存');
+  } catch (e) {
+    alert('保存失败: ' + (e.response?.data?.error || e.message));
+  } finally {
+    appSettingsSaving.value = false;
+  }
+};
+
+const clearAllStats = async () => {
+  if (!confirm('确定清空全部统计数据？此操作不可恢复。')) return;
+  try {
+    const res = await axios.post(`${API_BASE}/stats/clear`);
+    alert(`已清空 ${res.data.changes ?? 0} 条统计记录`);
+    if (activeTab.value === 'stats') fetchStats();
+  } catch (e) {
+    alert('清空失败: ' + (e.response?.data?.error || e.message));
+  }
 };
 
 const addAdminUser = async () => {
@@ -1122,10 +1164,39 @@ const deleteModelRule = async (id) => {
   fetchModelRules();
 };
 
+const escapeRegExp = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const escapeHtml = (s) =>
+  String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+
+/** 安全高亮：先按原文匹配，再对片段 escape，避免 JSON 中的 <、& 破坏 v-html 或导致正则无匹配 */
 const highlightText = (text) => {
-  if (!searchQuery.value || !text) return text;
-  const regex = new RegExp(`(${searchQuery.value})`, 'gi');
-  return text.replace(regex, '<mark class="bg-yellow-200">$1</mark>');
+  if (text === null || text === undefined) return '';
+  const raw = String(text);
+  const q = (searchQuery.value || '').trim();
+  if (!q) return escapeHtml(raw);
+  let re;
+  try {
+    re = new RegExp(escapeRegExp(q), 'gi');
+  } catch {
+    return escapeHtml(raw);
+  }
+  const out = [];
+  let last = 0;
+  let m;
+  while ((m = re.exec(raw)) !== null) {
+    out.push(escapeHtml(raw.slice(last, m.index)));
+    out.push(`<mark class="bg-yellow-200">${escapeHtml(m[0])}</mark>`);
+    last = m.index + m[0].length;
+    if (m[0].length === 0) re.lastIndex++;
+  }
+  out.push(escapeHtml(raw.slice(last)));
+  return out.join('');
 };
 
 const parseDate = (dateStr) => {
@@ -1223,7 +1294,10 @@ watch(activeTab, (tab) => {
     if (isAuthenticated.value) fetchManagedModels();
   }
   if (tab === 'config') {
-    if (isAuthenticated.value) fetchAdminUsers();
+    if (isAuthenticated.value) {
+      fetchAdminUsers();
+      fetchAppSettings();
+    }
   }
   if (tab === 'logs') {
     if (isAuthenticated.value) fetchLogs();
@@ -2124,6 +2198,52 @@ onUnmounted(() => {
                   导入全局配置
                 </button>
               </div>
+            </div>
+          </div>
+
+          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6 space-y-4">
+            <div>
+              <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">数据保留与统计</h3>
+              <p class="text-xs text-gray-400 mt-1">按天自动删除过期数据；0 表示不自动删除。保存后立即按新规则清理一次，之后约每 6 小时再执行。</p>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label class="block text-[10px] font-bold text-gray-400 uppercase mb-1">对话日志保留（天）</label>
+                <input
+                  v-model.number="appSettings.logRetentionDays"
+                  type="number"
+                  min="0"
+                  step="1"
+                  class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                />
+              </div>
+              <div>
+                <label class="block text-[10px] font-bold text-gray-400 uppercase mb-1">统计数据保留（天）</label>
+                <input
+                  v-model.number="appSettings.statsRetentionDays"
+                  type="number"
+                  min="0"
+                  step="1"
+                  class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                />
+              </div>
+            </div>
+            <div class="flex flex-wrap gap-2 items-center">
+              <button
+                type="button"
+                :disabled="appSettingsSaving"
+                @click="saveAppSettings"
+                class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm font-bold disabled:opacity-50"
+              >
+                {{ appSettingsSaving ? '保存中…' : '保存保留策略' }}
+              </button>
+              <button
+                type="button"
+                @click="clearAllStats"
+                class="px-4 py-2 border border-rose-200 text-rose-700 bg-rose-50 rounded-lg hover:bg-rose-100 transition-colors text-sm font-bold"
+              >
+                清空统计数据
+              </button>
             </div>
           </div>
 
