@@ -127,7 +127,7 @@ curl -X POST http://localhost:3000/proxy/v1/chat/completions \
 | `GET /healthz`         | 健康检查（含 `version` / `name`） |
 | `POST /api/auth/login` | 管理员登录                      |
 | `/api/providers/`*     | 厂商                         |
-| `/api/keys/*`          | 应用（客户端 Key）                |
+| `/api/keys/`*          | 应用（客户端 Key）                |
 | `/api/models/*`        | 模型                         |
 | `/api/model-rules/*`   | 模型规则                       |
 | `/api/stats`           | 统计                         |
@@ -171,7 +171,7 @@ Node.js · Express · SQLite · Socket.io · Vue 3 · Vite · Tailwind CSS · EC
 
 ## 许可证
 
-本仓库以 [**GNU Affero General Public License v3.0 only**](LICENSE)（**AGPL-3.0-only**）授权。完整条文见根目录 `LICENSE`（GNU 官方正文，请勿改写正文）。
+本仓库以 **[GNU Affero General Public License v3.0 only](LICENSE)**（**AGPL-3.0-only**）授权。完整条文见根目录 `LICENSE`（GNU 官方正文，请勿改写正文）。
 
 项目版权与署名说明见 [NOTICE](NOTICE)；你可把其中的版权行改成个人或组织名称。
 
