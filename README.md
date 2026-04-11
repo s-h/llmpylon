@@ -21,25 +21,22 @@
 如果你**同时订了多家大模型厂商**，又在**手机、笔记本、台式机**上装了不同的 AI Agent / 客户端，经常会遇到：
 
 - 每个工具都要单独填 Base URL、换 API Key、改模型名；
-- 想从 A 厂商切到 B 厂商，要到处改配置；
-- 真密钥散落在各台设备上，心里不踏实。
+- 一键修改默认厂商和模型
+- 为每个应用分配秘钥，查看应用模型日志
 
 **llmPylon** 就是放在你自己服务器（或家里 NAS / 小主机）上的一个 **统一代理 + 管理后台**：各家 **厂商 Key 只保存在服务端**，各端客户端只拿 **应用级 Key**；在后台切换**当前生效厂商**、配置**模型规则**和**按应用绑定模型**，多设备指向 **同一套代理地址** 即可，换模型、换线路主要在网页里完成。
+
 
 > **不要把它直接暴露到公网。** 默认管理员与客户端 Key 若可被扫描，风险极高。请仅在受信任网络或做好接入层防护后使用。详见 [SECURITY.md](SECURITY.md)。
 
 ---
 
-## 配图位（请替换为你的截图 / 示意图）
-
-主视觉建议放在仓库中（例如 `docs/images/`），然后把下面 `src` 改成你的文件路径或图床 URL。
 
 <p align="center">
   <!-- 将下方 src 改为你的配图，例如 docs/images/hero.png -->
-  <img src="docs/images/hero.png" alt="llmPylon 配图占位 — 请替换此图片" width="780" />
+  <img src="docs/images/1.png" alt="llmPylon" width="780" />
 </p>
 
-**可选配图建议（可自行增删行）：**
 
 | 占位 | 建议内容 |
 | ---- | -------- |
@@ -48,16 +45,23 @@
 | `docs/images/apps.png` | 应用（客户端 Key）与绑定模型 |
 
 <p align="center">
-  <img src="docs/images/providers.png" alt="厂商配置配图占位" width="720" />
+  <img src="docs/images/2.png" alt="厂商配置配图" width="720" />
 </p>
 
 <p align="center">
-  <img src="docs/images/apps.png" alt="应用管理配图占位" width="720" />
+  <img src="docs/images/3.png" alt="应用管理" width="720" />
 </p>
 
-> 若暂时无图，可删除上述 `<img>` 或保留路径待你提交图片后再启用。
+<p align="center">
+  <img src="docs/images/4.png" alt="对话日志" width="720" />
+</p>
 
+<p align="center">
+  <img src="docs/images/5.png" alt="对话日志详情" width="720" />
+</p>
 ---
+
+**注意** 务必遵守api厂商的使用限制，很多coding plan限制除编程工具等agent的使用，禁止其他程序调用api，本应用只做api的转发，后端接入程序需要符合厂商的要求。
 
 ## ✨ 特性摘要
 
@@ -94,7 +98,7 @@ docker run -d \
 
 **不需要**单独的「版本更新服务器」。常见做法：
 
-1. **Docker**：拉取新镜像后，用**相同的数据卷**重建/重启容器（`/data` 不变则数据与配置仍在）。若用 Compose：`docker compose pull && docker compose up -d`。
+1. **Docker**：拉取新镜像后，用**相同的数据卷**重建/重启容器（`/data` 不变则数据与配置仍在）。
 2. **源码**：在仓库目录 `git pull`，按需 `npm install`、`cd client && npm run build`，再重启 `npm run server`。
 
 发版时递增根目录 `package.json` 的 `version`；界面与 `GET /healthz` 会显示该版本。
@@ -148,11 +152,6 @@ curl -X POST http://localhost:3000/proxy/v1/chat/completions \
 
 ---
 
-## 依赖更新（无需自建服务器）
-
-本仓库启用 **[Dependabot](https://docs.github.com/en/code-security/dependabot)**（[`.github/dependabot.yml`](.github/dependabot.yml)）：由 GitHub 定期扫描 `npm` 依赖并自动开 PR。
-
----
 
 ## API 速查
 
@@ -188,27 +187,7 @@ Node.js · Express · SQLite · Socket.io · Vue 3 · Vite · Tailwind CSS · EC
 
 ---
 
-## 文档与协作
-
-| 文档 | 说明 |
-| --- | --- |
-| [README.en.md](README.en.md) | 英文说明 |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | 参与贡献 |
-| [SECURITY.md](SECURITY.md) | 安全与漏洞报告 |
-| [CHANGELOG.md](CHANGELOG.md) | 变更记录 |
-
----
-
-## 致谢与相关项目
-
-排版与 README 结构参考了社区里优秀的公众号 / 文档类开源项目，例如 [花生公众号排版器 huasheng_editor](https://github.com/alchaincyf/huasheng_editor)、[微信公众号 Markdown 编辑器 wxmp](https://github.com/jaywcjlove/wxmp) 等项目的展示方式（徽章、分段、配图思路）。
-
----
 
 ## 许可证
 
 本仓库以 **[GNU Affero General Public License v3.0 only](LICENSE)**（**AGPL-3.0-only**）授权。完整条文见根目录 `LICENSE`。
-
-项目版权与署名说明见 [NOTICE](NOTICE)；你可把其中的版权行改成个人或组织名称。
-
-AGPL 对「通过网络提供服务」「修改后的源码如何向用户提供」等有具体要求；若用于商业或对外服务，请先自行阅读许可证或咨询法律顾问。
