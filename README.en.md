@@ -72,13 +72,13 @@ If you **subscribe to more than one LLM vendor** and run **different AI agents /
 ## Quick start (Docker)
 
 ```bash
-docker build -t llmpylon .
+docker pull apache3/llmpylon
 
 docker run -d \
   --name llmpylon \
   -p 3000:3000 \
   -v llmpylon-data:/data \
-  llmpylon
+  apache3/llmpylon
 ```
 
 Open `http://<host>:3000`, sign in with the default account, then **change the password immediately**:

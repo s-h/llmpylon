@@ -74,13 +74,13 @@
 ## 快速开始（Docker）
 
 ```bash
-docker build -t llmpylon .
+docker pull apache3/llmpylon
 
 docker run -d \
   --name llmpylon \
   -p 3000:3000 \
   -v llmpylon-data:/data \
-  llmpylon
+  apache3/llmpylon
 ```
 
 浏览器访问 `http://<主机>:3000`，使用默认账号登录后 **立即修改密码**：
