@@ -16,6 +16,11 @@
 
 ---
 
+<p align="center">
+  <!-- 将下方 src 改为你的配图，例如 docs/images/hero.png -->
+  <img src="docs/images/1.png" alt="llmPylon" width="780" />
+</p>
+
 ## 这款软件是干什么的？
 
 如果你**同时订了多家大模型厂商**，又在**手机、笔记本、台式机**上装了不同的 AI Agent / 客户端，经常会遇到：
@@ -30,12 +35,6 @@
 > **不要把它直接暴露到公网。** 默认管理员与客户端 Key 若可被扫描，风险极高。请仅在受信任网络或做好接入层防护后使用。详见 [SECURITY.md](SECURITY.md)。
 
 ---
-
-
-<p align="center">
-  <!-- 将下方 src 改为你的配图，例如 docs/images/hero.png -->
-  <img src="docs/images/1.png" alt="llmPylon" width="780" />
-</p>
 
 <p align="center">
   <img src="docs/images/2.png" alt="厂商配置配图" width="720" />
