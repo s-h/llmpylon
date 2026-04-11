@@ -1,16 +1,22 @@
 {
   "name": "llmproxy3",
   "version": "1.0.0",
-  "description": "",
+  "description": "Self-hosted LLM API proxy with admin UI, multi-provider routing, and usage stats (SQLite).",
   "main": "index.js",
   "scripts": {
     "server": "nodemon server/index.js",
     "client": "cd client && npm run dev",
     "dev": "concurrently \"npm run server\" \"npm run client\""
   },
-  "keywords": [],
+  "keywords": [
+    "llm",
+    "proxy",
+    "openai",
+    "anthropic",
+    "sqlite"
+  ],
   "author": "",
-  "license": "ISC",
+  "license": "AGPL-3.0-only",
   "type": "commonjs",
   "dependencies": {
     "axios": "^1.13.6",

@@ -85,6 +85,9 @@ const checkProxyHealth = async () => {
   try {
     const res = await axios.get(`http://${hostname}:3000/healthz`, { timeout: 1500 });
     proxyHealth.value = { status: res.status === 200 && res.data?.ok ? 'up' : 'down', lastCheckAt: new Date() };
+    if (res.data?.version != null && res.data.version !== '') {
+      serverVersion.value = String(res.data.version);
+    }
   } catch {
     proxyHealth.value = { status: 'down', lastCheckAt: new Date() };
   }
@@ -161,6 +164,7 @@ const mobileMenuOpen = ref(false);
 const isMobileViewport = ref(window.innerWidth < 1024);
 
 const proxyHealth = ref({ status: 'unknown', lastCheckAt: null });
+const serverVersion = ref('');
 let proxyHealthTimer = null;
 let resizeTimer = null;
 let durationTimer = null;
@@ -1353,6 +1357,7 @@ onUnmounted(() => {
         登录
       </button>
       <p class="text-[10px] text-gray-400 mt-4">默认用户/密码：llmproxy / llmproxy（首次登录必须修改密码）</p>
+      <p v-if="serverVersion" class="text-center text-[10px] text-gray-400 font-mono mt-2">v{{ serverVersion }}</p>
     </div>
   </div>
 
@@ -1471,6 +1476,7 @@ onUnmounted(() => {
             {{ proxyHealth.status === 'up' ? 'Proxy 运行中' : (proxyHealth.status === 'down' ? 'Proxy 未运行' : 'Proxy 检测中') }}
           </span>
         </div>
+        <p v-if="serverVersion" class="text-[10px] text-gray-400 font-mono mt-2">v{{ serverVersion }}</p>
       </div>
     </div>
 
@@ -1497,6 +1503,7 @@ onUnmounted(() => {
             />
           </div>
           <div class="flex items-center gap-2 sm:gap-3">
+            <span v-if="serverVersion" class="hidden sm:inline text-[10px] text-gray-400 font-mono tabular-nums" title="软件版本">v{{ serverVersion }}</span>
             <span class="hidden sm:inline text-xs font-bold text-gray-500">{{ authUser?.username }}</span>
             <button @click="logout" class="px-2.5 sm:px-3 py-1.5 text-xs font-bold rounded-lg border border-gray-200 hover:bg-gray-50 transition-colors whitespace-nowrap">
               退出登录
@@ -2176,6 +2183,13 @@ onUnmounted(() => {
         </div>
 
         <div v-if="activeTab === 'config'" class="space-y-6">
+          <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 px-1 text-xs text-gray-500">
+            <span>
+              当前软件版本
+              <code class="ml-1 font-mono text-sm font-bold text-gray-800 bg-gray-100 px-2 py-0.5 rounded border border-gray-200">v{{ serverVersion || '…' }}</code>
+            </span>
+            <span class="text-gray-400 sm:text-right">与根目录 <code class="font-mono text-[10px]">package.json</code> 及 <code class="font-mono text-[10px]">GET /healthz</code> 一致</span>
+          </div>
           <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
             <div class="flex flex-col lg:flex-row gap-4 lg:items-center lg:justify-between">
               <div>

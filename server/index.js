@@ -13,6 +13,21 @@ const fs = require('fs');
 const app = express();
 const server = http.createServer(app);
 
+function loadPackageInfo() {
+    try {
+        const pkgPath = path.join(__dirname, '..', 'package.json');
+        const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+        return {
+            name: typeof pkg.name === 'string' ? pkg.name : 'llmproxy',
+            version: typeof pkg.version === 'string' ? pkg.version : '0.0.0'
+        };
+    } catch {
+        return { name: 'llmproxy', version: '0.0.0' };
+    }
+}
+
+const appPackageInfo = loadPackageInfo();
+
 // Axios instance with keep-alive and longer timeout
 const axiosInstance = axios.create({
     httpsAgent: new https.Agent({ keepAlive: true }),
@@ -312,7 +327,13 @@ app.use('/api', async (req, res, next) => {
 });
 
 app.get('/healthz', (req, res) => {
-    res.json({ ok: true, proxy: true, time: new Date().toISOString() });
+    res.json({
+        ok: true,
+        proxy: true,
+        time: new Date().toISOString(),
+        name: appPackageInfo.name,
+        version: appPackageInfo.version
+    });
 });
 
 app.post('/api/auth/login', async (req, res) => {
