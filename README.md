@@ -37,13 +37,6 @@
   <img src="docs/images/1.png" alt="llmPylon" width="780" />
 </p>
 
-
-| 占位 | 建议内容 |
-| ---- | -------- |
-| `docs/images/hero.png` | 总览：管理后台 + 「一代理多厂商」示意 |
-| `docs/images/providers.png` | 厂商配置 / 模型列表 |
-| `docs/images/apps.png` | 应用（客户端 Key）与绑定模型 |
-
 <p align="center">
   <img src="docs/images/2.png" alt="厂商配置配图" width="720" />
 </p>
