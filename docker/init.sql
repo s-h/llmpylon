@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS admin_sessions (
 CREATE INDEX IF NOT EXISTS idx_admin_sessions_tokenHash ON admin_sessions(tokenHash);
 CREATE INDEX IF NOT EXISTS idx_admin_sessions_userId ON admin_sessions(userId);
 
--- 默认管理员账号将由 server/db.js 自动创建: llmproxy / llmproxy
+-- 默认管理员账号将由 server/db.js 自动创建: llmpylon / llmpylon
 -- 不在此处预插入用户，以确保密码哈希使用正确的 crypto.scryptSync 计算
 
 COMMIT;

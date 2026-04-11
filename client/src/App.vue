@@ -47,19 +47,26 @@ const hostname = window.location.hostname;
 const API_BASE = `http://${hostname}:3000/api`;
 let socket = null;
 
-const authToken = ref(localStorage.getItem('llmproxy_admin_token') || '');
+const ADMIN_TOKEN_STORAGE_KEY = 'llmpylon_admin_token';
+/** Canonical magic model id; server match is case-insensitive. */
+const MAGIC_PROXY_MODEL = 'llmpylon';
+function isMagicProxyModel(s) {
+  return typeof s === 'string' && s.toLowerCase() === MAGIC_PROXY_MODEL;
+}
+
+const authToken = ref(localStorage.getItem(ADMIN_TOKEN_STORAGE_KEY) || '');
 const authUser = ref(null);
 const mustChangePassword = ref(false);
-const loginForm = ref({ username: 'llmproxy', password: '' });
+const loginForm = ref({ username: 'llmpylon', password: '' });
 const changePasswordForm = ref({ currentPassword: '', newPassword: '', confirmNewPassword: '' });
 
 const setAuthToken = (token) => {
   authToken.value = token;
   if (token) {
-    localStorage.setItem('llmproxy_admin_token', token);
+    localStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, token);
     axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
   } else {
-    localStorage.removeItem('llmproxy_admin_token');
+    localStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY);
     delete axios.defaults.headers.common['Authorization'];
   }
 };
@@ -759,7 +766,7 @@ const doExport = async () => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `llmproxy-providers-${new Date().toISOString().slice(0, 10)}.json`;
+    a.download = `llmpylon-providers-${new Date().toISOString().slice(0, 10)}.json`;
     a.click();
     URL.revokeObjectURL(url);
 
@@ -864,7 +871,7 @@ const exportGlobalConfig = async () => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `llmproxy-config-${new Date().toISOString().slice(0, 10)}.json`;
+    a.download = `llmpylon-config-${new Date().toISOString().slice(0, 10)}.json`;
     a.click();
     URL.revokeObjectURL(url);
   } catch (err) {
@@ -1339,7 +1346,7 @@ onUnmounted(() => {
       <div class="flex items-center gap-3 mb-6">
         <Settings class="w-8 h-8 text-blue-600" />
         <div>
-          <h1 class="text-xl font-bold">LLM Proxy Admin</h1>
+          <h1 class="text-xl font-bold">llmPylon Admin</h1>
           <p class="text-xs text-gray-400">登录后才能进行管理操作</p>
         </div>
       </div>
@@ -1356,7 +1363,7 @@ onUnmounted(() => {
       <button @click="login" class="w-full mt-6 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-bold">
         登录
       </button>
-      <p class="text-[10px] text-gray-400 mt-4">默认用户/密码：llmproxy / llmproxy（首次登录必须修改密码）</p>
+      <p class="text-[10px] text-gray-400 mt-4">默认用户/密码：llmpylon / llmpylon（首次登录必须修改密码）</p>
       <p v-if="serverVersion" class="text-center text-[10px] text-gray-400 font-mono mt-2">v{{ serverVersion }}</p>
     </div>
   </div>
@@ -1377,7 +1384,7 @@ onUnmounted(() => {
       <div class="p-6 border-b border-gray-200">
         <h1 class="text-xl font-bold flex items-center gap-2">
           <Settings class="w-6 h-6 text-blue-600" />
-          LLM Proxy Admin
+          llmPylon Admin
         </h1>
       </div>
       <nav class="flex-1 p-4 space-y-2">
@@ -1516,7 +1523,7 @@ onUnmounted(() => {
         <div v-if="activeTab === 'help'" class="space-y-6">
           <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-8">
             <h3 class="text-lg font-bold text-gray-900 mb-2">快速开始</h3>
-            <p class="text-sm text-gray-600 leading-relaxed">LLMProxy 提供统一代理入口，客户端统一指向同一个 Base URL，通过模型名与后台策略决定最终路由到的厂商与模型。</p>
+            <p class="text-sm text-gray-600 leading-relaxed">llmPylon 提供统一代理入口，客户端统一指向同一个 Base URL，通过模型名与后台策略决定最终路由到的厂商与模型。</p>
             <div class="rounded-xl border border-gray-200 bg-gray-50 p-5 mt-6">
               <p class="text-[10px] text-gray-400 font-bold uppercase mb-3">客户端设置</p>
               <div class="space-y-2">
@@ -1530,14 +1537,14 @@ onUnmounted(() => {
                 </div>
                 <div class="flex items-center gap-2">
                   <span class="px-2 py-1 bg-purple-50 text-purple-700 rounded text-[10px] font-bold uppercase tracking-tight">Model</span>
-                  <code class="text-xs font-mono text-gray-700 break-all">建议设置为 llmproxy</code>
+                  <code class="text-xs font-mono text-gray-700 break-all">建议设置为 {{ MAGIC_PROXY_MODEL }}（大小写不敏感）</code>
                 </div>
               </div>
-              <p class="text-[10px] text-gray-500 mt-3 leading-relaxed">建议客户端模型统一设置为 <span class="font-mono">llmproxy</span>，由代理平台统一管理模型与厂商切换。</p>
+              <p class="text-[10px] text-gray-500 mt-3 leading-relaxed">建议客户端模型统一设置为 <span class="font-mono">{{ MAGIC_PROXY_MODEL }}</span>（大小写不敏感），由代理平台统一管理模型与厂商切换。</p>
             </div>
             <div class="rounded-xl border border-gray-200 bg-gray-50 p-5 mt-6">
-              <p class="text-xs font-bold text-gray-500 mb-2">llmproxy 是什么？</p>
-              <p class="text-sm text-gray-700 leading-relaxed">当客户端把 Model 设置为 <span class="font-mono text-xs">llmproxy</span> 时，平台会自动选择实际模型：优先使用应用绑定模型，其次使用当前厂商默认模型。你可以在“厂商管理”快速切换当前生效厂商（默认厂商）。</p>
+              <p class="text-xs font-bold text-gray-500 mb-2">{{ MAGIC_PROXY_MODEL }} 是什么？</p>
+              <p class="text-sm text-gray-700 leading-relaxed">当客户端把 Model 设置为 <span class="font-mono text-xs">{{ MAGIC_PROXY_MODEL }}</span>（大小写不敏感）时，平台会自动选择实际模型：优先使用应用绑定模型，其次使用当前厂商默认模型。你可以在“厂商管理”快速切换当前生效厂商（默认厂商）。</p>
             </div>
           </div>
 
@@ -1568,7 +1575,7 @@ onUnmounted(() => {
               </div>
               <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
                 <p class="text-xs font-bold text-gray-500 mb-2">模型规则（强制转换）</p>
-                <p>当客户端请求 Model ≠ llmproxy 时，会先匹配“模型规则”进行强制转换（支持 * 通配符，大小写敏感）。客户端使用 llmproxy 时不参与规则匹配。</p>
+                <p>当客户端请求 Model 不是 {{ MAGIC_PROXY_MODEL }}（大小写不敏感）时，会先匹配“模型规则”进行强制转换（支持 * 通配符，大小写敏感）。客户端使用 {{ MAGIC_PROXY_MODEL }} 时不参与规则匹配。</p>
               </div>
             </div>
           </div>
@@ -1578,7 +1585,7 @@ onUnmounted(() => {
             <div class="space-y-3 text-sm text-gray-700">
               <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
                 <p class="font-bold text-gray-700 mb-1">为什么我设置了模型，但实际走了另一个模型？</p>
-                <p>若请求 model ≠ llmproxy，可能命中了模型规则被强制转换；若请求 model = llmproxy，则会按“应用绑定模型/厂商默认模型”选择实际模型。</p>
+                <p>若请求 model 不是 {{ MAGIC_PROXY_MODEL }}（大小写不敏感），可能命中了模型规则被强制转换；若为 {{ MAGIC_PROXY_MODEL }}，则会按“应用绑定模型/厂商默认模型”选择实际模型。</p>
               </div>
               <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
                 <p class="font-bold text-gray-700 mb-1">如何看实际路由到的厂商/模型？</p>
@@ -1783,7 +1790,7 @@ onUnmounted(() => {
           <div class="flex flex-col sm:flex-row gap-3 sm:justify-between sm:items-center">
             <div class="space-y-1">
               <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">当前厂商模型管理</h3>
-              <p class="text-[10px] text-gray-400">当前生效厂商：{{ activeProvider?.name || '-' }}（在此页面选择的默认模型会被记住并用于 llmproxy）</p>
+              <p class="text-[10px] text-gray-400">当前生效厂商：{{ activeProvider?.name || '-' }}（在此页面选择的默认模型会被记住并用于 {{ MAGIC_PROXY_MODEL }}）</p>
             </div>
             <button 
               @click="showAddModel = true"
@@ -1828,7 +1835,7 @@ onUnmounted(() => {
                   </button>
                 </div>
               </div>
-              <p class="text-[10px] text-gray-400">客户端请求模型为 <span class="font-bold text-green-600">llmproxy</span> 时，若应用未指定模型，将使用当前厂商的默认模型。</p>
+              <p class="text-[10px] text-gray-400">客户端请求模型为 <span class="font-bold text-green-600">{{ MAGIC_PROXY_MODEL }}</span>（大小写不敏感）时，若应用未指定模型，将使用当前厂商的默认模型。</p>
             </div>
           </div>
         </div>
@@ -2404,7 +2411,7 @@ onUnmounted(() => {
                   <td class="px-6 py-4 font-medium">{{ log.providerName }}</td>
                   <td class="px-6 py-4 font-mono text-xs">
                     <template v-if="!log.actualModel || log.model === log.actualModel">
-                      <span :class="log.model === 'llmproxy' ? 'text-green-600 font-bold' : 'text-gray-600'">{{ log.model }}</span>
+                      <span :class="isMagicProxyModel(log.model) ? 'text-green-600 font-bold' : 'text-gray-600'">{{ log.model }}</span>
                     </template>
                     <template v-else>
                       <span class="text-green-600 font-bold">{{ log.model }}</span>

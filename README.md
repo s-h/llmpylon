@@ -1,6 +1,6 @@
 **简体中文** · [English](README.en.md)
 
-# LLMProxy
+# llmPylon
 
 自托管的 LLM API 代理：多厂商路由、应用级密钥、模型规则、统计与对话日志。  
 带 Web 管理界面，数据落在本地 SQLite。
@@ -24,7 +24,7 @@
 | 密钥托管           | 厂商 Key 留在服务端；客户端只用应用 Key    |
 | 模型规则           | 通配符映射（如 `gpt-4`* → 实际模型名）   |
 | 应用维度           | 每个应用可绑定厂商与默认模型              |
-| `llmproxy` 模型名 | 按优先级解析为应用/厂商/全局默认模型         |
+| `llmpylon` 模型名 | 按优先级解析为应用/厂商/全局默认模型（**大小写不敏感**） |
 | 统计与日志          | 请求统计、对话日志（含流式、耗时、Token 等字段） |
 | 部署             | **推荐 Docker**，数据卷持久化 SQLite |
 
@@ -40,21 +40,21 @@
 ## 快速开始（Docker）
 
 ```bash
-docker build -t llmproxy .
+docker build -t llmpylon .
 
 docker run -d \
-  --name llmproxy \
+  --name llmpylon \
   -p 3000:3000 \
-  -v llmproxy-data:/data \
-  llmproxy
+  -v llmpylon-data:/data \
+  llmpylon
 ```
 
 浏览器访问 `http://<主机>:3000`，使用默认账号登录后 **立即修改密码**：
 
-- 用户名：`llmproxy`
-- 密码：`llmproxy`
+- 用户名：`llmpylon`
+- 密码：`llmpylon`
 
-### 升级 LLMProxy（软件本体）
+### 升级 llmPylon（软件本体）
 
 **不需要**单独的「版本更新服务器」。常见做法：
 
@@ -97,7 +97,7 @@ npm run server
 curl -X POST http://localhost:3000/proxy/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer YOUR_APP_KEY" \
-  -d '{"model":"llmproxy","messages":[{"role":"user","content":"你好"}]}'
+  -d '{"model":"llmpylon","messages":[{"role":"user","content":"你好"}]}'
 ```
 
 ---

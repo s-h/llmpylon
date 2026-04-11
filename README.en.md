@@ -1,6 +1,6 @@
 [简体中文](README.md) · **English**
 
-# LLMProxy
+# llmPylon
 
 
 
@@ -26,7 +26,7 @@ Useful when you want a **single Base URL** for clients while switching vendors/m
 | Key custody           | Vendor keys stay on the server; clients use app keys only        |
 | Model rules           | Wildcard mapping (e.g. `gpt-4`* → real model id)                 |
 | Per-app routing       | Bind provider and default model per app                          |
-| `llmproxy` model name | Resolved via app / provider / global defaults                    |
+| `llmpylon` model name | Resolved via app / provider / global defaults (**case-insensitive**) |
 | Stats & logs          | Usage stats and detailed logs (streaming, latency, tokens, etc.) |
 | Deployment            | **Docker recommended** with a volume for SQLite                  |
 
@@ -42,21 +42,21 @@ Useful when you want a **single Base URL** for clients while switching vendors/m
 ## Quick start (Docker)
 
 ```bash
-docker build -t llmproxy .
+docker build -t llmpylon .
 
 docker run -d \
-  --name llmproxy \
+  --name llmpylon \
   -p 3000:3000 \
-  -v llmproxy-data:/data \
-  llmproxy
+  -v llmpylon-data:/data \
+  llmpylon
 ```
 
 Open `http://<host>:3000`, sign in with the default account and **change the password immediately**:
 
-- Username: `llmproxy`
-- Password: `llmproxy`
+- Username: `llmpylon`
+- Password: `llmpylon`
 
-### Upgrading LLMProxy (the application)
+### Upgrading llmPylon (the application)
 
 You **do not** need a dedicated “update server”. Typical flows:
 
@@ -99,7 +99,7 @@ Point the client Base URL at the proxy prefix, e.g.:
 curl -X POST http://localhost:3000/proxy/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer YOUR_APP_KEY" \
-  -d '{"model":"llmproxy","messages":[{"role":"user","content":"Hi"}]}'
+  -d '{"model":"llmpylon","messages":[{"role":"user","content":"Hi"}]}'
 ```
 
 ---

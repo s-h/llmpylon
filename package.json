@@ -1,7 +1,7 @@
 {
-  "name": "llmproxy3",
+  "name": "llmpylon",
   "version": "1.0.0",
-  "description": "Self-hosted LLM API proxy with admin UI, multi-provider routing, and usage stats (SQLite).",
+  "description": "llmPylon — self-hosted LLM API proxy with admin UI, multi-provider routing, and usage stats (SQLite).",
   "main": "index.js",
   "scripts": {
     "server": "nodemon server/index.js",

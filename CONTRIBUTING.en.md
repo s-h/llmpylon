@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for your interest in improving LLMProxy.
+Thanks for your interest in improving llmPylon.
 
 ## Development
 

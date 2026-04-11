@@ -241,12 +241,12 @@ async function setupDb() {
 
     const existingAdminCount = await db.get('SELECT COUNT(*) as cnt FROM admin_users');
     if (!existingAdminCount || !existingAdminCount.cnt) {
-        const password = 'llmproxy';
+        const password = 'llmpylon';
         const salt = crypto.randomBytes(16).toString('hex');
         const hash = crypto.scryptSync(password, salt, 64).toString('hex');
         await db.run(
             'INSERT INTO admin_users (username, passwordSalt, passwordHash, mustChangePassword, enabled) VALUES (?, ?, ?, ?, ?)',
-            ['llmproxy', salt, hash, 1, 1]
+            ['llmpylon', salt, hash, 1, 1]
         );
     }
 

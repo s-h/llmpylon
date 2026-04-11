@@ -13,16 +13,23 @@ const fs = require('fs');
 const app = express();
 const server = http.createServer(app);
 
+/** Proxy “magic” model: match is case-insensitive (e.g. llmpylon, LLMPYLON). */
+const MAGIC_PROXY_MODEL_LOWER = 'llmpylon';
+
+function isMagicProxyModel(model) {
+    return typeof model === 'string' && model.toLowerCase() === MAGIC_PROXY_MODEL_LOWER;
+}
+
 function loadPackageInfo() {
     try {
         const pkgPath = path.join(__dirname, '..', 'package.json');
         const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
         return {
-            name: typeof pkg.name === 'string' ? pkg.name : 'llmproxy',
+            name: typeof pkg.name === 'string' ? pkg.name : 'llmpylon',
             version: typeof pkg.version === 'string' ? pkg.version : '0.0.0'
         };
     } catch {
-        return { name: 'llmproxy', version: '0.0.0' };
+        return { name: 'llmpylon', version: '0.0.0' };
     }
 }
 
@@ -1326,7 +1333,7 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
     }
 
     let actualModel = model;
-    if (model !== 'llmproxy') {
+    if (!isMagicProxyModel(model)) {
         const rules = await db.all('SELECT id, pattern, targetModel, priority FROM model_rules WHERE enabled = 1 ORDER BY priority DESC, id ASC');
         const ruleResult = applyModelRules(model, rules);
         if (ruleResult.matched) {
@@ -1340,7 +1347,7 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
             const mm = await db.get('SELECT name FROM managed_models WHERE id = ?', [clientKeyData.managedModelId]);
             if (mm) {
                 managedModelName = mm.name;
-                console.log(`[Proxy] Model 'llmproxy' replaced with App-specific model: ${managedModelName}`);
+                console.log(`[Proxy] Model '${MAGIC_PROXY_MODEL_LOWER}' replaced with App-specific model: ${managedModelName}`);
             }
         }
 
@@ -1349,14 +1356,14 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                 const mm = await db.get('SELECT name FROM managed_models WHERE id = ?', [provider.defaultModelId]);
                 if (mm) {
                     managedModelName = mm.name;
-                    console.log(`[Proxy] Model 'llmproxy' replaced with Provider Default model: ${managedModelName}`);
+                    console.log(`[Proxy] Model '${MAGIC_PROXY_MODEL_LOWER}' replaced with Provider Default model: ${managedModelName}`);
                 }
             }
             if (!managedModelName) {
                 const mm = await db.get('SELECT name FROM managed_models WHERE active = 1');
                 if (mm) {
                     managedModelName = mm.name;
-                    console.log(`[Proxy] Model 'llmproxy' replaced with Legacy Global Default model: ${managedModelName}`);
+                    console.log(`[Proxy] Model '${MAGIC_PROXY_MODEL_LOWER}' replaced with Legacy Global Default model: ${managedModelName}`);
                 }
             }
         }
@@ -1364,7 +1371,7 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
         if (managedModelName) {
             actualModel = managedModelName;
         } else {
-            console.warn(`[Proxy] Model 'llmproxy' requested but no managed model is configured. Using 'llmproxy' as-is.`);
+            console.warn(`[Proxy] Model '${MAGIC_PROXY_MODEL_LOWER}' requested but no managed model is configured. Using client model string as-is.`);
         }
     }
 
