@@ -1522,7 +1522,7 @@ onUnmounted(() => {
               <div class="space-y-2">
                 <div class="flex items-center gap-2">
                   <span class="px-2 py-1 bg-purple-50 text-purple-700 rounded text-[10px] font-bold uppercase tracking-tight">Base URL</span>
-                  <code class="text-xs font-mono text-gray-700 break-all">http://{{ hostname }}:3000/proxy</code>
+                  <code class="text-xs font-mono text-gray-700 break-all">http://你的服务器ip:3000/proxy</code>
                 </div>
                 <div class="flex items-center gap-2">
                   <span class="px-2 py-1 bg-purple-50 text-purple-700 rounded text-[10px] font-bold uppercase tracking-tight">API Key</span>
