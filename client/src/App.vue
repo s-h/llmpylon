@@ -15,7 +15,6 @@ import {
   History,
   Settings,
   Loader2,
-  Search,
   Check,
   ChevronRight,
   ChevronDown,
@@ -159,7 +158,6 @@ const editingAdminUser = ref(null);
 const showAddAdminUser = ref(false);
 const resetPasswordUser = ref(null);
 const resetPasswordValue = ref('');
-const searchQuery = ref('');
 const selectedLog = ref(null);
 const selectedClientKey = ref('all');
 const logsPage = ref(1);
@@ -208,8 +206,6 @@ const globalImportData = ref(null);
 const appSettings = ref({ logRetentionDays: 0, statsRetentionDays: 0 });
 const appSettingsSaving = ref(false);
 const nowMs = ref(Date.now());
-
-const filteredLogs = ref([]);
 
 const statsRange = ref('30d');
 const statsProviderId = ref('all');
@@ -325,10 +321,6 @@ const getModelOptionsForProvider = (providerId, selectedModelId) => {
   return options;
 };
 
-const updateFilteredLogs = () => {
-  filteredLogs.value = logs.value;
-};
-
 const closeSidebarIfMobile = () => {
   if (isMobileViewport.value) mobileMenuOpen.value = false;
 };
@@ -343,7 +335,6 @@ const handleLogUpdate = (data) => {
       : (rest.responseBody !== undefined ? rest.responseBody : current.responseBody);
     const updatedLog = { ...current, ...rest, responseBody: nextResponseBody };
     logs.value.splice(index, 1, updatedLog);
-    updateFilteredLogs();
     if (selectedLog.value && selectedLog.value.id === rest.id) {
       selectedLog.value = updatedLog;
     }
@@ -618,7 +609,6 @@ const fetchLogs = async () => {
   logsTotal.value = Number(res.data.total || 0);
   logsTotalPages.value = Number(res.data.totalPages || 1);
   hasNewLogs.value = false;
-  updateFilteredLogs();
 };
 
 const fetchAdminUsers = async () => {
@@ -700,7 +690,6 @@ const clearLogs = async () => {
   try {
     await axios.delete(`${API_BASE}/logs`);
     logs.value = [];
-    filteredLogs.value = [];
     selectedLog.value = null;
     hasNewLogs.value = false;
     logsPage.value = 1;
@@ -1175,41 +1164,6 @@ const deleteModelRule = async (id) => {
   fetchModelRules();
 };
 
-const escapeRegExp = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-const escapeHtml = (s) =>
-  String(s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-
-/** 安全高亮：先按原文匹配，再对片段 escape，避免 JSON 中的 <、& 破坏 v-html 或导致正则无匹配 */
-const highlightText = (text) => {
-  if (text === null || text === undefined) return '';
-  const raw = String(text);
-  const q = (searchQuery.value || '').trim();
-  if (!q) return escapeHtml(raw);
-  let re;
-  try {
-    re = new RegExp(escapeRegExp(q), 'gi');
-  } catch {
-    return escapeHtml(raw);
-  }
-  const out = [];
-  let last = 0;
-  let m;
-  while ((m = re.exec(raw)) !== null) {
-    out.push(escapeHtml(raw.slice(last, m.index)));
-    out.push(`<mark class="bg-yellow-200">${escapeHtml(m[0])}</mark>`);
-    last = m.index + m[0].length;
-    if (m[0].length === 0) re.lastIndex++;
-  }
-  out.push(escapeHtml(raw.slice(last)));
-  return out.join('');
-};
-
 const parseDate = (dateStr) => {
   if (!dateStr) return null;
   // SQLite 的 CURRENT_TIMESTAMP 不带 Z，需要补上以确保浏览器按 UTC 解析再转为本地时区
@@ -1417,7 +1371,7 @@ onUnmounted(() => {
           <span class="flex-1 text-left whitespace-nowrap">模型管理</span>
           <span
             v-if="activeDefaultModel"
-            class="ml-auto max-w-[140px] px-1.5 py-1 bg-purple-50 text-purple-700 rounded text-[8px] leading-none font-bold uppercase tracking-tight whitespace-nowrap overflow-hidden text-ellipsis"
+            class="ml-auto max-w-[140px] px-1.5 py-1 bg-purple-50 text-purple-700 rounded text-[8px] leading-none font-semibold font-mono tracking-tight whitespace-nowrap overflow-hidden text-ellipsis"
             :title="activeDefaultModel.name"
           >
             {{ activeDefaultModel.name }}
@@ -1500,15 +1454,6 @@ onUnmounted(() => {
           <h2 class="text-base sm:text-lg font-semibold truncate">{{ activeTab === 'providers' ? '厂商配置' : (activeTab === 'keys' ? '应用管理' : (activeTab === 'models' ? '模型管理' : (activeTab === 'modelRules' ? '模型规则' : (activeTab === 'stats' ? '统计' : (activeTab === 'config' ? '配置管理' : (activeTab === 'help' ? '客户端帮助' : '对话历史')))))) }}</h2>
         </div>
         <div class="flex items-center gap-4">
-          <div v-if="activeTab === 'logs'" class="relative hidden md:block">
-            <Search class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-            <input 
-              v-model="searchQuery"
-              type="text" 
-              placeholder="搜索关键词高亮..." 
-              class="pl-10 pr-4 py-2 bg-gray-100 border-none rounded-lg focus:ring-2 focus:ring-blue-500 text-sm w-64"
-            />
-          </div>
           <div class="flex items-center gap-2 sm:gap-3">
             <span v-if="serverVersion" class="hidden sm:inline text-[10px] text-gray-400 font-mono tabular-nums" title="软件版本">v{{ serverVersion }}</span>
             <span class="hidden sm:inline text-xs font-bold text-gray-500">{{ authUser?.username }}</span>
@@ -1698,7 +1643,7 @@ onUnmounted(() => {
                     :key="m.id"
                     @click.stop="activateProviderModel(p.id, m.id)"
                     :class="[
-                      'px-2 py-1 rounded text-[10px] font-bold uppercase tracking-tight border transition-colors',
+                      'px-2 py-1 rounded text-[10px] font-semibold font-mono tracking-tight border transition-colors',
                       p.defaultModelId === m.id ? 'bg-purple-600 text-white border-purple-600 shadow-sm' : 'bg-purple-50 text-purple-700 border-purple-100 hover:border-purple-300'
                     ]"
                   >
@@ -2403,7 +2348,7 @@ onUnmounted(() => {
                 </tr>
               </thead>
               <tbody class="divide-y divide-gray-200">
-                <tr v-for="log in filteredLogs" :key="log.id" class="hover:bg-gray-50 transition-colors">
+                <tr v-for="log in logs" :key="log.id" class="hover:bg-gray-50 transition-colors">
                   <td class="px-6 py-4 text-gray-500 font-mono text-xs">{{ formatTime(log.requestAt || log.createdAt) }}</td>
                   <td class="px-6 py-4">
                     <span class="px-2 py-1 bg-purple-50 text-purple-700 rounded text-[10px] font-bold uppercase tracking-tight">{{ log.clientKeyName || '未知' }}</span>
@@ -2460,7 +2405,7 @@ onUnmounted(() => {
                     </button>
                   </td>
                 </tr>
-                <tr v-if="!filteredLogs.length">
+                <tr v-if="!logs.length">
                   <td colspan="8" class="px-6 py-10 text-center text-gray-400 text-sm">暂无数据</td>
                 </tr>
               </tbody>
@@ -3051,10 +2996,9 @@ onUnmounted(() => {
               <h4 class="text-xs font-bold text-gray-400 uppercase">请求正文 (JSON)</h4>
               <span class="text-[10px] text-gray-400 font-mono">{{ formatTime(selectedLog.requestAt) }}</span>
             </div>
-            <pre 
+            <pre
               class="bg-gray-900 text-gray-100 p-4 rounded-xl overflow-auto text-xs leading-relaxed max-h-[600px]"
-              v-html="highlightText(formatJson(selectedLog.requestBody))"
-            ></pre>
+            >{{ formatJson(selectedLog.requestBody) }}</pre>
           </div>
           <div class="space-y-4">
             <div class="flex justify-between items-center">
@@ -3068,8 +3012,7 @@ onUnmounted(() => {
             <pre
               v-else
               class="bg-gray-900 text-gray-100 p-4 rounded-xl overflow-auto text-xs leading-relaxed max-h-[600px]"
-              v-html="highlightText(formatJson(selectedLog.responseBody))"
-            ></pre>
+            >{{ formatJson(selectedLog.responseBody) }}</pre>
           </div>
         </div>
       </div>
