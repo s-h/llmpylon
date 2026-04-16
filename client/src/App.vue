@@ -131,7 +131,19 @@ axios.interceptors.response.use(
   }
 );
 
-const activeTab = ref('providers');
+const VALID_TABS = ['providers', 'keys', 'models', 'modelRules', 'logs', 'stats', 'config', 'help'];
+const TAB_STORAGE_KEY = 'llmpylon_active_tab';
+function readSavedTab() {
+  try {
+    const t = localStorage.getItem(TAB_STORAGE_KEY);
+    if (t && VALID_TABS.includes(t)) return t;
+  } catch {
+    /* ignore */
+  }
+  return 'providers';
+}
+
+const activeTab = ref(readSavedTab());
 const providers = ref([]);
 const logs = ref([]);
 const clientKeys = ref([]);
@@ -159,6 +171,8 @@ const showAddAdminUser = ref(false);
 const resetPasswordUser = ref(null);
 const resetPasswordValue = ref('');
 const selectedLog = ref(null);
+const logDetailLoading = ref(false);
+const logDetailError = ref('');
 const selectedClientKey = ref('all');
 const logsPage = ref(1);
 const logsPageSize = ref(50);
@@ -203,7 +217,7 @@ const importStep = ref('file');
 const importResults = ref([]);
 const showGlobalImportDialog = ref(false);
 const globalImportData = ref(null);
-const appSettings = ref({ logRetentionDays: 0, statsRetentionDays: 0 });
+const appSettings = ref({ logRetentionDays: 0, statsRetentionDays: 0, upstreamTimeoutSeconds: 360 });
 const appSettingsSaving = ref(false);
 const nowMs = ref(Date.now());
 
@@ -327,23 +341,27 @@ const closeSidebarIfMobile = () => {
 
 const handleLogUpdate = (data) => {
   const { appendResponseChunk, streamChunk, ...rest } = data;
+
+  if (selectedLog.value && Number(selectedLog.value.id) === Number(rest.id)) {
+    const cur = selectedLog.value;
+    const nextResponseBody = appendResponseChunk
+      ? `${cur.responseBody || ''}${streamChunk || ''}`
+      : (rest.responseBody !== undefined ? rest.responseBody : cur.responseBody);
+    selectedLog.value = { ...cur, ...rest, responseBody: nextResponseBody };
+  }
+
   const index = logs.value.findIndex(l => l.id === rest.id);
   if (index !== -1) {
     const current = logs.value[index];
-    const nextResponseBody = appendResponseChunk
-      ? `${current.responseBody || ''}${streamChunk || ''}`
-      : (rest.responseBody !== undefined ? rest.responseBody : current.responseBody);
-    const updatedLog = { ...current, ...rest, responseBody: nextResponseBody };
+    const patch = { ...rest };
+    delete patch.requestBody;
+    delete patch.responseBody;
+    const updatedLog = { ...current, ...patch, requestBody: undefined, responseBody: undefined };
     logs.value.splice(index, 1, updatedLog);
-    if (selectedLog.value && selectedLog.value.id === rest.id) {
-      selectedLog.value = updatedLog;
-    }
+  } else if (logsPage.value === 1 && (selectedClientKey.value === 'all' || Number(rest.clientKeyId) === Number(selectedClientKey.value))) {
+    fetchLogs();
   } else {
-    if (logsPage.value === 1 && (selectedClientKey.value === 'all' || Number(rest.clientKeyId) === Number(selectedClientKey.value))) {
-      fetchLogs();
-    } else {
-      hasNewLogs.value = true;
-    }
+    hasNewLogs.value = true;
   }
 };
 
@@ -611,6 +629,26 @@ const fetchLogs = async () => {
   hasNewLogs.value = false;
 };
 
+const openLogDetail = async (log) => {
+  logDetailError.value = '';
+  logDetailLoading.value = true;
+  selectedLog.value = { ...log };
+  try {
+    const res = await axios.get(`${API_BASE}/logs/${log.id}`);
+    selectedLog.value = res.data;
+  } catch (e) {
+    logDetailError.value = e.response?.data?.error || e.message || '加载失败';
+  } finally {
+    logDetailLoading.value = false;
+  }
+};
+
+const closeLogDetail = () => {
+  selectedLog.value = null;
+  logDetailError.value = '';
+  logDetailLoading.value = false;
+};
+
 const fetchAdminUsers = async () => {
   const res = await axios.get(`${API_BASE}/users`);
   adminUsers.value = res.data;
@@ -621,7 +659,8 @@ const fetchAppSettings = async () => {
     const res = await axios.get(`${API_BASE}/settings`);
     appSettings.value = {
       logRetentionDays: Math.max(0, Number(res.data.logRetentionDays) || 0),
-      statsRetentionDays: Math.max(0, Number(res.data.statsRetentionDays) || 0)
+      statsRetentionDays: Math.max(0, Number(res.data.statsRetentionDays) || 0),
+      upstreamTimeoutSeconds: Math.max(5, Math.min(86400, Number(res.data.upstreamTimeoutSeconds) || 360))
     };
   } catch (e) {
     console.error('fetchAppSettings', e);
@@ -633,10 +672,12 @@ const saveAppSettings = async () => {
   try {
     const res = await axios.put(`${API_BASE}/settings`, {
       logRetentionDays: Math.max(0, Number(appSettings.value.logRetentionDays) || 0),
-      statsRetentionDays: Math.max(0, Number(appSettings.value.statsRetentionDays) || 0)
+      statsRetentionDays: Math.max(0, Number(appSettings.value.statsRetentionDays) || 0),
+      upstreamTimeoutSeconds: Math.max(5, Math.min(86400, Number(appSettings.value.upstreamTimeoutSeconds) || 360))
     });
     appSettings.value.logRetentionDays = res.data.logRetentionDays;
     appSettings.value.statsRetentionDays = res.data.statsRetentionDays;
+    appSettings.value.upstreamTimeoutSeconds = res.data.upstreamTimeoutSeconds;
     alert('已保存');
   } catch (e) {
     alert('保存失败: ' + (e.response?.data?.error || e.message));
@@ -690,7 +731,7 @@ const clearLogs = async () => {
   try {
     await axios.delete(`${API_BASE}/logs`);
     logs.value = [];
-    selectedLog.value = null;
+    closeLogDetail();
     hasNewLogs.value = false;
     logsPage.value = 1;
     logsTotal.value = 0;
@@ -1248,6 +1289,11 @@ onMounted(async () => {
 });
 
 watch(activeTab, (tab) => {
+  try {
+    localStorage.setItem(TAB_STORAGE_KEY, tab);
+  } catch {
+    /* ignore */
+  }
   closeSidebarIfMobile();
   if (tab === 'stats') {
     if (isAuthenticated.value) fetchStats();
@@ -2169,10 +2215,10 @@ onUnmounted(() => {
 
           <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6 space-y-4">
             <div>
-              <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">数据保留与统计</h3>
-              <p class="text-xs text-gray-400 mt-1">按天自动删除过期数据；0 表示不自动删除。保存后立即按新规则清理一次，之后约每 6 小时再执行。</p>
+              <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">数据保留与上游超时</h3>
+              <p class="text-xs text-gray-400 mt-1">按天自动删除过期数据；0 表示不自动删除。保存后立即按新规则清理一次，之后约每 6 小时再执行。上游超时为代理请求大模型 API 的单次 HTTP 超时（秒）。</p>
             </div>
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
               <div>
                 <label class="block text-[10px] font-bold text-gray-400 uppercase mb-1">对话日志保留（天）</label>
                 <input
@@ -2193,6 +2239,18 @@ onUnmounted(() => {
                   class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
                 />
               </div>
+              <div>
+                <label class="block text-[10px] font-bold text-gray-400 uppercase mb-1">上游 HTTP 超时（秒）</label>
+                <input
+                  v-model.number="appSettings.upstreamTimeoutSeconds"
+                  type="number"
+                  min="5"
+                  max="86400"
+                  step="1"
+                  class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                />
+                <p class="text-[10px] text-gray-400 mt-1">默认 360，范围 5～86400。</p>
+              </div>
             </div>
             <div class="flex flex-wrap gap-2 items-center">
               <button
@@ -2201,7 +2259,7 @@ onUnmounted(() => {
                 @click="saveAppSettings"
                 class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm font-bold disabled:opacity-50"
               >
-                {{ appSettingsSaving ? '保存中…' : '保存保留策略' }}
+                {{ appSettingsSaving ? '保存中…' : '保存配置' }}
               </button>
               <button
                 type="button"
@@ -2398,7 +2456,8 @@ onUnmounted(() => {
                   </td>
                   <td class="px-6 py-4 text-right">
                     <button 
-                      @click="selectedLog = log"
+                      type="button"
+                      @click="openLogDetail(log)"
                       class="text-blue-600 hover:underline font-medium"
                     >
                       查看详情
@@ -2925,11 +2984,18 @@ onUnmounted(() => {
               @ {{ selectedLog.providerName }}
             </p>
           </div>
-          <button @click="selectedLog = null" class="p-2 hover:bg-gray-100 rounded-full transition-colors">
+          <button type="button" @click="closeLogDetail" class="p-2 hover:bg-gray-100 rounded-full transition-colors">
             <X class="w-6 h-6 text-gray-400" />
           </button>
         </div>
-        <div class="flex-1 overflow-auto p-4 sm:p-6 grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div v-if="logDetailError" class="mx-6 mt-2 rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">
+          {{ logDetailError }}
+        </div>
+        <div v-if="logDetailLoading" class="flex-1 flex flex-col items-center justify-center gap-3 py-24 text-gray-500">
+          <Loader2 class="w-10 h-10 animate-spin text-blue-500" />
+          <p class="text-sm">正在加载完整日志…</p>
+        </div>
+        <div v-else-if="!logDetailError" class="flex-1 overflow-auto p-4 sm:p-6 grid grid-cols-1 lg:grid-cols-2 gap-6">
             <div class="lg:col-span-2 flex flex-col sm:flex-row gap-4 mb-2">
             <div class="flex-1 p-3 bg-gray-50 rounded-lg border border-gray-100">
               <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">客户端密钥</p>

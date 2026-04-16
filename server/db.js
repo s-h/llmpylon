@@ -229,6 +229,9 @@ async function setupDb() {
     await db.run(
         "INSERT OR IGNORE INTO app_settings (key, value) VALUES ('stats_retention_days', '0')"
     );
+    await db.run(
+        "INSERT OR IGNORE INTO app_settings (key, value) VALUES ('upstream_timeout_seconds', '360')"
+    );
 
     const adminUserCols = await db.all('PRAGMA table_info(admin_users)');
     const adminUserColNames = adminUserCols.map(c => c.name);

@@ -35,10 +35,10 @@ function loadPackageInfo() {
 
 const appPackageInfo = loadPackageInfo();
 
-// Axios instance with keep-alive and longer timeout
+// Axios instance: per-request `timeout` comes from app_settings (see proxy handler)
 const axiosInstance = axios.create({
     httpsAgent: new https.Agent({ keepAlive: true }),
-    timeout: 300000, // 5 minutes
+    timeout: 0 // disabled at instance level; each upstream call sets timeout explicitly
 });
 const io = new Server(server, {
     cors: {
@@ -176,8 +176,19 @@ function pickOutgoingUserAgent(headers) {
 
 const APP_SETTINGS_KEYS = {
     LOG_RETENTION_DAYS: 'log_retention_days',
-    STATS_RETENTION_DAYS: 'stats_retention_days'
+    STATS_RETENTION_DAYS: 'stats_retention_days',
+    UPSTREAM_TIMEOUT_SECONDS: 'upstream_timeout_seconds'
 };
+
+const UPSTREAM_TIMEOUT_MIN_SEC = 5;
+const UPSTREAM_TIMEOUT_MAX_SEC = 86400;
+const UPSTREAM_TIMEOUT_DEFAULT_SEC = 360;
+
+async function getUpstreamTimeoutSeconds() {
+    const raw = await getAppSettingInt(APP_SETTINGS_KEYS.UPSTREAM_TIMEOUT_SECONDS, UPSTREAM_TIMEOUT_DEFAULT_SEC);
+    if (!Number.isFinite(raw) || raw < UPSTREAM_TIMEOUT_MIN_SEC) return UPSTREAM_TIMEOUT_DEFAULT_SEC;
+    return Math.min(UPSTREAM_TIMEOUT_MAX_SEC, raw);
+}
 
 async function getAppSettingInt(key, defaultVal) {
     const row = await db.get('SELECT value FROM app_settings WHERE key = ?', [key]);
@@ -845,7 +856,13 @@ app.get('/api/logs', async (req, res) => {
 
     const items = await db.all(
         `
-        SELECT l.*, p.name as providerName, ck.name as clientKeyName
+        SELECT
+            l.id, l.providerId, l.clientKeyId, l.model, l.actualModel, l.status,
+            l.clientUrl, l.targetUrl, l.requestAt, l.responseAt, l.createdAt,
+            l.clientUserAgent, l.proxyUserAgent, l.clientIp, l.httpMethod, l.requestPath,
+            l.isStream, l.streamBroken, l.requestBytes, l.responseBytes, l.latencyMs,
+            l.upstreamStatus, l.clientStatus, l.tokensIn, l.tokensOut, l.tokensTotal,
+            p.name as providerName, ck.name as clientKeyName
         FROM conversation_logs l
         LEFT JOIN providers p ON l.providerId = p.id
         LEFT JOIN client_keys ck ON l.clientKeyId = ck.id
@@ -857,6 +874,23 @@ app.get('/api/logs', async (req, res) => {
     );
 
     res.json({ items, page, pageSize, total, totalPages });
+});
+
+app.get('/api/logs/:id', async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id) || id < 1) return res.status(400).json({ error: 'Invalid id' });
+    const row = await db.get(
+        `
+        SELECT l.*, p.name as providerName, ck.name as clientKeyName
+        FROM conversation_logs l
+        LEFT JOIN providers p ON l.providerId = p.id
+        LEFT JOIN client_keys ck ON l.clientKeyId = ck.id
+        WHERE l.id = ?
+        `,
+        [id]
+    );
+    if (!row) return res.status(404).json({ error: 'Log not found' });
+    res.json(row);
 });
 
 app.delete('/api/logs', async (req, res) => {
@@ -874,7 +908,8 @@ app.delete('/api/logs', async (req, res) => {
 app.get('/api/settings', async (req, res) => {
     const logRetentionDays = await getAppSettingInt(APP_SETTINGS_KEYS.LOG_RETENTION_DAYS, 0);
     const statsRetentionDays = await getAppSettingInt(APP_SETTINGS_KEYS.STATS_RETENTION_DAYS, 0);
-    res.json({ logRetentionDays, statsRetentionDays });
+    const upstreamTimeoutSeconds = await getUpstreamTimeoutSeconds();
+    res.json({ logRetentionDays, statsRetentionDays, upstreamTimeoutSeconds });
 });
 
 app.put('/api/settings', async (req, res) => {
@@ -883,10 +918,14 @@ app.put('/api/settings', async (req, res) => {
     let statsRetentionDays = Math.max(0, parseInt(body.statsRetentionDays, 10));
     if (!Number.isFinite(logRetentionDays)) logRetentionDays = 0;
     if (!Number.isFinite(statsRetentionDays)) statsRetentionDays = 0;
+    let upstreamTimeoutSeconds = parseInt(body.upstreamTimeoutSeconds, 10);
+    if (!Number.isFinite(upstreamTimeoutSeconds)) upstreamTimeoutSeconds = UPSTREAM_TIMEOUT_DEFAULT_SEC;
+    upstreamTimeoutSeconds = Math.min(UPSTREAM_TIMEOUT_MAX_SEC, Math.max(UPSTREAM_TIMEOUT_MIN_SEC, upstreamTimeoutSeconds));
     await setAppSetting(APP_SETTINGS_KEYS.LOG_RETENTION_DAYS, logRetentionDays);
     await setAppSetting(APP_SETTINGS_KEYS.STATS_RETENTION_DAYS, statsRetentionDays);
+    await setAppSetting(APP_SETTINGS_KEYS.UPSTREAM_TIMEOUT_SECONDS, upstreamTimeoutSeconds);
     await runRetentionPurge();
-    res.json({ logRetentionDays, statsRetentionDays });
+    res.json({ logRetentionDays, statsRetentionDays, upstreamTimeoutSeconds });
 });
 
 app.post('/api/stats/clear', async (req, res) => {
@@ -1311,6 +1350,8 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
         return res.status(403).json({ error: 'API Key is disabled' });
     }
 
+    const upstreamTimeoutMs = (await getUpstreamTimeoutSeconds()) * 1000;
+
     const { model, messages, stream } = req.body;
 
     // 1. Get Provider (App-specific or Global Default)
@@ -1566,7 +1607,8 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
             const upstream = await axiosInstance.post(targetUrl, targetBody, {
                 headers: upstreamHeaders,
                 responseType: 'stream',
-                validateStatus: () => true
+                validateStatus: () => true,
+                timeout: upstreamTimeoutMs
             });
 
             res.status(upstream.status);
@@ -1813,7 +1855,8 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
             proxyUserAgent = pickOutgoingUserAgent(openaiHeaders);
 
             response = await axiosInstance.post(targetUrl, targetBody, {
-                headers: openaiHeaders
+                headers: openaiHeaders,
+                timeout: upstreamTimeoutMs
             });
 
             // Response conversion logic
@@ -1877,7 +1920,8 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
             proxyUserAgent = pickOutgoingUserAgent(anthropicHeaders);
 
             response = await axiosInstance.post(targetUrl, targetBody, {
-                headers: anthropicHeaders
+                headers: anthropicHeaders,
+                timeout: upstreamTimeoutMs
             });
 
             // Response conversion logic
