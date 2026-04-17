@@ -1319,6 +1319,9 @@ watch(activeTab, (tab) => {
       fetchAppSettings();
     }
   }
+  if (tab === 'users') {
+    if (isAuthenticated.value) fetchAdminUsers();
+  }
   if (tab === 'logs') {
     if (isAuthenticated.value) fetchLogs();
   }
