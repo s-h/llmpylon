@@ -216,6 +216,8 @@ async function setupDb() {
     await addLogCol('tokensIn', 'INTEGER');
     await addLogCol('tokensOut', 'INTEGER');
     await addLogCol('tokensTotal', 'INTEGER');
+    await addLogCol('clientRequestHeaders', 'TEXT');
+    await addLogCol('proxyRequestHeaders', 'TEXT');
 
     await db.exec(`
         CREATE TABLE IF NOT EXISTS app_settings (

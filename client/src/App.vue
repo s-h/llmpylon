@@ -3059,6 +3059,22 @@ onUnmounted(() => {
           </div>
           <div class="space-y-4">
             <div class="flex justify-between items-center">
+              <h4 class="text-xs font-bold text-gray-400 uppercase">客户端请求头</h4>
+            </div>
+            <pre
+              class="bg-gray-900 text-gray-100 p-4 rounded-xl overflow-auto text-xs leading-relaxed max-h-[600px]"
+            >{{ formatJson(selectedLog.clientRequestHeaders) }}</pre>
+          </div>
+          <div class="space-y-4">
+            <div class="flex justify-between items-center">
+              <h4 class="text-xs font-bold text-gray-400 uppercase">代理请求头（发往上游）</h4>
+            </div>
+            <pre
+              class="bg-gray-900 text-gray-100 p-4 rounded-xl overflow-auto text-xs leading-relaxed max-h-[600px]"
+            >{{ formatJson(selectedLog.proxyRequestHeaders) }}</pre>
+          </div>
+          <div class="space-y-4">
+            <div class="flex justify-between items-center">
               <h4 class="text-xs font-bold text-gray-400 uppercase">请求正文 (JSON)</h4>
               <span class="text-[10px] text-gray-400 font-mono">{{ formatTime(selectedLog.requestAt) }}</span>
             </div>

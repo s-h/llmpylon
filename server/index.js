@@ -1438,11 +1438,23 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
     const isStreamFlag = stream ? 1 : 0;
     const requestBodySerialized = JSON.stringify(req.body);
     const requestBytes = Buffer.byteLength(requestBodySerialized, 'utf8');
+
+    // Record client request headers (mask sensitive values)
+    const clientHeadersForLog = { ...req.headers };
+    if (clientHeadersForLog['authorization']) {
+        const auth = clientHeadersForLog['authorization'];
+        clientHeadersForLog['authorization'] = auth.length > 10 ? `${auth.substring(0, 10)}...` : auth;
+    }
+    if (clientHeadersForLog['x-api-key']) {
+        clientHeadersForLog['x-api-key'] = '***masked***';
+    }
+    const clientRequestHeaders = JSON.stringify(clientHeadersForLog);
+
     const logResult = await db.run(
         `INSERT INTO conversation_logs (
             providerId, clientKeyId, model, actualModel, requestBody, status, requestAt, clientUrl,
-            clientUserAgent, clientIp, httpMethod, requestPath, isStream, requestBytes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            clientUserAgent, clientIp, httpMethod, requestPath, isStream, requestBytes, clientRequestHeaders
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
             provider.id,
             clientKeyData.id,
@@ -1457,9 +1469,10 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
             httpMethod,
             requestPath,
             isStreamFlag,
-            requestBytes
+            requestBytes,
+            clientRequestHeaders
         ]
-    );
+        );
     const logId = logResult.lastID;
 
     // Notify frontend: waiting for response
@@ -1563,12 +1576,20 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                 } else {
                     targetUrl += pathSuffix;
                 }
+                // Auto-detect client auth format and use same format for upstream
+                const hasBearer = req.headers['authorization']?.toLowerCase().startsWith('bearer');
+                const hasXApiKey = !!req.headers['x-api-key'];
                 upstreamHeaders = {
-                    'x-api-key': provider.apiKey,
                     'anthropic-version': req.headers['anthropic-version'] || '2023-06-01',
                     'content-type': 'application/json',
                     'accept': 'text/event-stream'
                 };
+                if (hasBearer) {
+                    upstreamHeaders['Authorization'] = `Bearer ${provider.apiKey}`;
+                }
+                if (hasXApiKey) {
+                    upstreamHeaders['x-api-key'] = provider.apiKey;
+                }
                 if (req.headers['anthropic-beta']) {
                     upstreamHeaders['anthropic-beta'] = req.headers['anthropic-beta'];
                 }
@@ -1603,6 +1624,18 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
             }
 
             proxyUserAgent = pickOutgoingUserAgent(upstreamHeaders);
+
+            // Record proxy request headers (mask sensitive values)
+            const proxyHeadersForLog = { ...upstreamHeaders };
+            if (proxyHeadersForLog['authorization']) {
+                const auth = proxyHeadersForLog['authorization'];
+                proxyHeadersForLog['authorization'] = auth.length > 10 ? `${auth.substring(0, 10)}...` : auth;
+            }
+            if (proxyHeadersForLog['x-api-key']) {
+                proxyHeadersForLog['x-api-key'] = '***masked***';
+            }
+            const proxyRequestHeaders = JSON.stringify(proxyHeadersForLog);
+            await db.run('UPDATE conversation_logs SET proxyRequestHeaders = ? WHERE id = ?', [proxyRequestHeaders, logId]);
 
             const upstream = await axiosInstance.post(targetUrl, targetBody, {
                 headers: upstreamHeaders,
@@ -1904,12 +1937,20 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
             }
 
             console.log(`[Proxy] Forwarding to Anthropic: ${targetUrl}`);
+            // Auto-detect client auth format and use same format for upstream
+            const hasBearer = req.headers['authorization']?.toLowerCase().startsWith('bearer');
+            const hasXApiKey = !!req.headers['x-api-key'];
             const anthropicHeaders = {
-                'x-api-key': provider.apiKey,
                 'anthropic-version': req.headers['anthropic-version'] || '2023-06-01',
                 'content-type': 'application/json',
                 'accept': 'application/json'
             };
+            if (hasBearer) {
+                anthropicHeaders['Authorization'] = `Bearer ${provider.apiKey}`;
+            }
+            if (hasXApiKey) {
+                anthropicHeaders['x-api-key'] = provider.apiKey;
+            }
             if (req.headers['anthropic-beta']) {
                 anthropicHeaders['anthropic-beta'] = req.headers['anthropic-beta'];
             }
@@ -1918,6 +1959,18 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
             }
 
             proxyUserAgent = pickOutgoingUserAgent(anthropicHeaders);
+
+            // Record proxy request headers (mask sensitive values)
+            const proxyHeadersForLog = { ...anthropicHeaders };
+            if (proxyHeadersForLog['authorization']) {
+                const auth = proxyHeadersForLog['authorization'];
+                proxyHeadersForLog['authorization'] = auth.length > 10 ? `${auth.substring(0, 10)}...` : auth;
+            }
+            if (proxyHeadersForLog['x-api-key']) {
+                proxyHeadersForLog['x-api-key'] = '***masked***';
+            }
+            const proxyRequestHeaders = JSON.stringify(proxyHeadersForLog);
+            await db.run('UPDATE conversation_logs SET proxyRequestHeaders = ? WHERE id = ?', [proxyRequestHeaders, logId]);
 
             response = await axiosInstance.post(targetUrl, targetBody, {
                 headers: anthropicHeaders,
