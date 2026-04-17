@@ -23,6 +23,7 @@ import {
   Cpu,
   BarChart3,
   Users,
+  User,
   BookOpen,
   X,
   Menu,
@@ -1464,12 +1465,19 @@ onUnmounted(() => {
           <BarChart3 class="w-5 h-5" />
           统计
         </button>
-        <button 
+        <button
           @click="activeTab = 'config'"
           :class="['w-full flex items-center gap-3 px-4 py-2 rounded-lg transition-colors', activeTab === 'config' ? 'bg-blue-50 text-blue-600' : 'hover:bg-gray-100']"
         >
-          <Users class="w-5 h-5" />
+          <Settings class="w-5 h-5" />
           配置管理
+        </button>
+        <button
+          @click="activeTab = 'users'"
+          :class="['w-full flex items-center gap-3 px-4 py-2 rounded-lg transition-colors', activeTab === 'users' ? 'bg-blue-50 text-blue-600' : 'hover:bg-gray-100']"
+        >
+          <User class="w-5 h-5" />
+          用户管理
         </button>
         <button 
           @click="activeTab = 'help'"
@@ -1505,7 +1513,7 @@ onUnmounted(() => {
           >
             <Menu class="w-5 h-5" />
           </button>
-          <h2 class="text-base sm:text-lg font-semibold truncate">{{ activeTab === 'providers' ? '厂商配置' : (activeTab === 'keys' ? '应用管理' : (activeTab === 'models' ? '模型管理' : (activeTab === 'modelRules' ? '模型规则' : (activeTab === 'stats' ? '统计' : (activeTab === 'config' ? '配置管理' : (activeTab === 'help' ? '客户端帮助' : '对话历史')))))) }}</h2>
+          <h2 class="text-base sm:text-lg font-semibold truncate">{{ activeTab === 'providers' ? '厂商配置' : (activeTab === 'keys' ? '应用管理' : (activeTab === 'models' ? '模型管理' : (activeTab === 'modelRules' ? '模型规则' : (activeTab === 'stats' ? '统计' : (activeTab === 'config' ? '配置管理' : (activeTab === 'users' ? '用户管理' : (activeTab === 'help' ? '客户端帮助' : '对话历史'))))))) }}</h2>
         </div>
         <div class="flex items-center gap-4">
           <div class="flex items-center gap-2 sm:gap-3">
@@ -1919,6 +1927,89 @@ onUnmounted(() => {
           </div>
         </div>
 
+        <!-- Users View -->
+        <div v-if="activeTab === 'users'" class="space-y-6">
+          <div class="flex flex-col sm:flex-row gap-3 sm:justify-between sm:items-center">
+            <div class="space-y-1">
+              <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">用户管理</h3>
+              <p class="text-[10px] text-gray-400">首次登录默认用户必须修改密码；支持创建/禁用/重置密码。</p>
+            </div>
+            <button
+              @click="showAddAdminUser = true"
+              class="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
+            >
+              <Plus class="w-4 h-4" />
+              添加用户
+            </button>
+          </div>
+
+          <div class="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
+            <div class="overflow-x-auto">
+            <table class="w-full min-w-[760px] text-left text-sm">
+              <thead class="bg-gray-50 border-b border-gray-200">
+                <tr>
+                  <th class="px-6 py-4 font-semibold text-gray-600">用户名</th>
+                  <th class="px-6 py-4 font-semibold text-gray-600">状态</th>
+                  <th class="px-6 py-4 font-semibold text-gray-600">强制改密</th>
+                  <th class="px-6 py-4 font-semibold text-gray-600">创建时间</th>
+                  <th class="px-6 py-4 font-semibold text-gray-600 text-right">操作</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-gray-200">
+                <tr v-for="u in adminUsers" :key="u.id" class="hover:bg-gray-50 transition-colors">
+                  <td class="px-6 py-4 font-medium text-gray-900">{{ u.username }}</td>
+                  <td class="px-6 py-4">
+                    <span
+                      v-if="u.enabled"
+                      class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-green-50 text-green-700 border border-green-200"
+                    >
+                      <ShieldCheck class="w-3 h-3" />
+                      已启用
+                    </span>
+                    <span
+                      v-else
+                      class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-gray-50 text-gray-500 border border-gray-200"
+                    >
+                      <ShieldAlert class="w-3 h-3" />
+                      已禁用
+                    </span>
+                  </td>
+                  <td class="px-6 py-4">
+                    <span v-if="u.mustChangePassword" class="text-amber-600 font-bold text-xs">是</span>
+                    <span v-else class="text-gray-400 text-xs">否</span>
+                  </td>
+                  <td class="px-6 py-4 text-gray-500 font-mono text-xs">{{ formatTime(u.createdAt) }}</td>
+                  <td class="px-6 py-4 text-right space-x-3">
+                    <button
+                      @click="editingAdminUser = { ...u }"
+                      class="text-blue-600 hover:underline font-medium text-xs"
+                    >
+                      编辑
+                    </button>
+                    <button
+                      @click="resetPasswordUser = u; resetPasswordValue = ''"
+                      class="text-amber-600 hover:underline font-medium text-xs"
+                    >
+                      重置密码
+                    </button>
+                    <button
+                      v-if="authUser && u.id !== authUser.id"
+                      @click="deleteAdminUser(u.id)"
+                      class="text-red-600 hover:underline font-medium text-xs"
+                    >
+                      删除
+                    </button>
+                  </td>
+                </tr>
+                <tr v-if="!adminUsers.length">
+                  <td colspan="5" class="px-6 py-10 text-center text-gray-400 text-sm">暂无用户</td>
+                </tr>
+              </tbody>
+            </table>
+            </div>
+          </div>
+        </div>
+
         <!-- Stats View -->
         <div v-if="activeTab === 'stats'" class="space-y-8">
           <div class="relative overflow-hidden rounded-2xl border border-slate-200/90 bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 p-6 text-white shadow-xl shadow-slate-900/15 sm:p-8">
@@ -1937,6 +2028,14 @@ onUnmounted(() => {
               >
                 <Clock class="h-4 w-4 opacity-90" />
                 刷新数据
+              </button>
+              <button
+                type="button"
+                @click="clearAllStats"
+                class="inline-flex shrink-0 items-center gap-2 rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-2.5 text-sm font-semibold text-rose-200 backdrop-blur-sm transition hover:bg-rose-500/20"
+              >
+                <Trash2 class="h-4 w-4 opacity-90" />
+                清空统计
               </button>
             </div>
 
@@ -2221,70 +2320,58 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <!-- 系统设置 -->
-          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6 space-y-6">
-            <div>
-              <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">系统设置</h3>
-              <p class="text-xs text-gray-400 mt-1">配置日志保留、统计数据保留和上游请求超时。</p>
+          <!-- 对话日志保留 -->
+          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+            <div class="mb-4">
+              <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">对话日志保留</h3>
+              <p class="text-xs text-gray-400 mt-1">按天自动删除过期数据；0 表示不自动删除。保存后立即按新规则清理一次，之后约每 6 小时再执行。</p>
             </div>
-            <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
-              <div>
-                <label class="block text-[10px] font-bold text-gray-400 uppercase mb-1">对话日志保留</label>
-                <div class="flex items-center gap-2">
-                  <input
-                    v-model.number="appSettings.logRetentionDays"
-                    type="number"
-                    min="0"
-                    step="1"
-                    class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
-                  />
-                  <span class="text-sm text-gray-500 whitespace-nowrap">天</span>
-                </div>
-              </div>
-              <div>
-                <label class="block text-[10px] font-bold text-gray-400 uppercase mb-1">统计数据保留</label>
-                <div class="flex items-center gap-2">
-                  <input
-                    v-model.number="appSettings.statsRetentionDays"
-                    type="number"
-                    min="0"
-                    step="1"
-                    class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
-                  />
-                  <span class="text-sm text-gray-500 whitespace-nowrap">天</span>
-                </div>
-              </div>
-              <div>
-                <label class="block text-[10px] font-bold text-gray-400 uppercase mb-1">上游 HTTP 超时</label>
-                <div class="flex items-center gap-2">
-                  <input
-                    v-model.number="appSettings.upstreamTimeoutSeconds"
-                    type="number"
-                    min="5"
-                    max="86400"
-                    step="1"
-                    class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
-                  />
-                  <span class="text-sm text-gray-500 whitespace-nowrap">秒</span>
-                </div>
-              </div>
+            <div class="flex items-center gap-4">
+              <input
+                v-model.number="appSettings.logRetentionDays"
+                type="number"
+                min="0"
+                step="1"
+                class="w-32 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+              />
+              <span class="text-sm text-gray-500">天</span>
             </div>
-            <div class="flex flex-wrap gap-2 items-center pt-2 border-t border-gray-100">
-              <button
-                type="button"
-                :disabled="appSettingsSaving"
-                @click="saveAppSettings"
-                class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm font-bold disabled:opacity-50"
-              >
-                {{ appSettingsSaving ? '保存中…' : '保存配置' }}
-              </button>
-              <button
-                type="button"
-                @click="clearAllStats"
-                class="px-4 py-2 border border-rose-200 text-rose-700 bg-rose-50 rounded-lg hover:bg-rose-100 transition-colors text-sm font-bold"
-              >
-                清空统计数据
-              </button>
+          </div>
+
+          <!-- 统计数据保留 -->
+          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+            <div class="mb-4">
+              <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">统计数据保留</h3>
+              <p class="text-xs text-gray-400 mt-1">按天自动删除过期统计数据；0 表示不自动删除。</p>
+            </div>
+            <div class="flex items-center gap-4">
+              <input
+                v-model.number="appSettings.statsRetentionDays"
+                type="number"
+                min="0"
+                step="1"
+                class="w-32 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+              />
+              <span class="text-sm text-gray-500">天</span>
+            </div>
+          </div>
+
+          <!-- 上游超时 -->
+          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+            <div class="mb-4">
+              <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">上游 HTTP 超时</h3>
+              <p class="text-xs text-gray-400 mt-1">代理请求大模型 API 的单次 HTTP 超时时间。默认 360，范围 5～86400 秒。</p>
+            </div>
+            <div class="flex items-center gap-4">
+              <input
+                v-model.number="appSettings.upstreamTimeoutSeconds"
+                type="number"
+                min="5"
+                max="86400"
+                step="1"
+                class="w-32 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+              />
+              <span class="text-sm text-gray-500">秒</span>
             </div>
           </div>
 
@@ -2302,83 +2389,24 @@ onUnmounted(() => {
             />
           </div>
 
-          <!-- 用户管理 -->
-          <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-            <div class="p-6 pb-4 flex flex-col sm:flex-row gap-3 sm:justify-between sm:items-center">
-              <div class="space-y-1">
-                <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">用户管理</h3>
-                <p class="text-[10px] text-gray-400">首次登录默认用户必须修改密码；支持创建/禁用/重置密码。</p>
-              </div>
+          <!-- 保存按钮 -->
+          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+            <div class="flex flex-wrap gap-2 items-center">
               <button
-                @click="showAddAdminUser = true"
-                class="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
+                type="button"
+                :disabled="appSettingsSaving"
+                @click="saveAppSettings"
+                class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm font-bold disabled:opacity-50"
               >
-                <Plus class="w-4 h-4" />
-                添加用户
+                {{ appSettingsSaving ? '保存中…' : '保存配置' }}
               </button>
-            </div>
-            <div class="overflow-x-auto border-t border-gray-200">
-            <table class="w-full min-w-[760px] text-left text-sm">
-              <thead class="bg-gray-50 border-b border-gray-200">
-                <tr>
-                  <th class="px-6 py-4 font-semibold text-gray-600">用户名</th>
-                  <th class="px-6 py-4 font-semibold text-gray-600">状态</th>
-                  <th class="px-6 py-4 font-semibold text-gray-600">强制改密</th>
-                  <th class="px-6 py-4 font-semibold text-gray-600">创建时间</th>
-                  <th class="px-6 py-4 font-semibold text-gray-600 text-right">操作</th>
-                </tr>
-              </thead>
-              <tbody class="divide-y divide-gray-200">
-                <tr v-for="u in adminUsers" :key="u.id" class="hover:bg-gray-50 transition-colors">
-                  <td class="px-6 py-4 font-medium text-gray-900">{{ u.username }}</td>
-                  <td class="px-6 py-4">
-                    <span 
-                      v-if="u.enabled" 
-                      class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-green-50 text-green-700 border border-green-200"
-                    >
-                      <ShieldCheck class="w-3 h-3" />
-                      已启用
-                    </span>
-                    <span 
-                      v-else 
-                      class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-gray-50 text-gray-500 border border-gray-200"
-                    >
-                      <ShieldAlert class="w-3 h-3" />
-                      已禁用
-                    </span>
-                  </td>
-                  <td class="px-6 py-4">
-                    <span v-if="u.mustChangePassword" class="text-amber-600 font-bold text-xs">是</span>
-                    <span v-else class="text-gray-400 text-xs">否</span>
-                  </td>
-                  <td class="px-6 py-4 text-gray-500 font-mono text-xs">{{ formatTime(u.createdAt) }}</td>
-                  <td class="px-6 py-4 text-right space-x-3">
-                    <button 
-                      @click="editingAdminUser = { ...u }"
-                      class="text-blue-600 hover:underline font-medium text-xs"
-                    >
-                      编辑
-                    </button>
-                    <button 
-                      @click="resetPasswordUser = u; resetPasswordValue = ''"
-                      class="text-amber-600 hover:underline font-medium text-xs"
-                    >
-                      重置密码
-                    </button>
-                    <button 
-                      v-if="authUser && u.id !== authUser.id"
-                      @click="deleteAdminUser(u.id)"
-                      class="text-red-600 hover:underline font-medium text-xs"
-                    >
-                      删除
-                    </button>
-                  </td>
-                </tr>
-                <tr v-if="!adminUsers.length">
-                  <td colspan="5" class="px-6 py-10 text-center text-gray-400 text-sm">暂无用户</td>
-                </tr>
-              </tbody>
-            </table>
+              <button
+                type="button"
+                @click="clearAllStats"
+                class="px-4 py-2 border border-rose-200 text-rose-700 bg-rose-50 rounded-lg hover:bg-rose-100 transition-colors text-sm font-bold"
+              >
+                清空统计数据
+              </button>
             </div>
           </div>
         </div>
