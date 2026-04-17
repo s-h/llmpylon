@@ -177,12 +177,14 @@ function pickOutgoingUserAgent(headers) {
 const APP_SETTINGS_KEYS = {
     LOG_RETENTION_DAYS: 'log_retention_days',
     STATS_RETENTION_DAYS: 'stats_retention_days',
-    UPSTREAM_TIMEOUT_SECONDS: 'upstream_timeout_seconds'
+    UPSTREAM_TIMEOUT_SECONDS: 'upstream_timeout_seconds',
+    UPSTREAM_HEADERS_BLOCKLIST: 'upstream_headers_blocklist'
 };
 
 const UPSTREAM_TIMEOUT_MIN_SEC = 5;
 const UPSTREAM_TIMEOUT_MAX_SEC = 86400;
 const UPSTREAM_TIMEOUT_DEFAULT_SEC = 360;
+const UPSTREAM_HEADERS_BLOCKLIST_DEFAULT = ['host', 'content-length', 'connection', 'accept-encoding'];
 
 async function getUpstreamTimeoutSeconds() {
     const raw = await getAppSettingInt(APP_SETTINGS_KEYS.UPSTREAM_TIMEOUT_SECONDS, UPSTREAM_TIMEOUT_DEFAULT_SEC);
@@ -202,6 +204,68 @@ async function setAppSetting(key, val) {
         'INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
         [key, String(val)]
     );
+}
+
+async function getUpstreamHeadersBlocklist() {
+    const row = await db.get('SELECT value FROM app_settings WHERE key = ?', [APP_SETTINGS_KEYS.UPSTREAM_HEADERS_BLOCKLIST]);
+    if (row == null || row.value === undefined || row.value === '') return UPSTREAM_HEADERS_BLOCKLIST_DEFAULT;
+    try {
+        const parsed = JSON.parse(row.value);
+        if (Array.isArray(parsed)) return parsed;
+    } catch (e) {
+        console.error('[getUpstreamHeadersBlocklist] parse error:', e);
+    }
+    return UPSTREAM_HEADERS_BLOCKLIST_DEFAULT;
+}
+
+/**
+ * Filter client headers based on blocklist, then apply auth override
+ * @param {object} clientHeaders - Original request headers
+ * @param {string} providerApiKey - Provider API key to use for auth
+ * @param {boolean} isStream - Whether this is a streaming request
+ * @param {boolean} isAnthropic - Whether the target is Anthropic API
+ * @returns {object} Filtered headers for upstream
+ */
+async function buildUpstreamHeaders(clientHeaders, providerApiKey, isStream, isAnthropic) {
+    const blocklist = await getUpstreamHeadersBlocklist();
+    const blocklistLower = blocklist.map(h => h.toLowerCase());
+
+    const upstreamHeaders = {};
+
+    for (const [key, value] of Object.entries(clientHeaders)) {
+        // Skip blocked headers
+        if (blocklistLower.includes(key.toLowerCase())) {
+            continue;
+        }
+        upstreamHeaders[key] = value;
+    }
+
+    // Override auth headers with provider's key
+    if (isAnthropic) {
+        const hasBearer = clientHeaders['authorization']?.toLowerCase().startsWith('bearer');
+        const hasXApiKey = !!clientHeaders['x-api-key'];
+
+        if (hasBearer) {
+            upstreamHeaders['Authorization'] = `Bearer ${providerApiKey}`;
+        }
+        if (hasXApiKey) {
+            upstreamHeaders['x-api-key'] = providerApiKey;
+        }
+    } else {
+        // OpenAI uses Bearer token
+        if (clientHeaders['authorization']) {
+            upstreamHeaders['Authorization'] = `Bearer ${providerApiKey}`;
+        }
+    }
+
+    // Override accept header based on stream mode
+    if (isStream) {
+        upstreamHeaders['Accept'] = isAnthropic ? 'text/event-stream' : 'text/event-stream';
+    } else {
+        upstreamHeaders['Accept'] = 'application/json';
+    }
+
+    return upstreamHeaders;
 }
 
 async function runRetentionPurge() {
@@ -909,7 +973,8 @@ app.get('/api/settings', async (req, res) => {
     const logRetentionDays = await getAppSettingInt(APP_SETTINGS_KEYS.LOG_RETENTION_DAYS, 0);
     const statsRetentionDays = await getAppSettingInt(APP_SETTINGS_KEYS.STATS_RETENTION_DAYS, 0);
     const upstreamTimeoutSeconds = await getUpstreamTimeoutSeconds();
-    res.json({ logRetentionDays, statsRetentionDays, upstreamTimeoutSeconds });
+    const upstreamHeadersBlocklist = await getUpstreamHeadersBlocklist();
+    res.json({ logRetentionDays, statsRetentionDays, upstreamTimeoutSeconds, upstreamHeadersBlocklist });
 });
 
 app.put('/api/settings', async (req, res) => {
@@ -921,11 +986,19 @@ app.put('/api/settings', async (req, res) => {
     let upstreamTimeoutSeconds = parseInt(body.upstreamTimeoutSeconds, 10);
     if (!Number.isFinite(upstreamTimeoutSeconds)) upstreamTimeoutSeconds = UPSTREAM_TIMEOUT_DEFAULT_SEC;
     upstreamTimeoutSeconds = Math.min(UPSTREAM_TIMEOUT_MAX_SEC, Math.max(UPSTREAM_TIMEOUT_MIN_SEC, upstreamTimeoutSeconds));
+
+    // Handle upstream headers blocklist
+    let upstreamHeadersBlocklist = UPSTREAM_HEADERS_BLOCKLIST_DEFAULT;
+    if (body.upstreamHeadersBlocklist && Array.isArray(body.upstreamHeadersBlocklist)) {
+        upstreamHeadersBlocklist = body.upstreamHeadersBlocklist.filter(h => typeof h === 'string' && h.trim());
+    }
+
     await setAppSetting(APP_SETTINGS_KEYS.LOG_RETENTION_DAYS, logRetentionDays);
     await setAppSetting(APP_SETTINGS_KEYS.STATS_RETENTION_DAYS, statsRetentionDays);
     await setAppSetting(APP_SETTINGS_KEYS.UPSTREAM_TIMEOUT_SECONDS, upstreamTimeoutSeconds);
+    await setAppSetting(APP_SETTINGS_KEYS.UPSTREAM_HEADERS_BLOCKLIST, JSON.stringify(upstreamHeadersBlocklist));
     await runRetentionPurge();
-    res.json({ logRetentionDays, statsRetentionDays, upstreamTimeoutSeconds });
+    res.json({ logRetentionDays, statsRetentionDays, upstreamTimeoutSeconds, upstreamHeadersBlocklist });
 });
 
 app.post('/api/stats/clear', async (req, res) => {
@@ -1536,11 +1609,8 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                 } else {
                     targetUrl += pathSuffix;
                 }
-                upstreamHeaders = {
-                    'Authorization': `Bearer ${provider.apiKey}`,
-                    'Content-Type': 'application/json',
-                    'Accept': 'text/event-stream'
-                };
+                // Use filtered headers from client, override auth
+                upstreamHeaders = await buildUpstreamHeaders(req.headers, provider.apiKey, true, false);
             } else if (provider.type === 'anthropic') {
                 if (isClientOpenAI || !isClientAnthropic) {
                     const msg = 'Streaming protocol conversion (OpenAI -> Anthropic) is not supported';
@@ -1576,23 +1646,8 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                 } else {
                     targetUrl += pathSuffix;
                 }
-                // Auto-detect client auth format and use same format for upstream
-                const hasBearer = req.headers['authorization']?.toLowerCase().startsWith('bearer');
-                const hasXApiKey = !!req.headers['x-api-key'];
-                upstreamHeaders = {
-                    'anthropic-version': req.headers['anthropic-version'] || '2023-06-01',
-                    'content-type': 'application/json',
-                    'accept': 'text/event-stream'
-                };
-                if (hasBearer) {
-                    upstreamHeaders['Authorization'] = `Bearer ${provider.apiKey}`;
-                }
-                if (hasXApiKey) {
-                    upstreamHeaders['x-api-key'] = provider.apiKey;
-                }
-                if (req.headers['anthropic-beta']) {
-                    upstreamHeaders['anthropic-beta'] = req.headers['anthropic-beta'];
-                }
+                // Use filtered headers from client, override auth
+                upstreamHeaders = await buildUpstreamHeaders(req.headers, provider.apiKey, true, true);
             } else {
                 const msg = `Unsupported provider type: ${provider.type}`;
                 const responseAt = new Date().toISOString();
@@ -1876,14 +1931,8 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
             }
 
             console.log(`[Proxy] Forwarding to OpenAI: ${targetUrl}`);
-            const openaiHeaders = {
-                'Authorization': `Bearer ${provider.apiKey}`,
-                'Content-Type': 'application/json',
-                'Accept': 'application/json'
-            };
-            if (req.headers['user-agent']) {
-                openaiHeaders['User-Agent'] = req.headers['user-agent'];
-            }
+            // Use filtered headers from client, override auth
+            const openaiHeaders = await buildUpstreamHeaders(req.headers, provider.apiKey, false, false);
 
             proxyUserAgent = pickOutgoingUserAgent(openaiHeaders);
 
@@ -1937,26 +1986,8 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
             }
 
             console.log(`[Proxy] Forwarding to Anthropic: ${targetUrl}`);
-            // Auto-detect client auth format and use same format for upstream
-            const hasBearer = req.headers['authorization']?.toLowerCase().startsWith('bearer');
-            const hasXApiKey = !!req.headers['x-api-key'];
-            const anthropicHeaders = {
-                'anthropic-version': req.headers['anthropic-version'] || '2023-06-01',
-                'content-type': 'application/json',
-                'accept': 'application/json'
-            };
-            if (hasBearer) {
-                anthropicHeaders['Authorization'] = `Bearer ${provider.apiKey}`;
-            }
-            if (hasXApiKey) {
-                anthropicHeaders['x-api-key'] = provider.apiKey;
-            }
-            if (req.headers['anthropic-beta']) {
-                anthropicHeaders['anthropic-beta'] = req.headers['anthropic-beta'];
-            }
-            if (req.headers['user-agent']) {
-                anthropicHeaders['User-Agent'] = req.headers['user-agent'];
-            }
+            // Use filtered headers from client, override auth
+            const anthropicHeaders = await buildUpstreamHeaders(req.headers, provider.apiKey, false, true);
 
             proxyUserAgent = pickOutgoingUserAgent(anthropicHeaders);
 

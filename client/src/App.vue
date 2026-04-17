@@ -217,7 +217,12 @@ const importStep = ref('file');
 const importResults = ref([]);
 const showGlobalImportDialog = ref(false);
 const globalImportData = ref(null);
-const appSettings = ref({ logRetentionDays: 0, statsRetentionDays: 0, upstreamTimeoutSeconds: 360 });
+const appSettings = ref({
+  logRetentionDays: 0,
+  statsRetentionDays: 0,
+  upstreamTimeoutSeconds: 360,
+  upstreamHeadersBlocklist: ['host', 'content-length', 'connection', 'accept-encoding']
+});
 const appSettingsSaving = ref(false);
 const nowMs = ref(Date.now());
 
@@ -660,7 +665,8 @@ const fetchAppSettings = async () => {
     appSettings.value = {
       logRetentionDays: Math.max(0, Number(res.data.logRetentionDays) || 0),
       statsRetentionDays: Math.max(0, Number(res.data.statsRetentionDays) || 0),
-      upstreamTimeoutSeconds: Math.max(5, Math.min(86400, Number(res.data.upstreamTimeoutSeconds) || 360))
+      upstreamTimeoutSeconds: Math.max(5, Math.min(86400, Number(res.data.upstreamTimeoutSeconds) || 360)),
+      upstreamHeadersBlocklist: res.data.upstreamHeadersBlocklist || ['host', 'content-length', 'connection', 'accept-encoding']
     };
   } catch (e) {
     console.error('fetchAppSettings', e);
@@ -673,11 +679,13 @@ const saveAppSettings = async () => {
     const res = await axios.put(`${API_BASE}/settings`, {
       logRetentionDays: Math.max(0, Number(appSettings.value.logRetentionDays) || 0),
       statsRetentionDays: Math.max(0, Number(appSettings.value.statsRetentionDays) || 0),
-      upstreamTimeoutSeconds: Math.max(5, Math.min(86400, Number(appSettings.value.upstreamTimeoutSeconds) || 360))
+      upstreamTimeoutSeconds: Math.max(5, Math.min(86400, Number(appSettings.value.upstreamTimeoutSeconds) || 360)),
+      upstreamHeadersBlocklist: appSettings.value.upstreamHeadersBlocklist
     });
     appSettings.value.logRetentionDays = res.data.logRetentionDays;
     appSettings.value.statsRetentionDays = res.data.statsRetentionDays;
     appSettings.value.upstreamTimeoutSeconds = res.data.upstreamTimeoutSeconds;
+    appSettings.value.upstreamHeadersBlocklist = res.data.upstreamHeadersBlocklist;
     alert('已保存');
   } catch (e) {
     alert('保存失败: ' + (e.response?.data?.error || e.message));
@@ -2250,6 +2258,16 @@ onUnmounted(() => {
                   class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
                 />
                 <p class="text-[10px] text-gray-400 mt-1">默认 360，范围 5～86400。</p>
+              </div>
+              <div class="w-full">
+                <label class="block text-[10px] font-bold text-gray-400 uppercase mb-1">请求头转发黑名单</label>
+                <input
+                  :value="appSettings.upstreamHeadersBlocklist.join(', ')"
+                  @input="appSettings.upstreamHeadersBlocklist = $event.target.value.split(',').map(s => s.trim()).filter(s => s)"
+                  type="text"
+                  class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                />
+                <p class="text-[10px] text-gray-400 mt-1">默认: host, content-length, connection, accept-encoding。这些请求头不会转发到上游。</p>
               </div>
             </div>
             <div class="flex flex-wrap gap-2 items-center">
