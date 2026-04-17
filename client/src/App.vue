@@ -2221,55 +2221,77 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6 space-y-4">
-            <div>
-              <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">数据保留与上游超时</h3>
-              <p class="text-xs text-gray-400 mt-1">按天自动删除过期数据；0 表示不自动删除。保存后立即按新规则清理一次，之后约每 6 小时再执行。上游超时为代理请求大模型 API 的单次 HTTP 超时（秒）。</p>
+          <!-- 对话日志保留 -->
+          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+            <div class="mb-4">
+              <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">对话日志保留</h3>
+              <p class="text-xs text-gray-400 mt-1">按天自动删除过期数据；0 表示不自动删除。保存后立即按新规则清理一次，之后约每 6 小时再执行。</p>
             </div>
-            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-              <div>
-                <label class="block text-[10px] font-bold text-gray-400 uppercase mb-1">对话日志保留（天）</label>
-                <input
-                  v-model.number="appSettings.logRetentionDays"
-                  type="number"
-                  min="0"
-                  step="1"
-                  class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
-                />
-              </div>
-              <div>
-                <label class="block text-[10px] font-bold text-gray-400 uppercase mb-1">统计数据保留（天）</label>
-                <input
-                  v-model.number="appSettings.statsRetentionDays"
-                  type="number"
-                  min="0"
-                  step="1"
-                  class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
-                />
-              </div>
-              <div>
-                <label class="block text-[10px] font-bold text-gray-400 uppercase mb-1">上游 HTTP 超时（秒）</label>
-                <input
-                  v-model.number="appSettings.upstreamTimeoutSeconds"
-                  type="number"
-                  min="5"
-                  max="86400"
-                  step="1"
-                  class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
-                />
-                <p class="text-[10px] text-gray-400 mt-1">默认 360，范围 5～86400。</p>
-              </div>
-              <div class="w-full">
-                <label class="block text-[10px] font-bold text-gray-400 uppercase mb-1">请求头转发黑名单</label>
-                <input
-                  :value="appSettings.upstreamHeadersBlocklist.join(', ')"
-                  @input="appSettings.upstreamHeadersBlocklist = $event.target.value.split(',').map(s => s.trim()).filter(s => s)"
-                  type="text"
-                  class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
-                />
-                <p class="text-[10px] text-gray-400 mt-1">默认: host, content-length, connection, accept-encoding。这些请求头不会转发到上游。</p>
-              </div>
+            <div class="flex items-center gap-4">
+              <input
+                v-model.number="appSettings.logRetentionDays"
+                type="number"
+                min="0"
+                step="1"
+                class="w-32 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+              />
+              <span class="text-sm text-gray-500">天</span>
             </div>
+          </div>
+
+          <!-- 统计数据保留 -->
+          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+            <div class="mb-4">
+              <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">统计数据保留</h3>
+              <p class="text-xs text-gray-400 mt-1">按天自动删除过期统计数据；0 表示不自动删除。</p>
+            </div>
+            <div class="flex items-center gap-4">
+              <input
+                v-model.number="appSettings.statsRetentionDays"
+                type="number"
+                min="0"
+                step="1"
+                class="w-32 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+              />
+              <span class="text-sm text-gray-500">天</span>
+            </div>
+          </div>
+
+          <!-- 上游超时 -->
+          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+            <div class="mb-4">
+              <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">上游 HTTP 超时</h3>
+              <p class="text-xs text-gray-400 mt-1">代理请求大模型 API 的单次 HTTP 超时时间。默认 360，范围 5～86400 秒。</p>
+            </div>
+            <div class="flex items-center gap-4">
+              <input
+                v-model.number="appSettings.upstreamTimeoutSeconds"
+                type="number"
+                min="5"
+                max="86400"
+                step="1"
+                class="w-32 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+              />
+              <span class="text-sm text-gray-500">秒</span>
+            </div>
+          </div>
+
+          <!-- 请求头转发黑名单 -->
+          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+            <div class="mb-4">
+              <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">请求头转发黑名单</h3>
+              <p class="text-xs text-gray-400 mt-1">这些请求头不会转发到上游。默认: host, content-length, connection, accept-encoding。</p>
+            </div>
+            <input
+              :value="appSettings.upstreamHeadersBlocklist.join(', ')"
+              @input="appSettings.upstreamHeadersBlocklist = $event.target.value.split(',').map(s => s.trim()).filter(s => s)"
+              type="text"
+              class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+            />
+          </div>
+
+          <!-- 保存按钮 -->
+          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
             <div class="flex flex-wrap gap-2 items-center">
               <button
                 type="button"
