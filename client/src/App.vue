@@ -2325,93 +2325,97 @@ onUnmounted(() => {
 
           <!-- 对话日志保留 -->
           <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
-            <div class="mb-4">
-              <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">对话日志保留</h3>
-              <p class="text-xs text-gray-400 mt-1">按天自动删除过期数据；0 表示不自动删除。保存后立即按新规则清理一次，之后约每 6 小时再执行。</p>
-            </div>
-            <div class="flex items-center gap-4">
-              <input
-                v-model.number="appSettings.logRetentionDays"
-                type="number"
-                min="0"
-                step="1"
-                class="w-32 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
-              />
-              <span class="text-sm text-gray-500">天</span>
+            <div class="flex items-center justify-between gap-4">
+              <div class="flex-1">
+                <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">对话日志保留</h3>
+                <p class="text-xs text-gray-400 mt-1">按天自动删除过期数据；0 表示不自动删除。保存后立即按新规则清理一次，之后约每 6 小时再执行。</p>
+              </div>
+              <div class="flex items-center gap-3">
+                <input
+                  v-model.number="appSettings.logRetentionDays"
+                  type="number"
+                  min="0"
+                  step="1"
+                  class="w-24 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                />
+                <span class="text-sm text-gray-500">天</span>
+              </div>
             </div>
           </div>
 
           <!-- 统计数据保留 -->
           <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
-            <div class="mb-4">
-              <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">统计数据保留</h3>
-              <p class="text-xs text-gray-400 mt-1">按天自动删除过期统计数据；0 表示不自动删除。</p>
-            </div>
-            <div class="flex items-center gap-4">
-              <input
-                v-model.number="appSettings.statsRetentionDays"
-                type="number"
-                min="0"
-                step="1"
-                class="w-32 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
-              />
-              <span class="text-sm text-gray-500">天</span>
+            <div class="flex items-center justify-between gap-4">
+              <div class="flex-1">
+                <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">统计数据保留</h3>
+                <p class="text-xs text-gray-400 mt-1">按天自动删除过期统计数据；0 表示不自动删除。</p>
+              </div>
+              <div class="flex items-center gap-3">
+                <input
+                  v-model.number="appSettings.statsRetentionDays"
+                  type="number"
+                  min="0"
+                  step="1"
+                  class="w-24 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                />
+                <span class="text-sm text-gray-500">天</span>
+              </div>
             </div>
           </div>
 
           <!-- 上游超时 -->
           <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
-            <div class="mb-4">
-              <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">上游 HTTP 超时</h3>
-              <p class="text-xs text-gray-400 mt-1">代理请求大模型 API 的单次 HTTP 超时时间。默认 360，范围 5～86400 秒。</p>
-            </div>
-            <div class="flex items-center gap-4">
-              <input
-                v-model.number="appSettings.upstreamTimeoutSeconds"
-                type="number"
-                min="5"
-                max="86400"
-                step="1"
-                class="w-32 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
-              />
-              <span class="text-sm text-gray-500">秒</span>
+            <div class="flex items-center justify-between gap-4">
+              <div class="flex-1">
+                <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">上游 HTTP 超时</h3>
+                <p class="text-xs text-gray-400 mt-1">代理请求大模型 API 的单次 HTTP 超时时间。默认 360，范围 5～86400 秒。</p>
+              </div>
+              <div class="flex items-center gap-3">
+                <input
+                  v-model.number="appSettings.upstreamTimeoutSeconds"
+                  type="number"
+                  min="5"
+                  max="86400"
+                  step="1"
+                  class="w-24 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                />
+                <span class="text-sm text-gray-500">秒</span>
+              </div>
             </div>
           </div>
 
           <!-- 请求头转发黑名单 -->
           <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
-            <div class="mb-4">
-              <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">请求头转发黑名单</h3>
-              <p class="text-xs text-gray-400 mt-1">这些请求头不会转发到上游。默认: host, content-length, connection, accept-encoding。</p>
+            <div class="flex items-center justify-between gap-4">
+              <div class="flex-1">
+                <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">请求头转发黑名单</h3>
+                <p class="text-xs text-gray-400 mt-1">这些请求头不会转发到上游。默认: host, content-length, connection, accept-encoding。</p>
+              </div>
+              <div class="flex-1 max-w-md">
+                <input
+                  :value="appSettings.upstreamHeadersBlocklist.join(', ')"
+                  @input="appSettings.upstreamHeadersBlocklist = $event.target.value.split(',').map(s => s.trim()).filter(s => s)"
+                  type="text"
+                  class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                />
+              </div>
             </div>
-            <input
-              :value="appSettings.upstreamHeadersBlocklist.join(', ')"
-              @input="appSettings.upstreamHeadersBlocklist = $event.target.value.split(',').map(s => s.trim()).filter(s => s)"
-              type="text"
-              class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
-            />
           </div>
 
           <!-- 保存按钮 -->
           <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
-            <div class="flex flex-wrap gap-2 items-center">
+            <div class="flex justify-end">
               <button
                 type="button"
                 :disabled="appSettingsSaving"
                 @click="saveAppSettings"
-                class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm font-bold disabled:opacity-50"
+                class="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm font-bold disabled:opacity-50"
               >
                 {{ appSettingsSaving ? '保存中…' : '保存配置' }}
               </button>
-              <button
-                type="button"
-                @click="clearAllStats"
-                class="px-4 py-2 border border-rose-200 text-rose-700 bg-rose-50 rounded-lg hover:bg-rose-100 transition-colors text-sm font-bold"
-              >
-                清空统计数据
-              </button>
             </div>
           </div>
+
         </div>
 
         <!-- Logs View -->
