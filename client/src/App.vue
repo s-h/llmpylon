@@ -2221,78 +2221,55 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <!-- 对话日志保留 -->
-          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
-            <div class="mb-4">
-              <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">对话日志保留</h3>
-              <p class="text-xs text-gray-400 mt-1">按天自动删除过期数据；0 表示不自动删除。保存后立即按新规则清理一次，之后约每 6 小时再执行。</p>
+          <!-- 系统设置 -->
+          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6 space-y-6">
+            <div>
+              <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">系统设置</h3>
+              <p class="text-xs text-gray-400 mt-1">配置日志保留、统计数据保留和上游请求超时。</p>
             </div>
-            <div class="flex items-center gap-4">
-              <input
-                v-model.number="appSettings.logRetentionDays"
-                type="number"
-                min="0"
-                step="1"
-                class="w-32 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
-              />
-              <span class="text-sm text-gray-500">天</span>
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <div>
+                <label class="block text-[10px] font-bold text-gray-400 uppercase mb-1">对话日志保留</label>
+                <div class="flex items-center gap-2">
+                  <input
+                    v-model.number="appSettings.logRetentionDays"
+                    type="number"
+                    min="0"
+                    step="1"
+                    class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                  />
+                  <span class="text-sm text-gray-500 whitespace-nowrap">天</span>
+                </div>
+              </div>
+              <div>
+                <label class="block text-[10px] font-bold text-gray-400 uppercase mb-1">统计数据保留</label>
+                <div class="flex items-center gap-2">
+                  <input
+                    v-model.number="appSettings.statsRetentionDays"
+                    type="number"
+                    min="0"
+                    step="1"
+                    class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                  />
+                  <span class="text-sm text-gray-500 whitespace-nowrap">天</span>
+                </div>
+              </div>
+              <div>
+                <label class="block text-[10px] font-bold text-gray-400 uppercase mb-1">上游 HTTP 超时</label>
+                <div class="flex items-center gap-2">
+                  <input
+                    v-model.number="appSettings.upstreamTimeoutSeconds"
+                    type="number"
+                    min="5"
+                    max="86400"
+                    step="1"
+                    class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                  />
+                  <span class="text-sm text-gray-500 whitespace-nowrap">秒</span>
+                </div>
+              </div>
             </div>
-          </div>
-
-          <!-- 统计数据保留 -->
-          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
-            <div class="mb-4">
-              <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">统计数据保留</h3>
-              <p class="text-xs text-gray-400 mt-1">按天自动删除过期统计数据；0 表示不自动删除。</p>
-            </div>
-            <div class="flex items-center gap-4">
-              <input
-                v-model.number="appSettings.statsRetentionDays"
-                type="number"
-                min="0"
-                step="1"
-                class="w-32 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
-              />
-              <span class="text-sm text-gray-500">天</span>
-            </div>
-          </div>
-
-          <!-- 上游超时 -->
-          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
-            <div class="mb-4">
-              <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">上游 HTTP 超时</h3>
-              <p class="text-xs text-gray-400 mt-1">代理请求大模型 API 的单次 HTTP 超时时间。默认 360，范围 5～86400 秒。</p>
-            </div>
-            <div class="flex items-center gap-4">
-              <input
-                v-model.number="appSettings.upstreamTimeoutSeconds"
-                type="number"
-                min="5"
-                max="86400"
-                step="1"
-                class="w-32 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
-              />
-              <span class="text-sm text-gray-500">秒</span>
-            </div>
-          </div>
-
-          <!-- 请求头转发黑名单 -->
-          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
-            <div class="mb-4">
-              <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">请求头转发黑名单</h3>
-              <p class="text-xs text-gray-400 mt-1">这些请求头不会转发到上游。默认: host, content-length, connection, accept-encoding。</p>
-            </div>
-            <input
-              :value="appSettings.upstreamHeadersBlocklist.join(', ')"
-              @input="appSettings.upstreamHeadersBlocklist = $event.target.value.split(',').map(s => s.trim()).filter(s => s)"
-              type="text"
-              class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
-            />
-          </div>
-
-          <!-- 保存按钮 -->
-          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
-            <div class="flex flex-wrap gap-2 items-center">
+            <div class="flex flex-wrap gap-2 items-center pt-2 border-t border-gray-100">
               <button
                 type="button"
                 :disabled="appSettingsSaving"
@@ -2311,22 +2288,36 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <div class="flex flex-col sm:flex-row gap-3 sm:justify-between sm:items-center">
-            <div class="space-y-1">
-              <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">用户管理</h3>
-              <p class="text-[10px] text-gray-400">首次登录默认用户必须修改密码；支持创建/禁用/重置密码。</p>
+          <!-- 请求头转发黑名单 -->
+          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+            <div class="mb-4">
+              <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">请求头转发黑名单</h3>
+              <p class="text-xs text-gray-400 mt-1">这些请求头不会转发到上游。默认: host, content-length, connection, accept-encoding。</p>
             </div>
-            <button 
-              @click="showAddAdminUser = true"
-              class="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
-            >
-              <Plus class="w-4 h-4" />
-              添加用户
-            </button>
+            <input
+              :value="appSettings.upstreamHeadersBlocklist.join(', ')"
+              @input="appSettings.upstreamHeadersBlocklist = $event.target.value.split(',').map(s => s.trim()).filter(s => s)"
+              type="text"
+              class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+            />
           </div>
 
-          <div class="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
-            <div class="overflow-x-auto">
+          <!-- 用户管理 -->
+          <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+            <div class="p-6 pb-4 flex flex-col sm:flex-row gap-3 sm:justify-between sm:items-center">
+              <div class="space-y-1">
+                <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">用户管理</h3>
+                <p class="text-[10px] text-gray-400">首次登录默认用户必须修改密码；支持创建/禁用/重置密码。</p>
+              </div>
+              <button
+                @click="showAddAdminUser = true"
+                class="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
+              >
+                <Plus class="w-4 h-4" />
+                添加用户
+              </button>
+            </div>
+            <div class="overflow-x-auto border-t border-gray-200">
             <table class="w-full min-w-[760px] text-left text-sm">
               <thead class="bg-gray-50 border-b border-gray-200">
                 <tr>
