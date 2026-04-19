@@ -174,6 +174,35 @@ function pickOutgoingUserAgent(headers) {
     return v != null && String(v).trim() ? String(v) : null;
 }
 
+/** Avoid logging raw API keys in stderr when upstream requests fail */
+function redactSensitiveHeaders(headers) {
+    if (!headers || typeof headers !== 'object') return headers;
+    try {
+        const plain = typeof headers.toJSON === 'function' ? headers.toJSON() : { ...headers };
+        const out = { ...plain };
+        for (const k of Object.keys(out)) {
+            const kl = String(k).toLowerCase();
+            if (kl === 'authorization' || kl === 'x-api-key' || kl === 'cookie' || kl === 'proxy-authorization') {
+                out[k] = '[redacted]';
+            }
+        }
+        return out;
+    } catch {
+        return '[headers: unserializable]';
+    }
+}
+
+function truncateForErrorLog(data, maxLen = 4000) {
+    if (data == null) return data;
+    try {
+        const s = typeof data === 'string' ? data : JSON.stringify(data);
+        if (s.length <= maxLen) return data;
+        return `${s.slice(0, maxLen)}…[truncated]`;
+    } catch {
+        return '[unserializable]';
+    }
+}
+
 const APP_SETTINGS_KEYS = {
     LOG_RETENTION_DAYS: 'log_retention_days',
     STATS_RETENTION_DAYS: 'stats_retention_days',
@@ -2103,9 +2132,9 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
         console.error('Proxy Error Detail:', {
             url: error.config?.url,
             method: error.config?.method,
-            headers: error.config?.headers,
-            data: error.config?.data,
-            response: error.response?.data,
+            headers: redactSensitiveHeaders(error.config?.headers),
+            data: truncateForErrorLog(error.config?.data),
+            response: truncateForErrorLog(error.response?.data),
             status: error.response?.status,
             message: error.message
         });
