@@ -152,11 +152,13 @@ const managedModels = ref([]);
 const modelsCatalog = ref([]);
 const activeProviderId = ref(null);
 const activeProviderDefaultModelId = ref(null);
+const selectedModelProviderId = ref(null);
 const newProvider = ref({ name: '', type: 'openai', baseUrl: '', apiKey: '' });
 const newManagedModel = ref({ name: '' });
 const newClientApp = ref({ name: '', providerId: null, managedModelId: null });
 const editingProvider = ref(null);
 const editingModel = ref(null);
+const editingModelName = ref('');
 const editingApp = ref(null);
 const showAddProvider = ref(false);
 const showAddApp = ref(false);
@@ -202,7 +204,7 @@ const providerModelTargetProvider = ref(null);
 const newProviderModelName = ref('');
 
 const showCopyProviderDialog = ref(false);
-const copyProviderForm = ref({ name: '', type: 'openai', baseUrl: '', apiKey: '' });
+const copyProviderForm = ref({ name: '', type: 'openai', baseUrl: '', apiKey: '', protocolConvert: false });
 const copyProviderModelNames = ref([]);
 const copyDefaultModelName = ref('');
 const newCopyModelRow = ref('');
@@ -525,7 +527,11 @@ const modelPieOption = computed(() => {
 const loadAllData = async () => {
   await fetchProviders();
   await fetchClientKeys();
-  await fetchManagedModels();
+  if (selectedModelProviderId.value) {
+    await fetchManagedModels(selectedModelProviderId.value);
+  } else {
+    await fetchManagedModels();
+  }
   await fetchModelsCatalog();
   await fetchModelRules();
   await fetchLogs();
@@ -606,8 +612,10 @@ const fetchClientKeys = async () => {
   clientKeys.value = res.data;
 };
 
-const fetchManagedModels = async () => {
-  const res = await axios.get(`${API_BASE}/models`);
+const fetchManagedModels = async (providerId) => {
+  const params = {};
+  if (providerId) params.providerId = providerId;
+  const res = await axios.get(`${API_BASE}/models`, { params });
   managedModels.value = res.data.models || [];
   activeProviderId.value = res.data.providerId || null;
   activeProviderDefaultModelId.value = res.data.defaultModelId || null;
@@ -771,7 +779,7 @@ const nextLogsPage = async () => {
 
 const addProvider = async () => {
   await axios.post(`${API_BASE}/providers`, newProvider.value);
-  newProvider.value = { name: '', type: 'openai', baseUrl: '', apiKey: '' };
+  newProvider.value = { name: '', type: 'openai', baseUrl: '', apiKey: '', protocolConvert: false };
   showAddProvider.value = false;
   fetchProviders();
 };
@@ -978,7 +986,8 @@ const openCopyProviderDialog = (p) => {
     name: `${p.name} 副本`,
     type: p.type || 'openai',
     baseUrl: p.baseUrl || '',
-    apiKey: p.apiKey || ''
+    apiKey: p.apiKey || '',
+    protocolConvert: p.protocolConvert === 1 || p.protocolConvert === true
   };
   copyProviderModelNames.value = (p.models || []).map((m) => m.name);
   const def = (p.models || []).find((m) => m.id === p.defaultModelId);
@@ -1028,7 +1037,8 @@ const submitCopyProvider = async () => {
       name,
       type: copyProviderForm.value.type,
       baseUrl: copyProviderForm.value.baseUrl,
-      apiKey: copyProviderForm.value.apiKey || null
+      apiKey: copyProviderForm.value.apiKey || null,
+      protocolConvert: copyProviderForm.value.protocolConvert
     });
     const newId = res.data?.id;
     if (!newId) {
@@ -1135,33 +1145,69 @@ const deleteProvider = async (id) => {
 
 const addManagedModel = async () => {
   if (!newManagedModel.value.name) return;
-  await axios.post(`${API_BASE}/models`, newManagedModel.value);
+  await axios.post(`${API_BASE}/models`, {
+    name: newManagedModel.value.name,
+    providerId: selectedModelProviderId.value || undefined
+  });
   newManagedModel.value = { name: '' };
   showAddModel.value = false;
-  await fetchManagedModels();
+  await fetchManagedModels(selectedModelProviderId.value || undefined);
   await fetchProviders();
   await fetchModelsCatalog();
 };
 
 const activateModel = async (id) => {
-  await axios.put(`${API_BASE}/models/${id}/activate`);
-  await fetchManagedModels();
+  const params = {};
+  if (selectedModelProviderId.value) params.providerId = selectedModelProviderId.value;
+  await axios.put(`${API_BASE}/models/${id}/activate`, null, { params });
+  await fetchManagedModels(selectedModelProviderId.value || undefined);
   await fetchProviders();
   await fetchModelsCatalog();
 };
 
 const deleteModel = async (id) => {
-  if (!confirm('确定要从当前厂商中移除这个模型吗？')) return;
+  const providerName = providers.find(p => p.id === selectedModelProviderId.value)?.name || '当前厂商';
+  if (!confirm(`确定要从"${providerName}"中移除这个模型吗？`)) return;
   try {
-    await axios.delete(`${API_BASE}/models/${id}`);
+    const params = {};
+    if (selectedModelProviderId.value) params.providerId = selectedModelProviderId.value;
+    await axios.delete(`${API_BASE}/models/${id}`, { params });
   } catch (err) {
     const msg = err.response?.data?.message || err.response?.data?.error || err.message;
     alert(msg);
     return;
   }
-  await fetchManagedModels();
+  await fetchManagedModels(selectedModelProviderId.value || undefined);
   await fetchProviders();
   await fetchModelsCatalog();
+};
+
+const onModelProviderChange = () => {
+  fetchManagedModels(selectedModelProviderId.value);
+};
+
+const startEditModel = (model) => {
+  editingModel.value = model;
+  editingModelName.value = model.name;
+};
+
+const saveEditModel = async () => {
+  if (!editingModel.value || !editingModelName.value) return;
+  try {
+    await axios.put(`${API_BASE}/models/${editingModel.value.id}`, { name: editingModelName.value });
+    editingModel.value = null;
+    editingModelName.value = '';
+    await fetchManagedModels(selectedModelProviderId.value || undefined);
+    await fetchProviders();
+    await fetchModelsCatalog();
+  } catch (err) {
+    alert(err.response?.data?.error || err.message);
+  }
+};
+
+const cancelEditModel = () => {
+  editingModel.value = null;
+  editingModelName.value = '';
 };
 
 const openAddProviderModel = (provider) => {
@@ -1311,7 +1357,16 @@ watch(activeTab, (tab) => {
     if (isAuthenticated.value) fetchModelRules();
   }
   if (tab === 'models') {
-    if (isAuthenticated.value) fetchManagedModels();
+    if (isAuthenticated.value) {
+      if (!selectedModelProviderId.value && activeProvider.value) {
+        selectedModelProviderId.value = activeProvider.value.id;
+      }
+      if (selectedModelProviderId.value) {
+        fetchManagedModels(selectedModelProviderId.value);
+      } else {
+        fetchManagedModels();
+      }
+    }
   }
   if (tab === 'config') {
     if (isAuthenticated.value) {
@@ -1649,7 +1704,10 @@ onUnmounted(() => {
               <div class="flex justify-between items-start mb-4">
                 <div>
                   <h4 class="font-bold text-lg">{{ p.name }}</h4>
-                  <span class="text-xs px-2 py-0.5 bg-gray-100 text-gray-600 rounded-full border border-gray-200 uppercase">{{ p.type }}</span>
+                  <div class="flex flex-wrap gap-1.5 mt-1">
+                    <span class="text-xs px-2 py-0.5 bg-gray-100 text-gray-600 rounded-full border border-gray-200 uppercase">{{ p.type }}</span>
+                    <span v-if="p.protocolConvert" class="text-xs px-2 py-0.5 bg-amber-50 text-amber-700 rounded-full border border-amber-200 font-medium">转换</span>
+                  </div>
                 </div>
                 <div class="flex gap-2">
                   <button 
@@ -1797,42 +1855,80 @@ onUnmounted(() => {
 
         <!-- Models View -->
         <div v-if="activeTab === 'models'" class="space-y-6">
-          <div class="flex flex-col sm:flex-row gap-3 sm:justify-between sm:items-center">
-            <div class="space-y-1">
-              <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">当前厂商模型管理</h3>
-              <p class="text-[10px] text-gray-400">当前生效厂商：{{ activeProvider?.name || '-' }}（在此页面选择的默认模型会被记住并用于 {{ MAGIC_PROXY_MODEL }}）</p>
+          <div class="flex flex-col gap-3">
+            <div class="flex flex-col sm:flex-row gap-3 sm:justify-between sm:items-center">
+              <div class="space-y-1">
+                <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">模型管理</h3>
+                <p class="text-[10px] text-gray-400">选择厂商后管理其模型，在此页面选择的默认模型会被记住并用于 {{ MAGIC_PROXY_MODEL }}</p>
+              </div>
+              <button 
+                @click="showAddModel = true"
+                class="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
+              >
+                <Plus class="w-4 h-4" />
+                添加模型
+              </button>
             </div>
-            <button 
-              @click="showAddModel = true"
-              class="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
-            >
-              <Plus class="w-4 h-4" />
-              添加模型
-            </button>
+            <div class="flex items-center gap-3">
+              <label class="text-xs font-bold text-gray-400 uppercase tracking-wider whitespace-nowrap">选择厂商</label>
+              <select
+                v-model="selectedModelProviderId"
+                @change="onModelProviderChange"
+                class="px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none bg-white min-w-[200px]"
+              >
+                <option v-for="p in providers" :key="p.id" :value="p.id">{{ p.name }} {{ p.active ? '(生效中)' : '' }}</option>
+              </select>
+              <span v-if="activeProviderId" class="text-[10px] text-gray-400">默认模型：{{ activeDefaultModel?.name || '未设置' }}</span>
+            </div>
           </div>
 
           <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
             <div 
               v-for="m in managedModels" 
               :key="m.id"
-              @click="activeProviderDefaultModelId !== m.id && activateModel(m.id)"
-              class="bg-white p-6 rounded-xl border border-gray-200 shadow-sm hover:shadow-md transition-shadow relative overflow-hidden cursor-pointer"
+              class="bg-white p-6 rounded-xl border border-gray-200 shadow-sm hover:shadow-md transition-shadow relative overflow-hidden"
               :class="{'border-blue-500 ring-1 ring-blue-500': activeProviderDefaultModelId === m.id}"
             >
               <div v-if="activeProviderDefaultModelId === m.id" class="absolute top-0 right-0 bg-blue-500 text-white px-2 py-1 text-[10px] font-bold rounded-bl-lg flex items-center gap-1">
-                <Check class="w-3 h-3" /> 生效中
+                <Check class="w-3 h-3" /> 默认
               </div>
               
-              <div class="flex justify-between items-start mb-4">
-                <div>
-                  <h4 class="font-bold text-lg">{{ m.name }}</h4>
-                </div>
+              <div v-if="editingModel && editingModel.id === m.id" class="flex flex-col gap-3">
+                <input
+                  v-model="editingModelName"
+                  @keyup.enter="saveEditModel"
+                  @keyup.escape="cancelEditModel"
+                  class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-bold focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                  placeholder="模型名称"
+                  autofocus
+                />
                 <div class="flex gap-2">
+                  <button @click.stop="saveEditModel" class="px-3 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-xs font-bold">
+                    保存
+                  </button>
+                  <button @click.stop="cancelEditModel" class="px-3 py-1.5 bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 transition-colors text-xs font-bold">
+                    取消
+                  </button>
+                </div>
+              </div>
+
+              <div v-else class="flex justify-between items-start mb-4">
+                <div class="min-w-0 flex-1">
+                  <h4 class="font-bold text-lg truncate" :title="m.name">{{ m.name }}</h4>
+                </div>
+                <div class="flex gap-2 shrink-0 ml-2">
+                  <button 
+                    @click.stop="startEditModel(m)"
+                    class="p-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+                    title="编辑模型名称"
+                  >
+                    <Pencil class="w-4 h-4" />
+                  </button>
                   <button 
                     v-if="activeProviderDefaultModelId !== m.id"
                     @click.stop="activateModel(m.id)"
                     class="p-2 text-green-600 hover:bg-green-50 rounded-lg transition-colors"
-                    title="设置为生效"
+                    title="设置为默认"
                   >
                     <CheckCircle2 class="w-5 h-5" />
                   </button>
@@ -1846,6 +1942,9 @@ onUnmounted(() => {
                 </div>
               </div>
               <p class="text-[10px] text-gray-400">客户端请求模型为 <span class="font-bold text-green-600">{{ MAGIC_PROXY_MODEL }}</span>（大小写不敏感）时，若应用未指定模型，将使用当前厂商的默认模型。</p>
+            </div>
+            <div v-if="!managedModels.length" class="col-span-full text-center py-10 text-gray-400 text-sm">
+              该厂商暂无模型，请添加模型
             </div>
           </div>
         </div>
@@ -2795,6 +2894,16 @@ onUnmounted(() => {
             <label class="block text-xs font-bold text-gray-400 uppercase mb-1">托管 API Key</label>
             <input v-model="copyProviderForm.apiKey" type="password" placeholder="默认已填入源厂商 Key，可修改" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
           </div>
+          <div class="flex items-center justify-between py-2">
+            <div>
+              <label class="block text-xs font-bold text-gray-400 uppercase mb-0.5">协议强制转换</label>
+              <p class="text-[10px] text-gray-400">开启后只接受非原生协议的客户端请求并自动转换</p>
+            </div>
+            <label class="relative inline-flex items-center cursor-pointer">
+              <input type="checkbox" v-model="copyProviderForm.protocolConvert" class="sr-only peer" />
+              <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+            </label>
+          </div>
           <div>
             <label class="block text-xs font-bold text-gray-400 uppercase mb-1">默认模型（保存后生效）</label>
             <select v-model="copyDefaultModelName" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none text-sm">
@@ -2863,6 +2972,16 @@ onUnmounted(() => {
             <label class="block text-xs font-bold text-gray-400 uppercase mb-1">托管 API Key</label>
             <input v-model="(editingProvider || newProvider).apiKey" type="password" placeholder="sk-..." class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
           </div>
+          <div class="flex items-center justify-between py-2">
+            <div>
+              <label class="block text-xs font-bold text-gray-400 uppercase mb-0.5">协议强制转换</label>
+              <p class="text-[10px] text-gray-400">开启后只接受非原生协议的客户端请求并自动转换</p>
+            </div>
+            <label class="relative inline-flex items-center cursor-pointer">
+              <input type="checkbox" v-model="(editingProvider || newProvider).protocolConvert" class="sr-only peer" />
+              <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+            </label>
+          </div>
         </div>
         <div class="flex gap-3 mt-8">
           <button @click="showAddProvider = false; editingProvider = null" class="flex-1 px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors">取消</button>
@@ -2884,6 +3003,7 @@ onUnmounted(() => {
             <input v-model="newProviderModelName" type="text" placeholder="例如: glm-4.7" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
           </div>
         </div>
+        <p class="text-[10px] text-gray-400 mt-2">注意：模型名称区分大小写，将以您输入的内容为准进行存储和显示。</p>
         <div class="flex gap-3 mt-8">
           <button @click="showAddProviderModel = false; providerModelTargetProvider = null; newProviderModelName = ''" class="flex-1 px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors">取消</button>
           <button @click="addProviderModel" class="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-bold">添加</button>
@@ -2985,13 +3105,14 @@ onUnmounted(() => {
     <div v-if="showAddModel" class="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
       <div class="bg-white rounded-2xl w-full max-w-md p-8 shadow-2xl">
         <h3 class="text-xl font-bold mb-6">添加模型</h3>
+        <p class="text-xs text-gray-500 mb-4">厂商：<span class="font-bold text-gray-700">{{ providers.find(p => p.id === selectedModelProviderId)?.name || '当前生效厂商' }}</span></p>
         <div class="space-y-4">
           <div>
             <label class="block text-xs font-bold text-gray-400 uppercase mb-1">模型名称</label>
             <input v-model="newManagedModel.name" type="text" placeholder="例如: gpt-4o 或 claude-3-5-sonnet" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
           </div>
         </div>
-        <p class="text-[10px] text-gray-400 mt-4">注意：模型名称必须是您当前生效厂商支持的名称。</p>
+        <p class="text-[10px] text-gray-400 mt-4">注意：模型名称区分大小写，将以您输入的内容为准进行存储和显示。</p>
         <div class="flex gap-3 mt-8">
           <button @click="showAddModel = false" class="flex-1 px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors">取消</button>
           <button @click="addManagedModel" class="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-bold">保存配置</button>

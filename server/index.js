@@ -349,6 +349,168 @@ function applyModelRules(requestedModel, rules) {
     return { matched: false, actualModel: requestedModel, rule: null };
 }
 
+function isClientProtocolOpenAI(reqUrl) {
+    return reqUrl.includes('/chat/completions') || reqUrl.includes('/completions');
+}
+
+function isClientProtocolAnthropic(reqUrl) {
+    return reqUrl.includes('/messages');
+}
+
+function buildTargetUrl(baseUrl, pathSuffix, providerType, needsConvert) {
+    let url = baseUrl.replace(/\/+$/, '');
+    if (needsConvert) {
+        if (providerType === 'openai') {
+            if (!url.match(/\/v\d+$/) && !url.match(/\/v\d+\/.*$/)) {
+                if (!url.endsWith('/v1')) url += '/v1';
+            }
+            url += '/chat/completions';
+        } else if (providerType === 'anthropic') {
+            if (!url.match(/\/v\d+$/) && !url.match(/\/v\d+\/.*$/)) {
+                if (!url.endsWith('/v1')) url += '/v1';
+            }
+            url += '/messages';
+        }
+        return url;
+    }
+    const isOpenAI = pathSuffix === '/' || pathSuffix === '/chat/completions' || pathSuffix === '/completions';
+    const isAnthropic = pathSuffix === '/' || pathSuffix === '/messages';
+    if (providerType === 'openai' && isOpenAI) {
+        if (!url.match(/\/v\d+$/) && !url.match(/\/v\d+\/.*$/)) {
+            if (!url.endsWith('/v1')) url += '/v1';
+        }
+        url += '/chat/completions';
+    } else if (providerType === 'anthropic' && isAnthropic) {
+        if (!url.match(/\/v\d+$/) && !url.match(/\/v\d+\/.*$/)) {
+            if (!url.endsWith('/v1')) url += '/v1';
+        }
+        url += '/messages';
+    } else {
+        url += pathSuffix;
+    }
+    return url;
+}
+
+function isProtocolNative(providerType, isOpenAI, isAnthropic) {
+    if (providerType === 'openai') return isOpenAI;
+    if (providerType === 'anthropic') return isAnthropic;
+    return false;
+}
+
+function getProtocolError(isOpenAI, isAnthropic) {
+    if (isOpenAI) return '协议错误：OpenAI 协议的客户端不能直接访问此厂商';
+    if (isAnthropic) return '协议错误：Anthropic 协议的客户端不能直接访问此厂商';
+    return '协议错误：不支持的协议';
+}
+
+function convertOpenAIStreamToAnthropic(chunkText, state) {
+    const lines = chunkText.split('\n');
+    let result = '';
+    for (const line of lines) {
+        if (line.startsWith('data: ')) {
+            const data = line.slice(6).trim();
+            if (data === '[DONE]') {
+                result += 'event: message_stop\ndata: {"type":"message_stop"}\n\n';
+            } else {
+                try {
+                    const parsed = JSON.parse(data);
+                    const choices = parsed.choices || [];
+                    for (const choice of choices) {
+                        const delta = choice.delta || {};
+                        const finishReason = choice.finish_reason;
+                        if (!state.hasStarted && delta.role === 'assistant') {
+                            state.hasStarted = true;
+                            result += 'event: message_start\ndata: ' + JSON.stringify({
+                                type: 'message_start',
+                                message: { id: parsed.id || 'msg_unknown', type: 'message', role: 'assistant', content: [], model: parsed.model || '' }
+                            }) + '\n\n';
+                            result += 'event: content_block_start\ndata: ' + JSON.stringify({
+                                type: 'content_block_start', index: 0,
+                                content_block: { type: 'text', text: '' }
+                            }) + '\n\n';
+                        }
+                        if (delta.content) {
+                            result += 'event: content_block_delta\ndata: ' + JSON.stringify({
+                                type: 'content_block_delta', index: 0,
+                                delta: { type: 'text_delta', text: delta.content }
+                            }) + '\n\n';
+                        }
+                        if (finishReason) {
+                            const anthropicStopReason = finishReason === 'stop' ? 'end_turn' : finishReason;
+                            result += 'event: content_block_stop\ndata: ' + JSON.stringify({
+                                type: 'content_block_stop', index: 0
+                            }) + '\n\n';
+                            result += 'event: message_delta\ndata: ' + JSON.stringify({
+                                type: 'message_delta',
+                                delta: { stop_reason: anthropicStopReason, stop_sequence: null }
+                            }) + '\n\n';
+                        }
+                    }
+                } catch (e) {
+                    result += line + '\n';
+                }
+            }
+        }
+    }
+    return result;
+}
+
+function convertAnthropicStreamToOpenAI(chunkText, state) {
+    const lines = chunkText.split('\n');
+    let result = '';
+    let currentEvent = '';
+    for (const line of lines) {
+        if (line.startsWith('event: ')) {
+            currentEvent = line.slice(7).trim();
+        } else if (line.startsWith('data: ')) {
+            const data = line.slice(6).trim();
+            if (currentEvent === 'message_start' && data) {
+                try {
+                    const parsed = JSON.parse(data);
+                    const message = parsed.message || {};
+                    if (!state.hasStarted) {
+                        state.hasStarted = true;
+                        result += 'data: ' + JSON.stringify({
+                            id: message.id || 'msg_unknown',
+                            object: 'chat.completion.chunk',
+                            choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }]
+                        }) + '\n\n';
+                    }
+                } catch (e) {
+                    result += line + '\n';
+                }
+            } else if (currentEvent === 'content_block_delta' && data) {
+                try {
+                    const parsed = JSON.parse(data);
+                    const delta = parsed.delta || {};
+                    if (delta.type === 'text_delta' && delta.text) {
+                        result += 'data: ' + JSON.stringify({
+                            choices: [{ index: 0, delta: { content: delta.text }, finish_reason: null }]
+                        }) + '\n\n';
+                    }
+                } catch (e) {
+                    result += line + '\n';
+                }
+            } else if (currentEvent === 'message_delta' && data) {
+                try {
+                    const parsed = JSON.parse(data);
+                    const delta = parsed.delta || {};
+                    const stopReason = delta.stop_reason === 'end_turn' ? 'stop' : (delta.stop_reason || null);
+                    result += 'data: ' + JSON.stringify({
+                        choices: [{ index: 0, delta: {}, finish_reason: stopReason }]
+                    }) + '\n\n';
+                } catch (e) {
+                    result += line + '\n';
+                }
+            } else if (currentEvent === 'message_stop') {
+                result += 'data: [DONE]\n\n';
+            }
+            currentEvent = '';
+        }
+    }
+    return result;
+}
+
 function sha256Hex(input) {
     return crypto.createHash('sha256').update(input).digest('hex');
 }
@@ -556,17 +718,20 @@ app.get('/api/providers', async (req, res) => {
 });
 
 app.post('/api/providers', async (req, res) => {
-    const { name, type, baseUrl, apiKey } = req.body;
-    const result = await db.run('INSERT INTO providers (name, type, baseUrl, apiKey) VALUES (?, ?, ?, ?)', [name, type, baseUrl, apiKey]);
+    const { name, type, baseUrl, apiKey, protocolConvert } = req.body;
+    const result = await db.run(
+        'INSERT INTO providers (name, type, baseUrl, apiKey, protocolConvert) VALUES (?, ?, ?, ?, ?)',
+        [name, type, baseUrl, apiKey, protocolConvert ? 1 : 0]
+    );
     res.status(201).json({ id: result.lastID });
 });
 
 app.put('/api/providers/:id', async (req, res) => {
     const { id } = req.params;
-    const { name, type, baseUrl, apiKey } = req.body;
+    const { name, type, baseUrl, apiKey, protocolConvert } = req.body;
     await db.run(
-        'UPDATE providers SET name = ?, type = ?, baseUrl = ?, apiKey = ? WHERE id = ?',
-        [name, type, baseUrl, apiKey, id]
+        'UPDATE providers SET name = ?, type = ?, baseUrl = ?, apiKey = ?, protocolConvert = ? WHERE id = ?',
+        [name, type, baseUrl, apiKey, protocolConvert ? 1 : 0, id]
     );
     res.sendStatus(200);
 });
@@ -681,7 +846,8 @@ app.get('/api/providers/export', async (req, res) => {
         apiKey: p.apiKey || '',
         defaultModel: modelsByProvider.get(p.id)?.find(m => m.id === p.defaultModelId)?.name || null,
         models: modelsByProvider.get(p.id)?.map(m => m.name) || [],
-        active: p.active === 1
+        active: p.active === 1,
+        protocolConvert: p.protocolConvert === 1
     }));
 
     res.json({
@@ -713,8 +879,8 @@ app.post('/api/providers/import', async (req, res) => {
         if (existingId && mergeStrategy[p.name] === 'overwrite') {
             // 更新现有厂商
             await db.run(
-                'UPDATE providers SET type = ?, baseUrl = ?, apiKey = ?, active = ? WHERE id = ?',
-                [p.type, p.baseUrl, p.apiKey || null, p.active ? 1 : 0, existingId]
+                'UPDATE providers SET type = ?, baseUrl = ?, apiKey = ?, active = ?, protocolConvert = ? WHERE id = ?',
+                [p.type, p.baseUrl, p.apiKey || null, p.active ? 1 : 0, p.protocolConvert ? 1 : 0, existingId]
             );
             // 删除旧模型关联
             await db.run('DELETE FROM provider_models WHERE providerId = ?', [existingId]);
@@ -743,8 +909,8 @@ app.post('/api/providers/import', async (req, res) => {
 
         // 创建新厂商
         const result = await db.run(
-            'INSERT INTO providers (name, type, baseUrl, apiKey, active) VALUES (?, ?, ?, ?, ?)',
-            [p.name, p.type, p.baseUrl, p.apiKey || null, p.active ? 1 : 0]
+            'INSERT INTO providers (name, type, baseUrl, apiKey, active, protocolConvert) VALUES (?, ?, ?, ?, ?, ?)',
+            [p.name, p.type, p.baseUrl, p.apiKey || null, p.active ? 1 : 0, p.protocolConvert ? 1 : 0]
         );
         const providerId = result.lastID;
 
@@ -1066,7 +1232,14 @@ app.get('/api/models/catalog', async (req, res) => {
 });
 
 app.get('/api/models', async (req, res) => {
-    const provider = await db.get('SELECT * FROM providers WHERE active = 1');
+    let providerId = req.query.providerId ? Number(req.query.providerId) : null;
+    let provider;
+    if (providerId) {
+        provider = await db.get('SELECT * FROM providers WHERE id = ?', [providerId]);
+    } else {
+        provider = await db.get('SELECT * FROM providers WHERE active = 1');
+        providerId = provider?.id || null;
+    }
     if (!provider) return res.json({ providerId: null, defaultModelId: null, models: [] });
     const models = await db.all(
         `
@@ -1082,10 +1255,15 @@ app.get('/api/models', async (req, res) => {
 });
 
 app.post('/api/models', async (req, res) => {
-    const provider = await db.get('SELECT * FROM providers WHERE active = 1');
-    if (!provider) return res.status(400).json({ error: 'No active provider' });
-    const { name } = req.body || {};
+    const { name, providerId: reqProviderId } = req.body || {};
     if (!name) return res.status(400).json({ error: 'Missing model name' });
+    let provider;
+    if (reqProviderId) {
+        provider = await db.get('SELECT * FROM providers WHERE id = ?', [reqProviderId]);
+    } else {
+        provider = await db.get('SELECT * FROM providers WHERE active = 1');
+    }
+    if (!provider) return res.status(400).json({ error: 'No active provider' });
 
     let model = await db.get('SELECT * FROM managed_models WHERE name = ?', [name]);
     if (!model) {
@@ -1097,8 +1275,15 @@ app.post('/api/models', async (req, res) => {
 });
 
 app.put('/api/models/:id/activate', async (req, res) => {
-    const provider = await db.get('SELECT * FROM providers WHERE active = 1');
-    if (!provider) return res.status(400).json({ error: 'No active provider' });
+    let providerId = req.query.providerId ? Number(req.query.providerId) : null;
+    let provider;
+    if (providerId) {
+        provider = await db.get('SELECT * FROM providers WHERE id = ?', [providerId]);
+    } else {
+        provider = await db.get('SELECT * FROM providers WHERE active = 1');
+        providerId = provider?.id || null;
+    }
+    if (!provider) return res.status(400).json({ error: 'No provider specified or active' });
     const { id } = req.params;
     const link = await db.get('SELECT * FROM provider_models WHERE providerId = ? AND modelId = ?', [provider.id, id]);
     if (!link) {
@@ -1109,8 +1294,15 @@ app.put('/api/models/:id/activate', async (req, res) => {
 });
 
 app.delete('/api/models/:id', async (req, res) => {
-    const provider = await db.get('SELECT * FROM providers WHERE active = 1');
-    if (!provider) return res.status(400).json({ error: 'No active provider' });
+    let providerId = req.query.providerId ? Number(req.query.providerId) : null;
+    let provider;
+    if (providerId) {
+        provider = await db.get('SELECT * FROM providers WHERE id = ?', [providerId]);
+    } else {
+        provider = await db.get('SELECT * FROM providers WHERE active = 1');
+        providerId = provider?.id || null;
+    }
+    if (!provider) return res.status(400).json({ error: 'No provider specified or active' });
     const { id } = req.params;
     const apps = await db.all('SELECT id, name FROM client_keys WHERE providerId = ? AND managedModelId = ?', [provider.id, id]);
     const usingAsDefault = provider.defaultModelId && Number(provider.defaultModelId) === Number(id);
@@ -1131,6 +1323,18 @@ app.delete('/api/models/:id', async (req, res) => {
     }
 
     await db.run('DELETE FROM provider_models WHERE providerId = ? AND modelId = ?', [provider.id, id]);
+    res.sendStatus(200);
+});
+
+app.put('/api/models/:id', async (req, res) => {
+    const { id } = req.params;
+    const { name } = req.body || {};
+    if (!name) return res.status(400).json({ error: 'Missing model name' });
+    const model = await db.get('SELECT * FROM managed_models WHERE id = ?', [id]);
+    if (!model) return res.status(404).json({ error: 'Model not found' });
+    const existing = await db.get('SELECT * FROM managed_models WHERE name = ? AND id != ?', [name, id]);
+    if (existing) return res.status(409).json({ error: `Model name '${name}' already exists` });
+    await db.run('UPDATE managed_models SET name = ? WHERE id = ?', [name, id]);
     res.sendStatus(200);
 });
 
@@ -1435,8 +1639,8 @@ app.get('/api/stats', async (req, res) => {
 // Proxy Endpoint (Flexible routing starting with /proxy)
 app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
     // Detect client's expected format
-    const isClientAnthropic = req.url.includes('/messages');
-    const isClientOpenAI = req.url.includes('/chat/completions') || req.url.includes('/completions');
+    const isClientOpenAI = isClientProtocolOpenAI(req.url);
+    const isClientAnthropic = isClientProtocolAnthropic(req.url);
 
     // Authenticate client key
     const authHeader = req.headers['authorization']?.split(' ')[1] || req.headers['x-api-key'];
@@ -1595,6 +1799,42 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
         requestBytes
     });
 
+    // Protocol validation (after log creation so errors are recorded)
+    const hasValidProtocol = isClientOpenAI || isClientAnthropic;
+    const protocolConvertOn = provider.protocolConvert === 1;
+    const isNative = isProtocolNative(provider.type, isClientOpenAI, isClientAnthropic);
+    const needsResponseConversion = hasValidProtocol && protocolConvertOn && !isNative;
+    if (hasValidProtocol && ((protocolConvertOn && isNative) || (!protocolConvertOn && !isNative))) {
+        const errorMsg = getProtocolError(isClientOpenAI, isClientAnthropic);
+        const fullMsg = errorMsg + '。请在厂商配置中检查协议转换开关设置。';
+        console.log(`[Proxy] Protocol error: ${errorMsg} (provider=${provider.name}, type=${provider.type}, convertOn=${protocolConvertOn})`);
+        const responseAt = new Date().toISOString();
+        const latencyMs = new Date(responseAt) - new Date(requestAt);
+        await db.run(
+            `UPDATE conversation_logs SET responseBody = ?, status = ?, responseAt = ?, latencyMs = ?, upstreamStatus = ?, clientStatus = ?, responseBytes = ?, streamBroken = 1, tokensIn = 0, tokensOut = 0, tokensTotal = 0 WHERE id = ?`,
+            [fullMsg, 'error', responseAt, Number.isFinite(latencyMs) ? Math.round(latencyMs) : null, null, 400, Buffer.byteLength(fullMsg, 'utf8'), logId]
+        );
+        io.to('admins').emit('log_update', {
+            id: logId,
+            status: 'error',
+            responseBody: fullMsg,
+            responseAt,
+            latencyMs: Number.isFinite(latencyMs) ? Math.round(latencyMs) : null,
+            clientStatus: 400,
+            responseBytes: Buffer.byteLength(fullMsg, 'utf8'),
+            streamBroken: 1,
+            tokensIn: 0,
+            tokensOut: 0,
+            tokensTotal: 0
+        });
+        await db.run(
+            `INSERT INTO stats_events (appId, providerId, requestedModel, actualModel, status, requestAt, responseAt, latencyMs, tokensIn, tokensOut, tokensTotal, errorMessage)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?)`,
+            [clientKeyData.id, provider.id, model || 'unknown', actualModel || null, 'error', requestAt, responseAt, null, fullMsg]
+        );
+        return res.status(400).json({ error: fullMsg });
+    }
+
     let targetUrl = '';
     if (stream) {
         let streamBytesTotal = 0;
@@ -1604,81 +1844,43 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
             let upstreamHeaders = {};
 
             if (provider.type === 'openai') {
-                if (isClientAnthropic && !isClientOpenAI) {
-                    const msg = 'Streaming protocol conversion (Anthropic -> OpenAI) is not supported';
-                    const responseAt = new Date().toISOString();
-                    const latencyMs = new Date(responseAt) - new Date(requestAt);
-                    const rb = Buffer.byteLength(msg, 'utf8');
-                    await db.run(
-                        `UPDATE conversation_logs SET responseBody = ?, status = ?, responseAt = ?, targetUrl = ?, proxyUserAgent = ?, latencyMs = ?, upstreamStatus = ?, clientStatus = ?, responseBytes = ?, streamBroken = ?, tokensIn = ?, tokensOut = ?, tokensTotal = ? WHERE id = ?`,
-                        [msg, 'error', responseAt, targetUrl, null, Number.isFinite(latencyMs) ? Math.round(latencyMs) : null, null, 400, rb, 0, 0, 0, 0, logId]
-                    );
-                    io.to('admins').emit('log_update', {
-                        id: logId,
-                        status: 'error',
-                        responseBody: msg,
-                        responseAt,
-                        targetUrl,
-                        latencyMs: Number.isFinite(latencyMs) ? Math.round(latencyMs) : null,
-                        clientStatus: 400,
-                        responseBytes: rb,
-                        streamBroken: 0,
-                        tokensIn: 0,
-                        tokensOut: 0,
-                        tokensTotal: 0
-                    });
-                    return res.status(400).json({ error: msg });
-                }
-                targetUrl = provider.baseUrl.replace(/\/+$/, '');
-                if (pathSuffix === '/' || pathSuffix === '/chat/completions' || pathSuffix === '/completions') {
-                    if (!targetUrl.match(/\/v\d+$/) && !targetUrl.match(/\/v\d+\/.*$/)) {
-                        if (!targetUrl.endsWith('/v1')) targetUrl += '/v1';
+                if (needsResponseConversion) {
+                    const messages = req.body.messages || [];
+                    targetBody = {
+                        model: actualModel,
+                        messages: messages.map(m => ({
+                            role: m.role,
+                            content: typeof m.content === 'string' ? m.content : (m.content?.[0]?.text || '')
+                        })),
+                        max_tokens: req.body.max_tokens || 4096,
+                        stream: true
+                    };
+                    const systemMsg = messages.find(m => m.role === 'system');
+                    if (systemMsg) {
+                        targetBody.messages = targetBody.messages.filter(m => m.role !== 'system');
+                        targetBody.messages.unshift({ role: 'system', content: systemMsg.content });
                     }
-                    targetUrl += '/chat/completions';
-                } else {
-                    targetUrl += pathSuffix;
                 }
-                // Use filtered headers from client, override auth
+                targetUrl = buildTargetUrl(provider.baseUrl, pathSuffix, provider.type, needsResponseConversion);
                 upstreamHeaders = await buildUpstreamHeaders(req.headers, provider.apiKey, true, false);
             } else if (provider.type === 'anthropic') {
-                if (isClientOpenAI || !isClientAnthropic) {
-                    const msg = 'Streaming protocol conversion (OpenAI -> Anthropic) is not supported';
-                    const responseAt = new Date().toISOString();
-                    const latencyMs = new Date(responseAt) - new Date(requestAt);
-                    const rb = Buffer.byteLength(msg, 'utf8');
-                    await db.run(
-                        `UPDATE conversation_logs SET responseBody = ?, status = ?, responseAt = ?, targetUrl = ?, proxyUserAgent = ?, latencyMs = ?, upstreamStatus = ?, clientStatus = ?, responseBytes = ?, streamBroken = ?, tokensIn = ?, tokensOut = ?, tokensTotal = ? WHERE id = ?`,
-                        [msg, 'error', responseAt, targetUrl, null, Number.isFinite(latencyMs) ? Math.round(latencyMs) : null, null, 400, rb, 0, 0, 0, 0, logId]
-                    );
-                    io.to('admins').emit('log_update', {
-                        id: logId,
-                        status: 'error',
-                        responseBody: msg,
-                        responseAt,
-                        targetUrl,
-                        latencyMs: Number.isFinite(latencyMs) ? Math.round(latencyMs) : null,
-                        clientStatus: 400,
-                        responseBytes: rb,
-                        streamBroken: 0,
-                        tokensIn: 0,
-                        tokensOut: 0,
-                        tokensTotal: 0
-                    });
-                    return res.status(400).json({ error: msg });
+                if (needsResponseConversion) {
+                    const messages = req.body.messages || [];
+                    targetBody = {
+                        model: actualModel,
+                        messages: messages.filter(m => m.role !== 'system').map(m => ({
+                            role: m.role === 'assistant' ? 'assistant' : 'user',
+                            content: m.content
+                        })),
+                        max_tokens: req.body.max_tokens || 4096,
+                        system: messages.find(m => m.role === 'system')?.content,
+                        stream: true
+                    };
                 }
-                targetUrl = provider.baseUrl.replace(/\/+$/, '');
-                if (pathSuffix === '/' || pathSuffix === '/messages') {
-                    if (!targetUrl.match(/\/v\d+$/) && !targetUrl.match(/\/v\d+\/.*$/)) {
-                        if (!targetUrl.endsWith('/v1')) targetUrl += '/v1';
-                    }
-                    targetUrl += '/messages';
-                } else {
-                    targetUrl += pathSuffix;
-                }
-                // Use filtered headers from client, override auth
+                targetUrl = buildTargetUrl(provider.baseUrl, pathSuffix, provider.type, needsResponseConversion);
                 upstreamHeaders = await buildUpstreamHeaders(req.headers, provider.apiKey, true, true);
             } else {
-                const msg = `Unsupported provider type: ${provider.type}`;
+                const msg = `不支持的厂商类型: ${provider.type}`;
                 const responseAt = new Date().toISOString();
                 const latencyMs = new Date(responseAt) - new Date(requestAt);
                 const rb = Buffer.byteLength(msg, 'utf8');
@@ -1709,7 +1911,6 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
 
             proxyUserAgent = pickOutgoingUserAgent(upstreamHeaders);
 
-            // Record proxy request headers (mask sensitive values)
             const proxyHeadersForLog = { ...upstreamHeaders };
             if (proxyHeadersForLog['authorization']) {
                 const auth = proxyHeadersForLog['authorization'];
@@ -1746,6 +1947,7 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
             let responseData = '';
             let pendingChunkForLog = '';
             let lastEmitTs = 0;
+            const sseConvertState = {};
             const emitPendingChunk = () => {
                 if (!pendingChunkForLog) return;
                 io.to('admins').emit('log_update', {
@@ -1764,11 +1966,18 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                 let ended = false;
 
                 src.on('data', (chunk) => {
-                    const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
-                    streamBytesTotal += Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(text, 'utf8');
+                    let text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
+                    if (needsResponseConversion) {
+                        if (provider.type === 'openai') {
+                            text = convertOpenAIStreamToAnthropic(text, sseConvertState);
+                        } else if (provider.type === 'anthropic') {
+                            text = convertAnthropicStreamToOpenAI(text, sseConvertState);
+                        }
+                    }
+                    streamBytesTotal += Buffer.byteLength(text, 'utf8');
                     responseData += text;
                     pendingChunkForLog += text;
-                    res.write(chunk);
+                    res.write(text);
                     if (Date.now() - lastEmitTs > 180) emitPendingChunk();
                 });
 
@@ -1932,7 +2141,7 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
             let targetBody = { ...req.body, model: actualModel };
 
             // Request conversion logic
-            if (isClientAnthropic && !isClientOpenAI) {
+            if (needsResponseConversion) {
                 targetBody = {
                     model: actualModel,
                     messages: messages.map(m => ({
@@ -1949,15 +2158,7 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
             }
 
             // Construct final URL
-            targetUrl = provider.baseUrl.replace(/\/+$/, '');
-            if (pathSuffix === '/' || pathSuffix === '/chat/completions' || pathSuffix === '/completions') {
-                if (!targetUrl.match(/\/v\d+$/) && !targetUrl.match(/\/v\d+\/.*$/)) {
-                    if (!targetUrl.endsWith('/v1')) targetUrl += '/v1';
-                }
-                targetUrl += '/chat/completions';
-            } else {
-                targetUrl += pathSuffix;
-            }
+            targetUrl = buildTargetUrl(provider.baseUrl, pathSuffix, provider.type, needsResponseConversion);
 
             console.log(`[Proxy] Forwarding to OpenAI: ${targetUrl}`);
             // Use filtered headers from client, override auth
@@ -1971,7 +2172,7 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
             });
 
             // Response conversion logic
-            if (isClientAnthropic && !isClientOpenAI) {
+            if (needsResponseConversion) {
                 const data = response.data;
                 response.data = {
                     id: data.id,
@@ -1991,7 +2192,7 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
             let targetBody = { ...req.body, model: actualModel };
 
             // Request conversion logic
-            if (isClientOpenAI || !isClientAnthropic) {
+            if (needsResponseConversion) {
                 targetBody = {
                     model: actualModel,
                     messages: messages.filter(m => m.role !== 'system').map(m => ({
@@ -2004,15 +2205,7 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
             }
 
             // Construct final URL
-            targetUrl = provider.baseUrl.replace(/\/+$/, '');
-            if (pathSuffix === '/' || pathSuffix === '/messages') {
-                if (!targetUrl.match(/\/v\d+$/) && !targetUrl.match(/\/v\d+\/.*$/)) {
-                    if (!targetUrl.endsWith('/v1')) targetUrl += '/v1';
-                }
-                targetUrl += '/messages';
-            } else {
-                targetUrl += pathSuffix;
-            }
+            targetUrl = buildTargetUrl(provider.baseUrl, pathSuffix, provider.type, needsResponseConversion);
 
             console.log(`[Proxy] Forwarding to Anthropic: ${targetUrl}`);
             // Use filtered headers from client, override auth
@@ -2038,7 +2231,7 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
             });
 
             // Response conversion logic
-            if (isClientOpenAI || !isClientAnthropic) {
+            if (needsResponseConversion) {
                 const data = response.data;
                 response.data = {
                     id: data.id,

@@ -159,6 +159,9 @@ async function setupDb() {
     if (!providerCols.some(c => c.name === 'defaultModelId')) {
         await db.exec('ALTER TABLE providers ADD COLUMN defaultModelId INTEGER');
     }
+    if (!providerCols.some(c => c.name === 'protocolConvert')) {
+        await db.exec('ALTER TABLE providers ADD COLUMN protocolConvert INTEGER DEFAULT 0');
+    }
 
     // Migration for client_keys
     const keyCols = await db.all('PRAGMA table_info(client_keys)');
