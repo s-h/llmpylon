@@ -162,6 +162,9 @@ async function setupDb() {
     if (!providerCols.some(c => c.name === 'protocolConvert')) {
         await db.exec('ALTER TABLE providers ADD COLUMN protocolConvert INTEGER DEFAULT 0');
     }
+    if (!providerCols.some(c => c.name === 'deletedAt')) {
+        await db.exec('ALTER TABLE providers ADD COLUMN deletedAt DATETIME');
+    }
 
     // Migration for client_keys
     const keyCols = await db.all('PRAGMA table_info(client_keys)');

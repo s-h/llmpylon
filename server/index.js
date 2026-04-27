@@ -696,7 +696,7 @@ app.delete('/api/users/:id', async (req, res) => {
 
 // Providers API
 app.get('/api/providers', async (req, res) => {
-    const providers = await db.all('SELECT * FROM providers ORDER BY id ASC');
+    const providers = await db.all('SELECT * FROM providers WHERE deletedAt IS NULL ORDER BY id ASC');
     const models = await db.all(
         `
         SELECT pm.providerId, m.id as modelId, m.name as modelName
@@ -818,6 +818,37 @@ app.delete('/api/providers/:id/models/:modelId', async (req, res) => {
 app.delete('/api/providers/:id', async (req, res) => {
     const { id } = req.params;
     await db.run('UPDATE client_keys SET providerId = NULL WHERE providerId = ?', [id]);
+    await db.run('UPDATE providers SET active = 0, deletedAt = ? WHERE id = ?', [new Date().toISOString(), id]);
+    res.sendStatus(200);
+});
+
+app.get('/api/providers/deleted', async (req, res) => {
+    const providers = await db.all('SELECT * FROM providers WHERE deletedAt IS NOT NULL ORDER BY deletedAt DESC');
+    const models = await db.all(
+        `SELECT pm.providerId, m.id as modelId, m.name as modelName
+         FROM provider_models pm JOIN managed_models m ON pm.modelId = m.id
+         ORDER BY m.name ASC`
+    );
+    const modelsByProvider = new Map();
+    for (const row of models) {
+        if (!modelsByProvider.has(row.providerId)) modelsByProvider.set(row.providerId, []);
+        modelsByProvider.get(row.providerId).push({ id: row.modelId, name: row.modelName });
+    }
+    const enriched = providers.map((p) => ({
+        ...p,
+        models: modelsByProvider.get(p.id) || []
+    }));
+    res.json(enriched);
+});
+
+app.post('/api/providers/:id/restore', async (req, res) => {
+    const { id } = req.params;
+    await db.run('UPDATE providers SET deletedAt = NULL WHERE id = ?', [id]);
+    res.sendStatus(200);
+});
+
+app.delete('/api/providers/:id/permanent', async (req, res) => {
+    const { id } = req.params;
     await db.run('DELETE FROM provider_models WHERE providerId = ?', [id]);
     await db.run('DELETE FROM providers WHERE id = ?', [id]);
     res.sendStatus(200);
@@ -825,7 +856,7 @@ app.delete('/api/providers/:id', async (req, res) => {
 
 // 导出厂商配置
 app.get('/api/providers/export', async (req, res) => {
-    const providers = await db.all('SELECT * FROM providers ORDER BY id ASC');
+    const providers = await db.all('SELECT * FROM providers WHERE deletedAt IS NULL ORDER BY id ASC');
     const models = await db.all(`
         SELECT pm.providerId, m.id as modelId, m.name as modelName
         FROM provider_models pm
@@ -942,7 +973,7 @@ app.post('/api/providers/import', async (req, res) => {
 app.get('/api/config/export', async (req, res) => {
     const includeSecrets = String(req.query.includeSecrets || '') === '1';
     const providers = await db.all(
-        'SELECT id, name, type, baseUrl, apiKey, defaultModelId, active FROM providers ORDER BY id ASC'
+        'SELECT id, name, type, baseUrl, apiKey, defaultModelId, active FROM providers WHERE deletedAt IS NULL ORDER BY id ASC'
     );
     const managedModels = await db.all(
         'SELECT id, name, active FROM managed_models ORDER BY id ASC'

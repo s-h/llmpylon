@@ -209,6 +209,10 @@ const copyProviderModelNames = ref([]);
 const copyDefaultModelName = ref('');
 const newCopyModelRow = ref('');
 
+// 回收站
+const showRecycleBin = ref(false);
+const deletedProviders = ref([]);
+
 // 导入/导出相关状态
 const showExportDialog = ref(false);
 const exportIncludeApiKey = ref(false);
@@ -1136,11 +1140,29 @@ const activateProvider = async (id) => {
 const deleteProvider = async (id) => {
   const isUsed = clientKeys.value.some(k => k.providerId === id);
   if (isUsed) {
-    if (!confirm('该厂商已被某些应用绑定，删除后这些应用将回退到“默认厂商”。是否确认删除？')) return;
+    if (!confirm('该厂商已被某些应用绑定，删除后这些应用将回退到"默认厂商"。是否确认删除？')) return;
   }
   await axios.delete(`${API_BASE}/providers/${id}`);
   fetchProviders();
-  fetchClientKeys(); // Refresh to see updated app settings
+  fetchClientKeys();
+};
+
+const fetchDeletedProviders = async () => {
+  const res = await axios.get(`${API_BASE}/providers/deleted`);
+  deletedProviders.value = res.data;
+};
+
+const restoreProvider = async (id) => {
+  await axios.post(`${API_BASE}/providers/${id}/restore`);
+  fetchDeletedProviders();
+  fetchProviders();
+};
+
+const permanentDeleteProvider = async (id) => {
+  if (!confirm('确定要彻底删除该厂商吗？此操作不可恢复。')) return;
+  await axios.delete(`${API_BASE}/providers/${id}/permanent`);
+  fetchDeletedProviders();
+  fetchProviders();
 };
 
 const addManagedModel = async () => {
@@ -1663,33 +1685,51 @@ onUnmounted(() => {
         <!-- Providers View -->
         <div v-if="activeTab === 'providers'" class="space-y-6">
           <div class="flex flex-col sm:flex-row gap-3 sm:gap-4 sm:justify-between sm:items-center">
-            <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">当前已添加的厂商</h3>
+            <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">{{ showRecycleBin ? '回收站' : '当前已添加的厂商' }}</h3>
             <div class="flex flex-wrap gap-2">
+              <template v-if="!showRecycleBin">
+                <button
+                  @click="openExportDialog"
+                  class="flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-sm border border-gray-200"
+                >
+                  <Download class="w-4 h-4" />
+                  导出
+                </button>
+                <button
+                  @click="openImportDialog"
+                  class="flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-sm border border-gray-200"
+                >
+                  <Upload class="w-4 h-4" />
+                  导入
+                </button>
+                <button
+                  @click="showAddProvider = true"
+                  class="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
+                >
+                  <Plus class="w-4 h-4" />
+                  添加厂商
+                </button>
+                <button
+                  @click="showRecycleBin = true; fetchDeletedProviders()"
+                  class="flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 transition-colors text-sm border border-gray-200"
+                >
+                  <Trash2 class="w-4 h-4" />
+                  回收站
+                  <span v-if="deletedProviders.length" class="px-1.5 py-0.5 bg-red-100 text-red-600 rounded-full text-[10px] font-bold">{{ deletedProviders.length }}</span>
+                </button>
+              </template>
               <button
-                @click="openExportDialog"
+                v-else
+                @click="showRecycleBin = false"
                 class="flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-sm border border-gray-200"
               >
-                <Download class="w-4 h-4" />
-                导出
-              </button>
-              <button
-                @click="openImportDialog"
-                class="flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-sm border border-gray-200"
-              >
-                <Upload class="w-4 h-4" />
-                导入
-              </button>
-              <button
-                @click="showAddProvider = true"
-                class="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
-              >
-                <Plus class="w-4 h-4" />
-                添加厂商
+                厂商列表
               </button>
             </div>
           </div>
 
-          <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+          <!-- Normal provider list -->
+          <div v-if="!showRecycleBin" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
             <div 
               v-for="p in providers" 
               :key="p.id"
@@ -1773,6 +1813,52 @@ onUnmounted(() => {
                     {{ m.name }}
                   </button>
                   <span v-if="!(p.models || []).length" class="text-gray-400 text-xs italic">未添加</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Recycle bin view -->
+          <div v-if="showRecycleBin" class="space-y-4">
+            <div v-if="!deletedProviders.length" class="text-center py-12 text-gray-400 text-sm bg-white rounded-xl border border-gray-200 shadow-sm">
+              回收站为空
+            </div>
+            <div v-for="p in deletedProviders" :key="p.id" class="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
+              <div class="flex justify-between items-start mb-4">
+                <div>
+                  <h4 class="font-bold text-lg">{{ p.name }}</h4>
+                  <div class="flex flex-wrap gap-1.5 mt-1">
+                    <span class="text-xs px-2 py-0.5 bg-gray-100 text-gray-600 rounded-full border border-gray-200 uppercase">{{ p.type }}</span>
+                    <span class="text-xs px-2 py-0.5 bg-red-50 text-red-600 rounded-full border border-red-100 font-medium">已删除</span>
+                  </div>
+                  <p class="text-[10px] text-gray-400 mt-1">删除时间：{{ formatTime(p.deletedAt) }}</p>
+                </div>
+                <div class="flex gap-2">
+                  <button
+                    @click="restoreProvider(p.id)"
+                    class="px-3 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-xs font-bold"
+                    title="恢复厂商"
+                  >
+                    恢复
+                  </button>
+                  <button
+                    @click="permanentDeleteProvider(p.id)"
+                    class="px-3 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors text-xs font-bold"
+                    title="彻底删除"
+                  >
+                    彻底删除
+                  </button>
+                </div>
+              </div>
+              <div class="text-sm text-gray-500 break-all">
+                <span class="block font-medium text-gray-400 text-xs mb-1 uppercase">基础地址</span>
+                {{ p.baseUrl }}
+              </div>
+              <div class="text-sm text-gray-500 mt-3">
+                <span class="block font-medium text-gray-400 text-xs mb-1 uppercase">模型</span>
+                <div class="flex flex-wrap gap-2">
+                  <span v-for="m in (p.models || [])" :key="m.id" class="px-2 py-1 rounded text-[10px] font-semibold font-mono bg-gray-100 text-gray-600 border border-gray-200">{{ m.name }}</span>
+                  <span v-if="!(p.models || []).length" class="text-gray-400 text-xs italic">无关联模型</span>
                 </div>
               </div>
             </div>
