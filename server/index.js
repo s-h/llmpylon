@@ -413,6 +413,11 @@ function convertOpenAIStreamToAnthropic(chunkText, state) {
         if (line.startsWith('data: ')) {
             const data = line.slice(6).trim();
             if (data === '[DONE]') {
+                if (state.textBlockOpen) {
+                    result += 'event: content_block_stop\ndata: {"type":"content_block_stop","index":' + (state.blockIndex || 0) + '}\n\n';
+                    state.textBlockOpen = false;
+                    state.blockIndex = (state.blockIndex || 0) + 1;
+                }
                 result += 'event: message_stop\ndata: {"type":"message_stop"}\n\n';
             } else {
                 try {
@@ -421,28 +426,75 @@ function convertOpenAIStreamToAnthropic(chunkText, state) {
                     for (const choice of choices) {
                         const delta = choice.delta || {};
                         const finishReason = choice.finish_reason;
-                        if (!state.hasStarted && delta.role === 'assistant') {
+
+                        if (!state.hasStarted && (delta.role === 'assistant' || delta.content != null || delta.tool_calls || finishReason)) {
                             state.hasStarted = true;
+                            state.blockIndex = 0;
                             result += 'event: message_start\ndata: ' + JSON.stringify({
                                 type: 'message_start',
                                 message: { id: parsed.id || 'msg_unknown', type: 'message', role: 'assistant', content: [], model: parsed.model || '' }
                             }) + '\n\n';
-                            result += 'event: content_block_start\ndata: ' + JSON.stringify({
-                                type: 'content_block_start', index: 0,
-                                content_block: { type: 'text', text: '' }
-                            }) + '\n\n';
                         }
-                        if (delta.content) {
-                            result += 'event: content_block_delta\ndata: ' + JSON.stringify({
-                                type: 'content_block_delta', index: 0,
-                                delta: { type: 'text_delta', text: delta.content }
-                            }) + '\n\n';
+
+                        if (delta.tool_calls) {
+                            for (const tc of delta.tool_calls) {
+                                if (tc.id && tc.function && tc.function.name) {
+                                    if (state.textBlockOpen) {
+                                        result += 'event: content_block_stop\ndata: {"type":"content_block_stop","index":' + state.blockIndex + '}\n\n';
+                                        state.textBlockOpen = false;
+                                        state.blockIndex++;
+                                    }
+                                    result += 'event: content_block_start\ndata: ' + JSON.stringify({
+                                        type: 'content_block_start',
+                                        index: state.blockIndex,
+                                        content_block: { type: 'tool_use', id: tc.id, name: tc.function.name, input: {} }
+                                    }) + '\n\n';
+                                    state.inToolCall = true;
+                                }
+                                if (tc.function && tc.function.arguments != null && state.inToolCall) {
+                                    result += 'event: content_block_delta\ndata: ' + JSON.stringify({
+                                        type: 'content_block_delta',
+                                        index: state.blockIndex,
+                                        delta: { type: 'input_json_delta', partial_json: tc.function.arguments }
+                                    }) + '\n\n';
+                                }
+                            }
                         }
+
+                        if (delta.content != null && !delta.tool_calls) {
+                            if (state.inToolCall) {
+                                result += 'event: content_block_stop\ndata: {"type":"content_block_stop","index":' + state.blockIndex + '}\n\n';
+                                state.inToolCall = false;
+                                state.blockIndex++;
+                            }
+                            if (!state.textBlockOpen) {
+                                result += 'event: content_block_start\ndata: ' + JSON.stringify({
+                                    type: 'content_block_start', index: state.blockIndex,
+                                    content_block: { type: 'text', text: '' }
+                                }) + '\n\n';
+                                state.textBlockOpen = true;
+                            }
+                            if (delta.content) {
+                                result += 'event: content_block_delta\ndata: ' + JSON.stringify({
+                                    type: 'content_block_delta', index: state.blockIndex,
+                                    delta: { type: 'text_delta', text: delta.content }
+                                }) + '\n\n';
+                            }
+                        }
+
                         if (finishReason) {
-                            const anthropicStopReason = finishReason === 'stop' ? 'end_turn' : finishReason;
-                            result += 'event: content_block_stop\ndata: ' + JSON.stringify({
-                                type: 'content_block_stop', index: 0
-                            }) + '\n\n';
+                            if (state.inToolCall) {
+                                result += 'event: content_block_stop\ndata: {"type":"content_block_stop","index":' + state.blockIndex + '}\n\n';
+                                state.inToolCall = false;
+                                state.blockIndex++;
+                            }
+                            if (state.textBlockOpen) {
+                                result += 'event: content_block_stop\ndata: {"type":"content_block_stop","index":' + state.blockIndex + '}\n\n';
+                                state.textBlockOpen = false;
+                                state.blockIndex++;
+                            }
+                            const anthropicStopReason = finishReason === 'stop' ? 'end_turn'
+                                : finishReason === 'tool_calls' ? 'tool_use' : finishReason;
                             result += 'event: message_delta\ndata: ' + JSON.stringify({
                                 type: 'message_delta',
                                 delta: { stop_reason: anthropicStopReason, stop_sequence: null }
@@ -482,6 +534,14 @@ function convertAnthropicStreamToOpenAI(chunkText, state) {
                 } catch (e) {
                     result += line + '\n';
                 }
+            } else if (currentEvent === 'content_block_start' && data) {
+                try {
+                    const parsed = JSON.parse(data);
+                    const cb = parsed.content_block || {};
+                    if (cb.type === 'tool_use') {
+                        state.pendingToolCall = { id: cb.id, name: cb.name };
+                    }
+                } catch (e) { }
             } else if (currentEvent === 'content_block_delta' && data) {
                 try {
                     const parsed = JSON.parse(data);
@@ -490,15 +550,23 @@ function convertAnthropicStreamToOpenAI(chunkText, state) {
                         result += 'data: ' + JSON.stringify({
                             choices: [{ index: 0, delta: { content: delta.text }, finish_reason: null }]
                         }) + '\n\n';
+                    } else if (delta.type === 'input_json_delta' && state.pendingToolCall) {
+                        state.pendingToolCall.argsAcc = (state.pendingToolCall.argsAcc || '') + (delta.partial_json || '');
+                        result += 'data: ' + JSON.stringify({
+                            choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: state.pendingToolCall.id, type: 'function', function: { name: state.pendingToolCall.name, arguments: state.pendingToolCall.argsAcc } }] }, finish_reason: null }]
+                        }) + '\n\n';
                     }
                 } catch (e) {
                     result += line + '\n';
                 }
+            } else if (currentEvent === 'content_block_stop' && state.pendingToolCall) {
+                state.pendingToolCall = null;
             } else if (currentEvent === 'message_delta' && data) {
                 try {
                     const parsed = JSON.parse(data);
                     const delta = parsed.delta || {};
-                    const stopReason = delta.stop_reason === 'end_turn' ? 'stop' : (delta.stop_reason || null);
+                    const stopReason = delta.stop_reason === 'end_turn' ? 'stop'
+                        : delta.stop_reason === 'tool_use' ? 'tool_calls' : (delta.stop_reason || null);
                     result += 'data: ' + JSON.stringify({
                         choices: [{ index: 0, delta: {}, finish_reason: stopReason }]
                     }) + '\n\n';
@@ -2231,17 +2299,31 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
             // Response conversion logic
             if (needsResponseConversion) {
                 const data = response.data;
+                const choice = data.choices?.[0] || {};
+                const msg = choice.message || {};
+                const content = [];
+                if (msg.content) {
+                    content.push({ type: 'text', text: msg.content });
+                }
+                if (msg.tool_calls) {
+                    for (const tc of msg.tool_calls) {
+                        let parsedInput = {};
+                        try { parsedInput = JSON.parse(tc.function?.arguments || '{}'); } catch {}
+                        content.push({ type: 'tool_use', id: tc.id, name: tc.function?.name || '', input: parsedInput });
+                    }
+                }
                 response.data = {
                     id: data.id,
                     type: 'message',
                     role: 'assistant',
-                    content: [{ type: 'text', text: data.choices[0].message.content }],
+                    content,
                     model: data.model,
-                    stop_reason: data.choices[0].finish_reason === 'stop' ? 'end_turn' : data.choices[0].finish_reason,
-                    usage: {
+                    stop_reason: choice.finish_reason === 'stop' ? 'end_turn'
+                        : choice.finish_reason === 'tool_calls' ? 'tool_use' : choice.finish_reason,
+                    usage: data.usage ? {
                         input_tokens: data.usage.prompt_tokens,
                         output_tokens: data.usage.completion_tokens
-                    }
+                    } : undefined
                 };
             }
         } else if (provider.type === 'anthropic') {
