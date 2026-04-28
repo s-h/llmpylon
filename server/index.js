@@ -406,6 +406,128 @@ function getProtocolError(isOpenAI, isAnthropic) {
     return '协议错误：不支持的协议';
 }
 
+function convertAnthropicToolsToOpenAI(tools) {
+    if (!tools) return undefined;
+    return tools.map(t => ({
+        type: 'function',
+        function: {
+            name: t.name || '',
+            description: t.description || '',
+            parameters: t.input_schema || {}
+        }
+    }));
+}
+
+function convertOpenAIToolsToAnthropic(tools) {
+    if (!tools) return undefined;
+    return tools.map(t => ({
+        name: t.function?.name || t.name || '',
+        description: t.function?.description || t.description || '',
+        input_schema: t.function?.parameters || t.input_schema || {}
+    }));
+}
+
+function convertAnthropicMessagesToOpenAI(messages) {
+    if (!messages) return { messages: [], system: null };
+    const result = [];
+    let system = null;
+    for (const msg of messages) {
+        if (msg.role === 'system') {
+            const sysText = typeof msg.content === 'string' ? msg.content
+                : (Array.isArray(msg.content) ? msg.content.map(c => c.text || '').join('\n') : '');
+            system = system ? system + '\n' + sysText : sysText;
+            continue;
+        }
+        if (msg.role === 'user') {
+            if (typeof msg.content === 'string') {
+                result.push({ role: 'user', content: msg.content });
+            } else if (Array.isArray(msg.content)) {
+                let textParts = [];
+                let toolResultParts = [];
+                for (const block of msg.content) {
+                    if (block.type === 'text') textParts.push(block.text);
+                    else if (block.type === 'tool_result') {
+                        const trText = typeof block.content === 'string' ? block.content
+                            : (Array.isArray(block.content) ? block.content.map(c => c.text || '').join('\n') : '');
+                        toolResultParts.push({ role: 'tool', tool_call_id: block.tool_use_id, content: trText });
+                    }
+                }
+                if (textParts.length) {
+                    result.push({ role: 'user', content: textParts.join('\n') });
+                }
+                result.push(...toolResultParts);
+            }
+            continue;
+        }
+        if (msg.role === 'assistant') {
+            const textBlocks = [];
+            const toolCalls = [];
+            const rawContent = msg.content || [];
+            if (typeof rawContent === 'string') {
+                textBlocks.push(rawContent);
+            } else if (Array.isArray(rawContent)) {
+                for (const block of rawContent) {
+                    if (block.type === 'text') textBlocks.push(block.text);
+                    if (block.type === 'tool_use') {
+                        toolCalls.push({
+                            id: block.id,
+                            type: 'function',
+                            function: {
+                                name: block.name || '',
+                                arguments: JSON.stringify(block.input || {})
+                            }
+                        });
+                    }
+                }
+            }
+            const entry = { role: 'assistant' };
+            const text = textBlocks.join('\n');
+            if (text) entry.content = text;
+            if (toolCalls.length) entry.tool_calls = toolCalls;
+            result.push(entry);
+            continue;
+        }
+    }
+    return { messages: result, system };
+}
+
+function convertOpenAIMessagesToAnthropic(messages) {
+    if (!messages) return { messages: [], system: null };
+    const result = [];
+    let system = null;
+    for (const msg of messages) {
+        if (msg.role === 'system') {
+            system = system ? system + '\n' + (msg.content || '') : (msg.content || '');
+            continue;
+        }
+        if (msg.role === 'user') {
+            result.push({ role: 'user', content: [{ type: 'text', text: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content) }] });
+            continue;
+        }
+        if (msg.role === 'assistant') {
+            const content = [];
+            if (msg.content) content.push({ type: 'text', text: msg.content });
+            if (msg.tool_calls) {
+                for (const tc of msg.tool_calls) {
+                    let input = {};
+                    try { input = JSON.parse(tc.function?.arguments || '{}'); } catch {}
+                    content.push({ type: 'tool_use', id: tc.id, name: tc.function?.name || '', input });
+                }
+            }
+            result.push({ role: 'assistant', content });
+            continue;
+        }
+        if (msg.role === 'tool') {
+            result.push({
+                role: 'user',
+                content: [{ type: 'tool_result', tool_use_id: msg.tool_call_id, content: msg.content || '' }]
+            });
+            continue;
+        }
+    }
+    return { messages: result, system };
+}
+
 function convertOpenAIStreamToAnthropic(chunkText, state) {
     const lines = chunkText.split('\n');
     let result = '';
@@ -1947,37 +2069,33 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
 
             if (provider.type === 'openai') {
                 if (needsResponseConversion) {
-                    const messages = req.body.messages || [];
+                    const converted = convertAnthropicMessagesToOpenAI(req.body.messages || []);
                     targetBody = {
                         model: actualModel,
-                        messages: messages.map(m => ({
-                            role: m.role,
-                            content: typeof m.content === 'string' ? m.content : (m.content?.[0]?.text || '')
-                        })),
+                        messages: converted.messages,
                         max_tokens: req.body.max_tokens || 4096,
                         stream: true
                     };
-                    const systemMsg = messages.find(m => m.role === 'system');
-                    if (systemMsg) {
-                        targetBody.messages = targetBody.messages.filter(m => m.role !== 'system');
-                        targetBody.messages.unshift({ role: 'system', content: systemMsg.content });
-                    }
+                    if (converted.system) targetBody.system = converted.system;
+                    const tools = convertAnthropicToolsToOpenAI(req.body.tools);
+                    if (tools) targetBody.tools = tools;
+                    if (req.body.tool_choice) targetBody.tool_choice = req.body.tool_choice;
                 }
                 targetUrl = buildTargetUrl(provider.baseUrl, pathSuffix, provider.type, needsResponseConversion);
                 upstreamHeaders = await buildUpstreamHeaders(req.headers, provider.apiKey, true, false);
             } else if (provider.type === 'anthropic') {
                 if (needsResponseConversion) {
-                    const messages = req.body.messages || [];
+                    const converted = convertOpenAIMessagesToAnthropic(req.body.messages || []);
                     targetBody = {
                         model: actualModel,
-                        messages: messages.filter(m => m.role !== 'system').map(m => ({
-                            role: m.role === 'assistant' ? 'assistant' : 'user',
-                            content: m.content
-                        })),
+                        messages: converted.messages,
                         max_tokens: req.body.max_tokens || 4096,
-                        system: messages.find(m => m.role === 'system')?.content,
                         stream: true
                     };
+                    if (converted.system) targetBody.system = converted.system;
+                    const tools = convertOpenAIToolsToAnthropic(req.body.tools);
+                    if (tools) targetBody.tools = tools;
+                    if (req.body.tool_choice) targetBody.tool_choice = req.body.tool_choice;
                 }
                 targetUrl = buildTargetUrl(provider.baseUrl, pathSuffix, provider.type, needsResponseConversion);
                 upstreamHeaders = await buildUpstreamHeaders(req.headers, provider.apiKey, true, true);
@@ -2267,19 +2385,16 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
 
             // Request conversion logic
             if (needsResponseConversion) {
+                const converted = convertAnthropicMessagesToOpenAI(req.body.messages || []);
                 targetBody = {
                     model: actualModel,
-                    messages: messages.map(m => ({
-                        role: m.role,
-                        content: typeof m.content === 'string' ? m.content : m.content[0]?.text || ''
-                    })),
+                    messages: converted.messages,
                     max_tokens: req.body.max_tokens || 4096,
                 };
-                const systemMsg = messages.find(m => m.role === 'system');
-                if (systemMsg) {
-                    targetBody.messages = targetBody.messages.filter(m => m.role !== 'system');
-                    targetBody.messages.unshift({ role: 'system', content: systemMsg.content });
-                }
+                if (converted.system) targetBody.system = converted.system;
+                const tools = convertAnthropicToolsToOpenAI(req.body.tools);
+                if (tools) targetBody.tools = tools;
+                if (req.body.tool_choice) targetBody.tool_choice = req.body.tool_choice;
             }
 
             // Construct final URL
@@ -2332,15 +2447,16 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
 
             // Request conversion logic
             if (needsResponseConversion) {
+                const converted = convertOpenAIMessagesToAnthropic(req.body.messages || []);
                 targetBody = {
                     model: actualModel,
-                    messages: messages.filter(m => m.role !== 'system').map(m => ({
-                        role: m.role === 'assistant' ? 'assistant' : 'user',
-                        content: m.content
-                    })),
+                    messages: converted.messages,
                     max_tokens: req.body.max_tokens || 4096,
-                    system: messages.find(m => m.role === 'system')?.content,
                 };
+                if (converted.system) targetBody.system = converted.system;
+                const tools = convertOpenAIToolsToAnthropic(req.body.tools);
+                if (tools) targetBody.tools = tools;
+                if (req.body.tool_choice) targetBody.tool_choice = req.body.tool_choice;
             }
 
             // Construct final URL
@@ -2372,24 +2488,41 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
             // Response conversion logic
             if (needsResponseConversion) {
                 const data = response.data;
+                const contentBlocks = data.content || [];
+                let textContent = '';
+                const toolCalls = [];
+                for (const block of contentBlocks) {
+                    if (block.type === 'text') textContent += block.text || '';
+                    if (block.type === 'tool_use') {
+                        toolCalls.push({
+                            id: block.id,
+                            type: 'function',
+                            function: {
+                                name: block.name || '',
+                                arguments: JSON.stringify(block.input || {})
+                            }
+                        });
+                    }
+                }
                 response.data = {
                     id: data.id,
                     object: 'chat.completion',
                     created: Math.floor(Date.now() / 1000),
                     model: data.model,
                     choices: [{
-                        message: {
-                            role: 'assistant',
-                            content: data.content[0].text
-                        },
-                        finish_reason: data.stop_reason === 'end_turn' ? 'stop' : data.stop_reason
+                        message: { role: 'assistant', content: textContent || null },
+                        finish_reason: data.stop_reason === 'end_turn' ? 'stop'
+                            : data.stop_reason === 'tool_use' ? 'tool_calls' : (data.stop_reason || 'stop')
                     }],
-                    usage: {
+                    usage: data.usage ? {
                         prompt_tokens: data.usage.input_tokens,
                         completion_tokens: data.usage.output_tokens,
                         total_tokens: data.usage.input_tokens + data.usage.output_tokens
-                    }
+                    } : undefined
                 };
+                if (toolCalls.length) {
+                    response.data.choices[0].message.tool_calls = toolCalls;
+                }
             }
         }
 
