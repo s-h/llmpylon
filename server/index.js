@@ -481,7 +481,8 @@ function convertAnthropicMessagesToOpenAI(messages) {
                 }
             }
             const text = textBlocks.join('\n');
-            result.push({ role: 'assistant', content: text || null, tool_calls: toolCalls.length ? toolCalls : undefined });
+            const hasToolCalls = toolCalls.length > 0;
+            result.push({ role: 'assistant', content: hasToolCalls ? null : (text || null), tool_calls: hasToolCalls ? toolCalls : undefined });
             continue;
         }
     }
