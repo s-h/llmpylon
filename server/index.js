@@ -418,6 +418,25 @@ function convertAnthropicToolsToOpenAI(tools) {
     }));
 }
 
+function convertAnthropicToolChoiceToOpenAI(tc) {
+    if (!tc) return undefined;
+    if (typeof tc === 'string') return tc;
+    if (tc.type === 'auto') return 'auto';
+    if (tc.type === 'any') return 'required';
+    if (tc.type === 'none') return 'none';
+    if (tc.type === 'tool' && tc.name) return { type: 'function', function: { name: tc.name } };
+    return undefined;
+}
+
+function convertOpenAIToolChoiceToAnthropic(tc) {
+    if (!tc) return undefined;
+    if (tc === 'auto') return { type: 'auto' };
+    if (tc === 'required') return { type: 'any' };
+    if (tc === 'none') return { type: 'none' };
+    if (typeof tc === 'object' && tc.type === 'function' && tc.function?.name) return { type: 'tool', name: tc.function.name };
+    return undefined;
+}
+
 function convertOpenAIToolsToAnthropic(tools) {
     if (!tools) return undefined;
     return tools.map(t => ({
@@ -428,14 +447,13 @@ function convertOpenAIToolsToAnthropic(tools) {
 }
 
 function convertAnthropicMessagesToOpenAI(messages) {
-    if (!messages) return { messages: [], system: null };
+    if (!messages) return { messages: [] };
     const result = [];
-    let system = null;
     for (const msg of messages) {
         if (msg.role === 'system') {
             const sysText = typeof msg.content === 'string' ? msg.content
                 : (Array.isArray(msg.content) ? msg.content.map(c => c.text || '').join('\n') : '');
-            system = system ? system + '\n' + sysText : sysText;
+            if (sysText) result.push({ role: 'system', content: sysText });
             continue;
         }
         if (msg.role === 'user') {
@@ -486,7 +504,7 @@ function convertAnthropicMessagesToOpenAI(messages) {
             continue;
         }
     }
-    return { messages: result, system };
+    return { messages: result };
 }
 
 function convertOpenAIMessagesToAnthropic(messages) {
@@ -614,7 +632,8 @@ function convertOpenAIStreamToAnthropic(chunkText, state) {
                                 state.blockIndex++;
                             }
                             const anthropicStopReason = finishReason === 'stop' ? 'end_turn'
-                                : finishReason === 'tool_calls' ? 'tool_use' : finishReason;
+                                : finishReason === 'tool_calls' ? 'tool_use'
+                                : finishReason === 'length' ? 'max_tokens' : finishReason;
                             result += 'event: message_delta\ndata: ' + JSON.stringify({
                                 type: 'message_delta',
                                 delta: { stop_reason: anthropicStopReason, stop_sequence: null }
@@ -686,7 +705,8 @@ function convertAnthropicStreamToOpenAI(chunkText, state) {
                     const parsed = JSON.parse(data);
                     const delta = parsed.delta || {};
                     const stopReason = delta.stop_reason === 'end_turn' ? 'stop'
-                        : delta.stop_reason === 'tool_use' ? 'tool_calls' : (delta.stop_reason || null);
+                        : delta.stop_reason === 'tool_use' ? 'tool_calls'
+                        : delta.stop_reason === 'max_tokens' ? 'length' : (delta.stop_reason || null);
                     result += 'data: ' + JSON.stringify({
                         choices: [{ index: 0, delta: {}, finish_reason: stopReason }]
                     }) + '\n\n';
@@ -2077,7 +2097,7 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                     if (converted.system) targetBody.system = converted.system;
                     const tools = convertAnthropicToolsToOpenAI(req.body.tools);
                     if (tools) targetBody.tools = tools;
-                    if (req.body.tool_choice) targetBody.tool_choice = req.body.tool_choice;
+                    if (req.body.tool_choice) targetBody.tool_choice = convertAnthropicToolChoiceToOpenAI(req.body.tool_choice);
                 }
                 targetUrl = buildTargetUrl(provider.baseUrl, pathSuffix, provider.type, needsResponseConversion);
                 upstreamHeaders = await buildUpstreamHeaders(req.headers, provider.apiKey, true, false);
@@ -2093,7 +2113,7 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                     if (converted.system) targetBody.system = converted.system;
                     const tools = convertOpenAIToolsToAnthropic(req.body.tools);
                     if (tools) targetBody.tools = tools;
-                    if (req.body.tool_choice) targetBody.tool_choice = req.body.tool_choice;
+                    if (req.body.tool_choice) targetBody.tool_choice = convertOpenAIToolChoiceToAnthropic(req.body.tool_choice);
                 }
                 targetUrl = buildTargetUrl(provider.baseUrl, pathSuffix, provider.type, needsResponseConversion);
                 upstreamHeaders = await buildUpstreamHeaders(req.headers, provider.apiKey, true, true);
@@ -2389,10 +2409,9 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                     messages: converted.messages,
                     max_tokens: req.body.max_tokens || 4096,
                 };
-                if (converted.system) targetBody.system = converted.system;
                 const tools = convertAnthropicToolsToOpenAI(req.body.tools);
                 if (tools) targetBody.tools = tools;
-                if (req.body.tool_choice) targetBody.tool_choice = req.body.tool_choice;
+                if (req.body.tool_choice) targetBody.tool_choice = convertAnthropicToolChoiceToOpenAI(req.body.tool_choice);
             }
 
             // Construct final URL
@@ -2432,7 +2451,8 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                     content,
                     model: data.model,
                     stop_reason: choice.finish_reason === 'stop' ? 'end_turn'
-                        : choice.finish_reason === 'tool_calls' ? 'tool_use' : choice.finish_reason,
+                        : choice.finish_reason === 'tool_calls' ? 'tool_use'
+                        : choice.finish_reason === 'length' ? 'max_tokens' : choice.finish_reason,
                     usage: data.usage ? {
                         input_tokens: data.usage.prompt_tokens,
                         output_tokens: data.usage.completion_tokens
@@ -2454,7 +2474,7 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                 if (converted.system) targetBody.system = converted.system;
                 const tools = convertOpenAIToolsToAnthropic(req.body.tools);
                 if (tools) targetBody.tools = tools;
-                if (req.body.tool_choice) targetBody.tool_choice = req.body.tool_choice;
+                if (req.body.tool_choice) targetBody.tool_choice = convertOpenAIToolChoiceToAnthropic(req.body.tool_choice);
             }
 
             // Construct final URL
@@ -2510,7 +2530,8 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                     choices: [{
                         message: { role: 'assistant', content: textContent || null },
                         finish_reason: data.stop_reason === 'end_turn' ? 'stop'
-                            : data.stop_reason === 'tool_use' ? 'tool_calls' : (data.stop_reason || 'stop')
+                            : data.stop_reason === 'tool_use' ? 'tool_calls'
+                            : data.stop_reason === 'max_tokens' ? 'length' : (data.stop_reason || 'stop')
                     }],
                     usage: data.usage ? {
                         prompt_tokens: data.usage.input_tokens,
