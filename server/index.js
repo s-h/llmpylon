@@ -449,7 +449,7 @@ function convertAnthropicMessagesToOpenAI(messages) {
                     else if (block.type === 'tool_result') {
                         const trText = typeof block.content === 'string' ? block.content
                             : (Array.isArray(block.content) ? block.content.map(c => c.text || '').join('\n') : '');
-                        toolResultParts.push({ role: 'tool', tool_call_id: block.tool_use_id, content: trText });
+                        toolResultParts.push({ role: 'user', content: trText });
                     }
                 }
                 if (textParts.length) {
@@ -480,11 +480,8 @@ function convertAnthropicMessagesToOpenAI(messages) {
                     }
                 }
             }
-            const entry = { role: 'assistant' };
             const text = textBlocks.join('\n');
-            if (text) entry.content = text;
-            if (toolCalls.length) entry.tool_calls = toolCalls;
-            result.push(entry);
+            result.push({ role: 'assistant', content: text || null, tool_calls: toolCalls.length ? toolCalls : undefined });
             continue;
         }
     }
