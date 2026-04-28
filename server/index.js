@@ -359,6 +359,9 @@ function isClientProtocolAnthropic(reqUrl) {
 
 function buildTargetUrl(baseUrl, pathSuffix, providerType, needsConvert) {
     let url = baseUrl.replace(/\/+$/, '');
+    url = url.replace(/\/v\d+\/(chat\/completions|messages).*$/, '');
+    url = url.replace(/\/v\d+$/, '');
+    url = url.replace(/\/+$/, '');
     if (needsConvert) {
         if (providerType === 'openai') {
             if (!url.match(/\/v\d+$/) && !url.match(/\/v\d+\/.*$/)) {
