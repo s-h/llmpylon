@@ -1995,6 +1995,7 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                 lastEmitTs = Date.now();
             };
 
+            const sseBuffer = { data: '' };
             await new Promise((resolve, reject) => {
                 const src = upstream.data;
                 let ended = false;
@@ -2002,11 +2003,21 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                 src.on('data', (chunk) => {
                     let text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
                     if (needsResponseConversion) {
-                        if (provider.type === 'openai') {
-                            text = convertOpenAIStreamToAnthropic(text, sseConvertState);
-                        } else if (provider.type === 'anthropic') {
-                            text = convertAnthropicStreamToOpenAI(text, sseConvertState);
+                        sseBuffer.data += text;
+                        const parts = sseBuffer.data.split('\n\n');
+                        sseBuffer.data = parts.pop() || '';
+                        let converted = '';
+                        for (const part of parts) {
+                            const trimmed = part.trim();
+                            if (!trimmed) continue;
+                            if (provider.type === 'openai') {
+                                converted += convertOpenAIStreamToAnthropic(trimmed + '\n\n', sseConvertState);
+                            } else if (provider.type === 'anthropic') {
+                                converted += convertAnthropicStreamToOpenAI(trimmed + '\n\n', sseConvertState);
+                            }
                         }
+                        if (!converted) return;
+                        text = converted;
                     }
                     streamBytesTotal += Buffer.byteLength(text, 'utf8');
                     responseData += text;
@@ -2017,6 +2028,18 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
 
                 src.on('end', () => {
                     ended = true;
+                    if (needsResponseConversion && sseBuffer.data.trim()) {
+                        const flushed = provider.type === 'openai'
+                            ? convertOpenAIStreamToAnthropic(sseBuffer.data.trim() + '\n\n', sseConvertState)
+                            : convertAnthropicStreamToOpenAI(sseBuffer.data.trim() + '\n\n', sseConvertState);
+                        if (flushed) {
+                            streamBytesTotal += Buffer.byteLength(flushed, 'utf8');
+                            responseData += flushed;
+                            pendingChunkForLog += flushed;
+                            res.write(flushed);
+                        }
+                        sseBuffer.data = '';
+                    }
                     emitPendingChunk();
                     resolve();
                 });
