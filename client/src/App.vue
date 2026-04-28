@@ -667,6 +667,10 @@ const closeLogDetail = () => {
   logDetailLoading.value = false;
 };
 
+const ensureNoLogDetailOverlay = () => {
+  if (selectedLog.value) closeLogDetail();
+};
+
 const fetchAdminUsers = async () => {
   const res = await axios.get(`${API_BASE}/users`);
   adminUsers.value = res.data;
@@ -1111,6 +1115,7 @@ const normalizeClientAppPayload = (payload) => {
 };
 
 const openEditClientApp = (k) => {
+  if (selectedLog.value) closeLogDetail();
   const base = { ...k };
   if (!base.providerId) base.managedModelId = null;
   editingApp.value = base;
@@ -1372,6 +1377,7 @@ watch(activeTab, (tab) => {
     /* ignore */
   }
   closeSidebarIfMobile();
+  if (tab !== 'logs' && selectedLog.value) closeLogDetail();
   if (tab === 'stats') {
     if (isAuthenticated.value) fetchStats();
   }
@@ -1703,11 +1709,11 @@ onUnmounted(() => {
                   导入
                 </button>
                 <button
-                  @click="showAddProvider = true"
-                  class="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
-                >
-                  <Plus class="w-4 h-4" />
-                  添加厂商
+                  @click="showAddProvider = true; if (selectedLog) closeLogDetail()"
+                class="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
+              >
+                <Plus class="w-4 h-4" />
+                添加厂商
                 </button>
                 <button
                   @click="showRecycleBin = true; fetchDeletedProviders()"
@@ -1870,7 +1876,7 @@ onUnmounted(() => {
           <div class="flex flex-col sm:flex-row gap-3 sm:justify-between sm:items-center">
             <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">应用管理</h3>
             <button 
-              @click="showAddApp = true"
+              @click="showAddApp = true; if (selectedLog) closeLogDetail()"
               class="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
             >
               <Plus class="w-4 h-4" />
@@ -3246,7 +3252,7 @@ onUnmounted(() => {
     </div>
 
     <!-- Log Detail Modal -->
-    <div v-if="selectedLog" class="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+    <div v-if="selectedLog" class="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50" @click.self="closeLogDetail">
       <div class="bg-white rounded-2xl w-full max-w-4xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
         <div class="p-6 border-b border-gray-200 flex justify-between items-center">
           <div>
