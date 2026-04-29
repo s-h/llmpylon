@@ -506,7 +506,7 @@ function convertAnthropicMessagesToOpenAI(messages) {
             const hasToolCalls = toolCalls.length > 0;
             const entry = { role: 'assistant', content: hasToolCalls ? null : (text || null) };
             if (hasToolCalls) entry.tool_calls = toolCalls;
-            if (reasoningContent) entry.reasoning_content = reasoningContent;
+            if (reasoningContent || hasToolCalls) entry.reasoning_content = reasoningContent || '';
             result.push(entry);
             continue;
         }
