@@ -2713,7 +2713,7 @@ onUnmounted(() => {
                       v-else 
                       class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-red-50 text-red-700 border border-red-200"
                     >
-                      错误
+                      {{ log.responseBody && log.responseBody.includes('协议错误') ? '协议错误' : '错误' }}
                     </span>
                     <p v-if="Number(log.isStream) === 1" class="mt-1 text-[9px] text-gray-500 font-mono">
                       流式<span v-if="Number(log.streamBroken) === 1" class="text-red-600"> · 流中断</span>
