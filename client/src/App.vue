@@ -3310,6 +3310,7 @@ onUnmounted(() => {
               <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">流式 / 中断</p>
               <p class="text-gray-800">
                 {{ Number(selectedLog.isStream) === 1 ? '是' : '否' }}
+                <span v-if="selectedLog.responseBody && selectedLog.responseBody.includes('tool_use')" class="text-amber-600 font-bold"> · 工具调用</span>
                 <span v-if="Number(selectedLog.isStream) === 1 && Number(selectedLog.streamBroken) === 1" class="text-red-600 font-bold"> · 流中断</span>
               </p>
             </div>
@@ -3323,7 +3324,7 @@ onUnmounted(() => {
             </div>
             <div class="p-3 bg-gray-50 rounded-lg border border-gray-100">
               <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">Token（入 / 出 / 计）</p>
-              <p class="font-mono text-gray-800">{{ formatNumber(selectedLog.tokensIn) }} / {{ formatNumber(selectedLog.tokensOut) }} / {{ formatNumber(selectedLog.tokensTotal) }}</p>
+              <p class="font-mono text-gray-800">{{ selectedLog.tokensIn != null ? formatNumber(selectedLog.tokensIn) : '—' }} / {{ selectedLog.tokensOut != null ? formatNumber(selectedLog.tokensOut) : '—' }} / {{ selectedLog.tokensTotal != null ? formatNumber(selectedLog.tokensTotal) : '—' }}</p>
             </div>
           </div>
           <div class="lg:col-span-2 space-y-2 mb-2">
@@ -3336,7 +3337,7 @@ onUnmounted(() => {
               <code class="text-xs text-gray-600 font-mono flex-1 truncate">{{ selectedLog.targetUrl || '-' }}</code>
             </div>
           </div>
-          <div class="space-y-4">
+          <div class="lg:col-span-2 space-y-4">
             <div class="flex justify-between items-center">
               <h4 class="text-xs font-bold text-gray-400 uppercase">客户端请求头</h4>
             </div>
@@ -3344,7 +3345,7 @@ onUnmounted(() => {
               class="bg-gray-900 text-gray-100 p-4 rounded-xl overflow-auto text-xs leading-relaxed max-h-[600px]"
             >{{ formatJson(selectedLog.clientRequestHeaders) }}</pre>
           </div>
-          <div class="space-y-4">
+          <div class="lg:col-span-2 space-y-4">
             <div class="flex justify-between items-center">
               <h4 class="text-xs font-bold text-gray-400 uppercase">代理请求头（发往上游）</h4>
             </div>
@@ -3352,7 +3353,7 @@ onUnmounted(() => {
               class="bg-gray-900 text-gray-100 p-4 rounded-xl overflow-auto text-xs leading-relaxed max-h-[600px]"
             >{{ formatJson(selectedLog.proxyRequestHeaders) }}</pre>
           </div>
-          <div class="space-y-4">
+          <div class="lg:col-span-2 space-y-4">
             <div class="flex justify-between items-center">
               <h4 class="text-xs font-bold text-gray-400 uppercase">请求正文 (JSON)</h4>
               <span class="text-[10px] text-gray-400 font-mono">{{ formatTime(selectedLog.requestAt) }}</span>
@@ -3361,7 +3362,7 @@ onUnmounted(() => {
               class="bg-gray-900 text-gray-100 p-4 rounded-xl overflow-auto text-xs leading-relaxed max-h-[600px]"
             >{{ formatJson(selectedLog.requestBody) }}</pre>
           </div>
-          <div v-if="selectedLog.proxyRequestBody" class="space-y-4">
+          <div v-if="selectedLog.proxyRequestBody" class="lg:col-span-2 space-y-4">
             <div class="flex justify-between items-center">
               <h4 class="text-xs font-bold text-gray-400 uppercase">代理请求正文（发往上游）</h4>
             </div>
@@ -3369,9 +3370,9 @@ onUnmounted(() => {
               class="bg-gray-900 text-gray-100 p-4 rounded-xl overflow-auto text-xs leading-relaxed max-h-[600px]"
             >{{ formatJson(selectedLog.proxyRequestBody) }}</pre>
           </div>
-          <div class="space-y-4">
+          <div class="lg:col-span-2 space-y-4">
             <div class="flex justify-between items-center">
-              <h4 class="text-xs font-bold text-gray-400 uppercase">响应正文 (JSON)</h4>
+              <h4 class="text-xs font-bold text-gray-400 uppercase">响应正文</h4>
               <span v-if="selectedLog.responseAt" class="text-[10px] text-gray-400 font-mono">{{ formatTime(selectedLog.responseAt) }}</span>
             </div>
             <div v-if="selectedLog.status === 'waiting' && !selectedLog.responseBody" class="h-[200px] flex flex-col items-center justify-center text-gray-400 gap-4 bg-gray-50 rounded-xl border border-dashed border-gray-200">
