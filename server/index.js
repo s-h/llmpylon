@@ -467,7 +467,7 @@ function convertAnthropicMessagesToOpenAI(messages) {
                     else if (block.type === 'tool_result') {
                         const trText = typeof block.content === 'string' ? block.content
                             : (Array.isArray(block.content) ? block.content.map(c => c.text || '').join('\n') : '');
-                        toolResultParts.push({ role: 'user', content: trText });
+                        toolResultParts.push({ role: 'tool', tool_call_id: block.tool_use_id, content: trText });
                     }
                 }
                 if (textParts.length) {
@@ -633,7 +633,8 @@ function convertOpenAIStreamToAnthropic(chunkText, state) {
                             }
                             const anthropicStopReason = finishReason === 'stop' ? 'end_turn'
                                 : finishReason === 'tool_calls' ? 'tool_use'
-                                : finishReason === 'length' ? 'max_tokens' : finishReason;
+                                : finishReason === 'length' ? 'max_tokens'
+                                : finishReason === 'content_filter' ? 'refusal' : finishReason;
                             result += 'event: message_delta\ndata: ' + JSON.stringify({
                                 type: 'message_delta',
                                 delta: { stop_reason: anthropicStopReason, stop_sequence: null }
@@ -706,7 +707,10 @@ function convertAnthropicStreamToOpenAI(chunkText, state) {
                     const delta = parsed.delta || {};
                     const stopReason = delta.stop_reason === 'end_turn' ? 'stop'
                         : delta.stop_reason === 'tool_use' ? 'tool_calls'
-                        : delta.stop_reason === 'max_tokens' ? 'length' : (delta.stop_reason || null);
+                        : delta.stop_reason === 'max_tokens' ? 'length'
+                        : delta.stop_reason === 'stop_sequence' ? 'stop'
+                        : delta.stop_reason === 'refusal' ? 'content_filter'
+                        : delta.stop_reason === 'pause_turn' ? null : (delta.stop_reason || null);
                     result += 'data: ' + JSON.stringify({
                         choices: [{ index: 0, delta: {}, finish_reason: stopReason }]
                     }) + '\n\n';
@@ -2266,6 +2270,9 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
 
             const responseAt = new Date().toISOString();
             const status = upstream.status >= 200 && upstream.status < 300 ? 'completed' : 'error';
+            if (status === 'error') {
+                console.error(`[Proxy] Upstream error ${upstream.status} for ${targetUrl}: ${(responseData || '(empty)').substring(0, 2000)}`);
+            }
             const latencyMs = new Date(responseAt) - new Date(requestAt);
             const usage = extractUsage(responseData);
             const clientStatus = upstream.status;
@@ -2452,7 +2459,8 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                     model: data.model,
                     stop_reason: choice.finish_reason === 'stop' ? 'end_turn'
                         : choice.finish_reason === 'tool_calls' ? 'tool_use'
-                        : choice.finish_reason === 'length' ? 'max_tokens' : choice.finish_reason,
+                        : choice.finish_reason === 'length' ? 'max_tokens'
+                        : choice.finish_reason === 'content_filter' ? 'refusal' : choice.finish_reason,
                     usage: data.usage ? {
                         input_tokens: data.usage.prompt_tokens,
                         output_tokens: data.usage.completion_tokens
@@ -2531,7 +2539,10 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                         message: { role: 'assistant', content: textContent || null },
                         finish_reason: data.stop_reason === 'end_turn' ? 'stop'
                             : data.stop_reason === 'tool_use' ? 'tool_calls'
-                            : data.stop_reason === 'max_tokens' ? 'length' : (data.stop_reason || 'stop')
+                            : data.stop_reason === 'max_tokens' ? 'length'
+                            : data.stop_reason === 'stop_sequence' ? 'stop'
+                            : data.stop_reason === 'refusal' ? 'content_filter'
+                            : data.stop_reason === 'pause_turn' ? 'stop' : (data.stop_reason || 'stop')
                     }],
                     usage: data.usage ? {
                         prompt_tokens: data.usage.input_tokens,
