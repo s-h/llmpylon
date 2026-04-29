@@ -2212,6 +2212,7 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
             const proxyRequestHeaders = JSON.stringify(proxyHeadersForLog);
             await db.run('UPDATE conversation_logs SET proxyRequestHeaders = ? WHERE id = ?', [proxyRequestHeaders, logId]);
 
+            await db.run('UPDATE conversation_logs SET proxyRequestBody = ? WHERE id = ?', [JSON.stringify(targetBody), logId]);
             const upstream = await axiosInstance.post(targetUrl, targetBody, {
                 headers: upstreamHeaders,
                 responseType: 'stream',
@@ -2478,6 +2479,7 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
 
             proxyUserAgent = pickOutgoingUserAgent(openaiHeaders);
 
+            await db.run('UPDATE conversation_logs SET proxyRequestBody = ? WHERE id = ?', [JSON.stringify(targetBody), logId]);
             response = await axiosInstance.post(targetUrl, targetBody, {
                 headers: openaiHeaders,
                 timeout: upstreamTimeoutMs
@@ -2553,6 +2555,7 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
             }
             const proxyRequestHeaders = JSON.stringify(proxyHeadersForLog);
             await db.run('UPDATE conversation_logs SET proxyRequestHeaders = ? WHERE id = ?', [proxyRequestHeaders, logId]);
+            await db.run('UPDATE conversation_logs SET proxyRequestBody = ? WHERE id = ?', [JSON.stringify(targetBody), logId]);
 
             response = await axiosInstance.post(targetUrl, targetBody, {
                 headers: anthropicHeaders,

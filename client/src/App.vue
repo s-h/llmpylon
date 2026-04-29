@@ -3361,6 +3361,14 @@ onUnmounted(() => {
               class="bg-gray-900 text-gray-100 p-4 rounded-xl overflow-auto text-xs leading-relaxed max-h-[600px]"
             >{{ formatJson(selectedLog.requestBody) }}</pre>
           </div>
+          <div v-if="selectedLog.proxyRequestBody" class="space-y-4">
+            <div class="flex justify-between items-center">
+              <h4 class="text-xs font-bold text-gray-400 uppercase">代理请求正文（发往上游）</h4>
+            </div>
+            <pre
+              class="bg-gray-900 text-gray-100 p-4 rounded-xl overflow-auto text-xs leading-relaxed max-h-[600px]"
+            >{{ formatJson(selectedLog.proxyRequestBody) }}</pre>
+          </div>
           <div class="space-y-4">
             <div class="flex justify-between items-center">
               <h4 class="text-xs font-bold text-gray-400 uppercase">响应正文 (JSON)</h4>
