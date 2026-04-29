@@ -3390,22 +3390,6 @@ onUnmounted(() => {
               <pre class="bg-gray-900 text-gray-100 p-4 rounded-xl overflow-auto text-xs leading-relaxed max-h-[600px]">{{ formatJson(selectedLog.proxyRequestBody) }}</pre>
             </div>
           </div>
-          <div class="lg:col-span-2 space-y-4">
-            <div class="flex justify-between items-center cursor-pointer select-none" @click="expandedSections.responseBody = !expandedSections.responseBody">
-              <div class="flex items-center gap-2">
-                <ChevronRight class="w-4 h-4 text-gray-400 transition-transform duration-200" :class="{'rotate-90': expandedSections.responseBody}" />
-                <h4 class="text-xs font-bold text-gray-400 uppercase">响应正文（转换后）</h4>
-              </div>
-              <span v-if="selectedLog.responseAt" class="text-[10px] text-gray-400 font-mono">{{ formatTime(selectedLog.responseAt) }}</span>
-            </div>
-            <div v-show="expandedSections.responseBody">
-              <div v-if="selectedLog.status === 'waiting' && !selectedLog.responseBody" class="h-[200px] flex flex-col items-center justify-center text-gray-400 gap-4 bg-gray-50 rounded-xl border border-dashed border-gray-200">
-                <Loader2 class="w-12 h-12 animate-spin text-blue-500" />
-                <p class="animate-pulse">正在等待厂商响应...</p>
-              </div>
-              <pre v-else class="bg-gray-900 text-gray-100 p-4 rounded-xl overflow-auto text-xs leading-relaxed max-h-[600px]">{{ formatJson(selectedLog.responseBody) }}</pre>
-            </div>
-          </div>
           <div v-if="selectedLog.proxyResponseBody" class="lg:col-span-2 space-y-4">
             <div class="flex justify-between items-center cursor-pointer select-none" @click="expandedSections.proxyResponseBody = !expandedSections.proxyResponseBody">
               <div class="flex items-center gap-2">
@@ -3415,6 +3399,22 @@ onUnmounted(() => {
             </div>
             <div v-show="expandedSections.proxyResponseBody">
               <pre class="bg-gray-900 text-gray-100 p-4 rounded-xl overflow-auto text-xs leading-relaxed max-h-[600px]">{{ formatJson(selectedLog.proxyResponseBody) }}</pre>
+            </div>
+          </div>
+          <div class="lg:col-span-2 space-y-4">
+            <div class="flex justify-between items-center cursor-pointer select-none" @click="expandedSections.responseBody = !expandedSections.responseBody">
+              <div class="flex items-center gap-2">
+                <ChevronRight class="w-4 h-4 text-gray-400 transition-transform duration-200" :class="{'rotate-90': expandedSections.responseBody}" />
+                <h4 class="text-xs font-bold text-gray-400 uppercase">响应正文（发往客户端）</h4>
+              </div>
+              <span v-if="selectedLog.responseAt" class="text-[10px] text-gray-400 font-mono">{{ formatTime(selectedLog.responseAt) }}</span>
+            </div>
+            <div v-show="expandedSections.responseBody">
+              <div v-if="selectedLog.status === 'waiting' && !selectedLog.responseBody" class="h-[200px] flex flex-col items-center justify-center text-gray-400 gap-4 bg-gray-50 rounded-xl border border-dashed border-gray-200">
+                <Loader2 class="w-12 h-12 animate-spin text-blue-500" />
+                <p class="animate-pulse">正在等待厂商响应...</p>
+              </div>
+              <pre v-else class="bg-gray-900 text-gray-100 p-4 rounded-xl overflow-auto text-xs leading-relaxed max-h-[600px]">{{ formatJson(selectedLog.responseBody) }}</pre>
             </div>
           </div>
         </div>
