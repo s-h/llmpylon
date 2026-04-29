@@ -590,6 +590,11 @@ function convertOpenAIStreamToAnthropic(chunkText, state) {
                         if (delta.tool_calls) {
                             for (const tc of delta.tool_calls) {
                                 if (tc.id && tc.function && tc.function.name) {
+                                    if (state.thinkingBlockOpen) {
+                                        result += 'event: content_block_stop\ndata: {"type":"content_block_stop","index":' + state.blockIndex + '}\n\n';
+                                        state.thinkingBlockOpen = false;
+                                        state.blockIndex++;
+                                    }
                                     if (state.textBlockOpen) {
                                         result += 'event: content_block_stop\ndata: {"type":"content_block_stop","index":' + state.blockIndex + '}\n\n';
                                         state.textBlockOpen = false;
@@ -613,6 +618,11 @@ function convertOpenAIStreamToAnthropic(chunkText, state) {
                         }
 
                         if (delta.content != null && !delta.tool_calls) {
+                            if (state.thinkingBlockOpen) {
+                                result += 'event: content_block_stop\ndata: {"type":"content_block_stop","index":' + state.blockIndex + '}\n\n';
+                                state.thinkingBlockOpen = false;
+                                state.blockIndex++;
+                            }
                             if (state.inToolCall) {
                                 result += 'event: content_block_stop\ndata: {"type":"content_block_stop","index":' + state.blockIndex + '}\n\n';
                                 state.inToolCall = false;
