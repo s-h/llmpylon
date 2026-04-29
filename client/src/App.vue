@@ -986,7 +986,7 @@ const doGlobalImport = async () => {
 };
 
 const openEditModal = (provider) => {
-  editingProvider.value = { ...provider };
+  editingProvider.value = { ...provider, protocolConvert: provider.protocolConvert === 1 || provider.protocolConvert === true };
 };
 
 const openCopyProviderDialog = (p) => {
