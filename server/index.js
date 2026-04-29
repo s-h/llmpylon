@@ -480,12 +480,16 @@ function convertAnthropicMessagesToOpenAI(messages) {
         if (msg.role === 'assistant') {
             const textBlocks = [];
             const toolCalls = [];
+            let reasoningContent = null;
             const rawContent = msg.content || [];
             if (typeof rawContent === 'string') {
                 textBlocks.push(rawContent);
             } else if (Array.isArray(rawContent)) {
                 for (const block of rawContent) {
                     if (block.type === 'text') textBlocks.push(block.text);
+                    if (block.type === 'thinking') {
+                        reasoningContent = (reasoningContent || '') + (block.thinking || '');
+                    }
                     if (block.type === 'tool_use') {
                         toolCalls.push({
                             id: block.id,
@@ -500,7 +504,10 @@ function convertAnthropicMessagesToOpenAI(messages) {
             }
             const text = textBlocks.join('\n');
             const hasToolCalls = toolCalls.length > 0;
-            result.push({ role: 'assistant', content: hasToolCalls ? null : (text || null), tool_calls: hasToolCalls ? toolCalls : undefined });
+            const entry = { role: 'assistant', content: hasToolCalls ? null : (text || null) };
+            if (hasToolCalls) entry.tool_calls = toolCalls;
+            if (reasoningContent) entry.reasoning_content = reasoningContent;
+            result.push(entry);
             continue;
         }
     }
@@ -523,6 +530,7 @@ function convertOpenAIMessagesToAnthropic(messages) {
         if (msg.role === 'assistant') {
             const content = [];
             if (msg.content) content.push({ type: 'text', text: msg.content });
+            if (msg.reasoning_content) content.push({ type: 'thinking', thinking: msg.reasoning_content });
             if (msg.tool_calls) {
                 for (const tc of msg.tool_calls) {
                     let input = {};
@@ -551,6 +559,11 @@ function convertOpenAIStreamToAnthropic(chunkText, state) {
         if (line.startsWith('data: ')) {
             const data = line.slice(6).trim();
             if (data === '[DONE]') {
+                if (state.thinkingBlockOpen) {
+                    result += 'event: content_block_stop\ndata: {"type":"content_block_stop","index":' + (state.blockIndex || 0) + '}\n\n';
+                    state.thinkingBlockOpen = false;
+                    state.blockIndex = (state.blockIndex || 0) + 1;
+                }
                 if (state.textBlockOpen) {
                     result += 'event: content_block_stop\ndata: {"type":"content_block_stop","index":' + (state.blockIndex || 0) + '}\n\n';
                     state.textBlockOpen = false;
@@ -620,6 +633,32 @@ function convertOpenAIStreamToAnthropic(chunkText, state) {
                             }
                         }
 
+                        if (delta.reasoning_content != null) {
+                            if (state.textBlockOpen) {
+                                result += 'event: content_block_stop\ndata: {"type":"content_block_stop","index":' + state.blockIndex + '}\n\n';
+                                state.textBlockOpen = false;
+                                state.blockIndex++;
+                            }
+                            if (state.inToolCall) {
+                                result += 'event: content_block_stop\ndata: {"type":"content_block_stop","index":' + state.blockIndex + '}\n\n';
+                                state.inToolCall = false;
+                                state.blockIndex++;
+                            }
+                            if (!state.thinkingBlockOpen) {
+                                result += 'event: content_block_start\ndata: ' + JSON.stringify({
+                                    type: 'content_block_start', index: state.blockIndex,
+                                    content_block: { type: 'thinking', thinking: '' }
+                                }) + '\n\n';
+                                state.thinkingBlockOpen = true;
+                            }
+                            if (delta.reasoning_content) {
+                                result += 'event: content_block_delta\ndata: ' + JSON.stringify({
+                                    type: 'content_block_delta', index: state.blockIndex,
+                                    delta: { type: 'thinking_delta', thinking: delta.reasoning_content }
+                                }) + '\n\n';
+                            }
+                        }
+
                         if (finishReason) {
                             if (state.inToolCall) {
                                 result += 'event: content_block_stop\ndata: {"type":"content_block_stop","index":' + state.blockIndex + '}\n\n';
@@ -629,6 +668,11 @@ function convertOpenAIStreamToAnthropic(chunkText, state) {
                             if (state.textBlockOpen) {
                                 result += 'event: content_block_stop\ndata: {"type":"content_block_stop","index":' + state.blockIndex + '}\n\n';
                                 state.textBlockOpen = false;
+                                state.blockIndex++;
+                            }
+                            if (state.thinkingBlockOpen) {
+                                result += 'event: content_block_stop\ndata: {"type":"content_block_stop","index":' + state.blockIndex + '}\n\n';
+                                state.thinkingBlockOpen = false;
                                 state.blockIndex++;
                             }
                             const anthropicStopReason = finishReason === 'stop' ? 'end_turn'
@@ -689,6 +733,10 @@ function convertAnthropicStreamToOpenAI(chunkText, state) {
                     if (delta.type === 'text_delta' && delta.text) {
                         result += 'data: ' + JSON.stringify({
                             choices: [{ index: 0, delta: { content: delta.text }, finish_reason: null }]
+                        }) + '\n\n';
+                    } else if (delta.type === 'thinking_delta' && delta.thinking) {
+                        result += 'data: ' + JSON.stringify({
+                            choices: [{ index: 0, delta: { reasoning_content: delta.thinking }, finish_reason: null }]
                         }) + '\n\n';
                     } else if (delta.type === 'input_json_delta' && state.pendingToolCall) {
                         state.pendingToolCall.argsAcc = (state.pendingToolCall.argsAcc || '') + (delta.partial_json || '');
