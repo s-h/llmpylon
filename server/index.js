@@ -1269,7 +1269,7 @@ app.post('/api/providers/import', async (req, res) => {
 app.get('/api/config/export', async (req, res) => {
     const includeSecrets = String(req.query.includeSecrets || '') === '1';
     const providers = await db.all(
-        'SELECT id, name, type, baseUrl, apiKey, defaultModelId, active FROM providers WHERE deletedAt IS NULL ORDER BY id ASC'
+        'SELECT id, name, type, baseUrl, apiKey, defaultModelId, active, protocolConvert, deletedAt FROM providers ORDER BY id ASC'
     );
     const managedModels = await db.all(
         'SELECT id, name, active FROM managed_models ORDER BY id ASC'
@@ -1337,8 +1337,8 @@ app.post('/api/config/import', async (req, res) => {
 
         for (const p of providers) {
             await db.run(
-                'INSERT INTO providers (id, name, type, baseUrl, apiKey, defaultModelId, active) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                [p.id, p.name, p.type, p.baseUrl, p.apiKey || null, p.defaultModelId || null, p.active ? 1 : 0]
+                'INSERT INTO providers (id, name, type, baseUrl, apiKey, defaultModelId, active, protocolConvert, deletedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                [p.id, p.name, p.type, p.baseUrl, p.apiKey || null, p.defaultModelId || null, p.active ? 1 : 0, p.protocolConvert ? 1 : 0, p.deletedAt || null]
             );
         }
 
