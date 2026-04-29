@@ -174,6 +174,14 @@ const showAddAdminUser = ref(false);
 const resetPasswordUser = ref(null);
 const resetPasswordValue = ref('');
 const selectedLog = ref(null);
+const expandedSections = ref({
+  clientHeaders: false,
+  proxyHeaders: false,
+  requestBody: false,
+  proxyRequestBody: false,
+  responseBody: false,
+  proxyResponseBody: false
+});
 const logDetailLoading = ref(false);
 const logDetailError = ref('');
 const selectedClientKey = ref('all');
@@ -3338,51 +3346,76 @@ onUnmounted(() => {
             </div>
           </div>
           <div class="lg:col-span-2 space-y-4">
-            <div class="flex justify-between items-center">
-              <h4 class="text-xs font-bold text-gray-400 uppercase">客户端请求头</h4>
+            <div class="flex justify-between items-center cursor-pointer select-none" @click="expandedSections.clientHeaders = !expandedSections.clientHeaders">
+              <div class="flex items-center gap-2">
+                <ChevronRight class="w-4 h-4 text-gray-400 transition-transform duration-200" :class="{'rotate-90': expandedSections.clientHeaders}" />
+                <h4 class="text-xs font-bold text-gray-400 uppercase">客户端请求头</h4>
+              </div>
             </div>
-            <pre
-              class="bg-gray-900 text-gray-100 p-4 rounded-xl overflow-auto text-xs leading-relaxed max-h-[600px]"
-            >{{ formatJson(selectedLog.clientRequestHeaders) }}</pre>
+            <div v-show="expandedSections.clientHeaders">
+              <pre class="bg-gray-900 text-gray-100 p-4 rounded-xl overflow-auto text-xs leading-relaxed max-h-[600px]">{{ formatJson(selectedLog.clientRequestHeaders) }}</pre>
+            </div>
           </div>
           <div class="lg:col-span-2 space-y-4">
-            <div class="flex justify-between items-center">
-              <h4 class="text-xs font-bold text-gray-400 uppercase">代理请求头（发往上游）</h4>
+            <div class="flex justify-between items-center cursor-pointer select-none" @click="expandedSections.proxyHeaders = !expandedSections.proxyHeaders">
+              <div class="flex items-center gap-2">
+                <ChevronRight class="w-4 h-4 text-gray-400 transition-transform duration-200" :class="{'rotate-90': expandedSections.proxyHeaders}" />
+                <h4 class="text-xs font-bold text-gray-400 uppercase">代理请求头（发往上游）</h4>
+              </div>
             </div>
-            <pre
-              class="bg-gray-900 text-gray-100 p-4 rounded-xl overflow-auto text-xs leading-relaxed max-h-[600px]"
-            >{{ formatJson(selectedLog.proxyRequestHeaders) }}</pre>
+            <div v-show="expandedSections.proxyHeaders">
+              <pre class="bg-gray-900 text-gray-100 p-4 rounded-xl overflow-auto text-xs leading-relaxed max-h-[600px]">{{ formatJson(selectedLog.proxyRequestHeaders) }}</pre>
+            </div>
           </div>
           <div class="lg:col-span-2 space-y-4">
-            <div class="flex justify-between items-center">
-              <h4 class="text-xs font-bold text-gray-400 uppercase">请求正文 (JSON)</h4>
+            <div class="flex justify-between items-center cursor-pointer select-none" @click="expandedSections.requestBody = !expandedSections.requestBody">
+              <div class="flex items-center gap-2">
+                <ChevronRight class="w-4 h-4 text-gray-400 transition-transform duration-200" :class="{'rotate-90': expandedSections.requestBody}" />
+                <h4 class="text-xs font-bold text-gray-400 uppercase">请求正文</h4>
+              </div>
               <span class="text-[10px] text-gray-400 font-mono">{{ formatTime(selectedLog.requestAt) }}</span>
             </div>
-            <pre
-              class="bg-gray-900 text-gray-100 p-4 rounded-xl overflow-auto text-xs leading-relaxed max-h-[600px]"
-            >{{ formatJson(selectedLog.requestBody) }}</pre>
+            <div v-show="expandedSections.requestBody">
+              <pre class="bg-gray-900 text-gray-100 p-4 rounded-xl overflow-auto text-xs leading-relaxed max-h-[600px]">{{ formatJson(selectedLog.requestBody) }}</pre>
+            </div>
           </div>
           <div v-if="selectedLog.proxyRequestBody" class="lg:col-span-2 space-y-4">
-            <div class="flex justify-between items-center">
-              <h4 class="text-xs font-bold text-gray-400 uppercase">代理请求正文（发往上游）</h4>
+            <div class="flex justify-between items-center cursor-pointer select-none" @click="expandedSections.proxyRequestBody = !expandedSections.proxyRequestBody">
+              <div class="flex items-center gap-2">
+                <ChevronRight class="w-4 h-4 text-gray-400 transition-transform duration-200" :class="{'rotate-90': expandedSections.proxyRequestBody}" />
+                <h4 class="text-xs font-bold text-gray-400 uppercase">代理请求正文（发往上游）</h4>
+              </div>
             </div>
-            <pre
-              class="bg-gray-900 text-gray-100 p-4 rounded-xl overflow-auto text-xs leading-relaxed max-h-[600px]"
-            >{{ formatJson(selectedLog.proxyRequestBody) }}</pre>
+            <div v-show="expandedSections.proxyRequestBody">
+              <pre class="bg-gray-900 text-gray-100 p-4 rounded-xl overflow-auto text-xs leading-relaxed max-h-[600px]">{{ formatJson(selectedLog.proxyRequestBody) }}</pre>
+            </div>
           </div>
           <div class="lg:col-span-2 space-y-4">
-            <div class="flex justify-between items-center">
-              <h4 class="text-xs font-bold text-gray-400 uppercase">响应正文</h4>
+            <div class="flex justify-between items-center cursor-pointer select-none" @click="expandedSections.responseBody = !expandedSections.responseBody">
+              <div class="flex items-center gap-2">
+                <ChevronRight class="w-4 h-4 text-gray-400 transition-transform duration-200" :class="{'rotate-90': expandedSections.responseBody}" />
+                <h4 class="text-xs font-bold text-gray-400 uppercase">响应正文（转换后）</h4>
+              </div>
               <span v-if="selectedLog.responseAt" class="text-[10px] text-gray-400 font-mono">{{ formatTime(selectedLog.responseAt) }}</span>
             </div>
-            <div v-if="selectedLog.status === 'waiting' && !selectedLog.responseBody" class="h-[200px] flex flex-col items-center justify-center text-gray-400 gap-4 bg-gray-50 rounded-xl border border-dashed border-gray-200">
-              <Loader2 class="w-12 h-12 animate-spin text-blue-500" />
-              <p class="animate-pulse">正在等待厂商响应...</p>
+            <div v-show="expandedSections.responseBody">
+              <div v-if="selectedLog.status === 'waiting' && !selectedLog.responseBody" class="h-[200px] flex flex-col items-center justify-center text-gray-400 gap-4 bg-gray-50 rounded-xl border border-dashed border-gray-200">
+                <Loader2 class="w-12 h-12 animate-spin text-blue-500" />
+                <p class="animate-pulse">正在等待厂商响应...</p>
+              </div>
+              <pre v-else class="bg-gray-900 text-gray-100 p-4 rounded-xl overflow-auto text-xs leading-relaxed max-h-[600px]">{{ formatJson(selectedLog.responseBody) }}</pre>
             </div>
-            <pre
-              v-else
-              class="bg-gray-900 text-gray-100 p-4 rounded-xl overflow-auto text-xs leading-relaxed max-h-[600px]"
-            >{{ formatJson(selectedLog.responseBody) }}</pre>
+          </div>
+          <div v-if="selectedLog.proxyResponseBody" class="lg:col-span-2 space-y-4">
+            <div class="flex justify-between items-center cursor-pointer select-none" @click="expandedSections.proxyResponseBody = !expandedSections.proxyResponseBody">
+              <div class="flex items-center gap-2">
+                <ChevronRight class="w-4 h-4 text-gray-400 transition-transform duration-200" :class="{'rotate-90': expandedSections.proxyResponseBody}" />
+                <h4 class="text-xs font-bold text-gray-400 uppercase">上游原始响应</h4>
+              </div>
+            </div>
+            <div v-show="expandedSections.proxyResponseBody">
+              <pre class="bg-gray-900 text-gray-100 p-4 rounded-xl overflow-auto text-xs leading-relaxed max-h-[600px]">{{ formatJson(selectedLog.proxyResponseBody) }}</pre>
+            </div>
           </div>
         </div>
       </div>

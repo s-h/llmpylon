@@ -2263,6 +2263,7 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
             };
 
             const sseBuffer = { data: '' };
+            let rawResponseData = '';
             await new Promise((resolve, reject) => {
                 const src = upstream.data;
                 let ended = false;
@@ -2270,6 +2271,7 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                 src.on('data', (chunk) => {
                     let text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
                     if (needsResponseConversion) {
+                        rawResponseData += text;
                         sseBuffer.data += text;
                         const parts = sseBuffer.data.split('\n\n');
                         sseBuffer.data = parts.pop() || '';
@@ -2373,6 +2375,10 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                     status === 'error' ? `Upstream status ${upstream.status}` : null
                 ]
             );
+
+            if (rawResponseData) {
+                await db.run('UPDATE conversation_logs SET proxyResponseBody = ? WHERE id = ?', [rawResponseData, logId]);
+            }
 
             io.to('admins').emit('log_update', {
                 id: logId,
@@ -2662,6 +2668,10 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                 null
             ]
         );
+
+        if (needsResponseConversion) {
+            await db.run('UPDATE conversation_logs SET proxyResponseBody = ? WHERE id = ?', [responseData, logId]);
+        }
 
         // Notify frontend: completed
         io.to('admins').emit('log_update', {
