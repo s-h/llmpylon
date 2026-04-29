@@ -470,10 +470,10 @@ function convertAnthropicMessagesToOpenAI(messages) {
                         toolResultParts.push({ role: 'tool', tool_call_id: block.tool_use_id, content: trText });
                     }
                 }
+                result.push(...toolResultParts);
                 if (textParts.length) {
                     result.push({ role: 'user', content: textParts.join('\n') });
                 }
-                result.push(...toolResultParts);
             }
             continue;
         }
@@ -512,6 +512,29 @@ function convertAnthropicMessagesToOpenAI(messages) {
         }
     }
     return { messages: result };
+}
+
+/*
+ * 协议消息序列约束：
+ *
+ * OpenAI:
+ *   system → [user ↔ assistant(tool_calls?) → tool*] ↔ user → ...
+ *   关键：assistant 含 tool_calls 时，后续消息必须是 tool
+ *
+ * Anthropic:
+ *   user[text?, tool_result*] → assistant[text?, tool_use*] → ...
+ *   关键：user 可同时包含 text 和 tool_result；无独立 tool 角色
+ */
+function validateOpenAIMessageOrder(messages, logPrefix) {
+    if (!messages || !messages.length) return;
+    for (let i = 0; i < messages.length - 1; i++) {
+        const cur = messages[i], next = messages[i + 1];
+        if (cur.role === 'assistant' && cur.tool_calls?.length) {
+            if (next.role !== 'tool') {
+                console.warn(`${logPrefix || ''} Violation at [${i}]: assistant(tool_calls) followed by ${next.role}, expected tool`);
+            }
+        }
+    }
 }
 
 function convertOpenAIMessagesToAnthropic(messages) {
@@ -2149,7 +2172,9 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
 
             if (provider.type === 'openai') {
                 if (needsResponseConversion) {
-                    const converted = convertAnthropicMessagesToOpenAI(req.body.messages || []);
+                const converted = convertAnthropicMessagesToOpenAI(req.body.messages || []);
+                validateOpenAIMessageOrder(converted.messages, '[Proxy NS Anthropic→OpenAI]');
+                    validateOpenAIMessageOrder(converted.messages, '[Proxy S Anth→OpenAI]');
                     targetBody = {
                         model: actualModel,
                         messages: converted.messages,
