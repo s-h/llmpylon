@@ -1981,8 +1981,9 @@ onUnmounted(() => {
             <div 
               v-for="m in managedModels" 
               :key="m.id"
-              class="bg-white p-6 rounded-xl border border-gray-200 shadow-sm hover:shadow-md transition-shadow relative overflow-hidden"
+              class="bg-white p-6 rounded-xl border border-gray-200 shadow-sm hover:shadow-md transition-shadow relative overflow-hidden cursor-pointer"
               :class="{'border-blue-500 ring-1 ring-blue-500': activeProviderDefaultModelId === m.id}"
+              @click="activeProviderDefaultModelId !== m.id && activateModel(m.id)"
             >
               <div v-if="activeProviderDefaultModelId === m.id" class="absolute top-0 right-0 bg-blue-500 text-white px-2 py-1 text-[10px] font-bold rounded-bl-lg flex items-center gap-1">
                 <Check class="w-3 h-3" /> 默认

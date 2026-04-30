@@ -1089,20 +1089,23 @@ app.delete('/api/providers/:id/models/:modelId', async (req, res) => {
     const provider = await db.get('SELECT id, name, defaultModelId FROM providers WHERE id = ?', [id]);
     if (!provider) return res.status(404).json({ error: 'Provider not found' });
 
-    const apps = await db.all('SELECT id, name FROM client_keys WHERE providerId = ? AND managedModelId = ?', [id, modelId]);
+    const allApps = await db.all('SELECT id, name, providerId FROM client_keys WHERE managedModelId = ?', [modelId]);
+    const allDefaultProviders = await db.all('SELECT id, name FROM providers WHERE defaultModelId = ? AND id != ?', [modelId, id]);
     const usingAsDefault = provider.defaultModelId && Number(provider.defaultModelId) === Number(modelId);
-    if (usingAsDefault || apps.length) {
+    const blocked = usingAsDefault || allApps.length || allDefaultProviders.length;
+    if (blocked) {
         const modelRow = await db.get('SELECT name FROM managed_models WHERE id = ?', [modelId]);
+        const parts = [`无法删除模型：${modelRow?.name || modelId}`];
+        if (usingAsDefault) parts.push(`- 厂商管理：${provider.name}（默认模型）`);
+        if (allDefaultProviders.length) parts.push(`- 其他厂商默认：${allDefaultProviders.map(p => p.name).join('、')}`);
+        if (allApps.length) parts.push(`- 应用管理：${allApps.map(a => a.name).join('、')}`);
         return res.status(409).json({
             error: 'Model is in use',
-            message: [
-                `无法删除模型：${modelRow?.name || modelId}`,
-                usingAsDefault ? `- 厂商管理：${provider.name}（默认模型）` : null,
-                apps.length ? `- 应用管理：${apps.map(a => a.name).join('、')}` : null
-            ].filter(Boolean).join('\n'),
+            message: parts.join('\n'),
             inUse: {
                 providerDefault: usingAsDefault ? { id: provider.id, name: provider.name } : null,
-                apps
+                otherProviders: allDefaultProviders,
+                apps: allApps
             }
         });
     }
@@ -1631,20 +1634,25 @@ app.delete('/api/models/:id', async (req, res) => {
     }
     if (!provider) return res.status(400).json({ error: 'No provider specified or active' });
     const { id } = req.params;
-    const apps = await db.all('SELECT id, name FROM client_keys WHERE providerId = ? AND managedModelId = ?', [provider.id, id]);
+
+    // 检查所有引用（不限当前厂商）
+    const allApps = await db.all('SELECT id, name, providerId FROM client_keys WHERE managedModelId = ?', [id]);
+    const allDefaultProviders = await db.all('SELECT id, name FROM providers WHERE defaultModelId = ? AND id != ?', [id, provider.id]);
     const usingAsDefault = provider.defaultModelId && Number(provider.defaultModelId) === Number(id);
-    if (usingAsDefault || apps.length) {
+    const blocked = usingAsDefault || allApps.length || allDefaultProviders.length;
+    if (blocked) {
         const modelRow = await db.get('SELECT name FROM managed_models WHERE id = ?', [id]);
+        const parts = [`无法删除模型：${modelRow?.name || id}`];
+        if (usingAsDefault) parts.push(`- 厂商管理：${provider.name}（默认模型）`);
+        if (allDefaultProviders.length) parts.push(`- 其他厂商默认：${allDefaultProviders.map(p => p.name).join('、')}`);
+        if (allApps.length) parts.push(`- 应用管理：${allApps.map(a => a.name).join('、')}`);
         return res.status(409).json({
             error: 'Model is in use',
-            message: [
-                `无法删除模型：${modelRow?.name || id}`,
-                usingAsDefault ? `- 厂商管理：${provider.name}（默认模型）` : null,
-                apps.length ? `- 应用管理：${apps.map(a => a.name).join('、')}` : null
-            ].filter(Boolean).join('\n'),
+            message: parts.join('\n'),
             inUse: {
                 providerDefault: usingAsDefault ? { id: provider.id, name: provider.name } : null,
-                apps
+                otherProviders: allDefaultProviders,
+                apps: allApps
             }
         });
     }
