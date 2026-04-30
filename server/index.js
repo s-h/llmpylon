@@ -990,6 +990,15 @@ app.delete('/api/users/:id', async (req, res) => {
     res.sendStatus(200);
 });
 
+async function cleanupOrphanedModels() {
+    await db.exec(`
+        DELETE FROM managed_models
+        WHERE id NOT IN (SELECT modelId FROM provider_models)
+          AND id NOT IN (SELECT managedModelId FROM client_keys WHERE managedModelId IS NOT NULL)
+          AND id NOT IN (SELECT defaultModelId FROM providers WHERE defaultModelId IS NOT NULL)
+    `);
+}
+
 // Providers API
 app.get('/api/providers', async (req, res) => {
     const providers = await db.all('SELECT * FROM providers WHERE deletedAt IS NULL ORDER BY id ASC');
@@ -1063,13 +1072,10 @@ app.post('/api/providers/:id/models', async (req, res) => {
     const provider = await db.get('SELECT * FROM providers WHERE id = ?', [id]);
     if (!provider) return res.status(404).json({ error: 'Provider not found' });
 
-    let model = await db.get('SELECT * FROM managed_models WHERE name = ?', [name]);
-    if (!model) {
-        const r = await db.run('INSERT INTO managed_models (name) VALUES (?)', [name]);
-        model = { id: r.lastID, name };
-    }
-    await db.run('INSERT OR IGNORE INTO provider_models (providerId, modelId) VALUES (?, ?)', [id, model.id]);
-    res.status(201).json({ modelId: model.id });
+    const r = await db.run('INSERT INTO managed_models (name) VALUES (?)', [name]);
+    const modelId = r.lastID;
+    await db.run('INSERT INTO provider_models (providerId, modelId) VALUES (?, ?)', [id, modelId]);
+    res.status(201).json({ modelId });
 });
 
 app.put('/api/providers/:id/models/:modelId/activate', async (req, res) => {
@@ -1111,6 +1117,7 @@ app.delete('/api/providers/:id/models/:modelId', async (req, res) => {
     }
 
     await db.run('DELETE FROM provider_models WHERE providerId = ? AND modelId = ?', [id, modelId]);
+    await cleanupOrphanedModels();
     res.sendStatus(200);
 });
 
@@ -1149,6 +1156,7 @@ app.post('/api/providers/:id/restore', async (req, res) => {
 app.delete('/api/providers/:id/permanent', async (req, res) => {
     const { id } = req.params;
     await db.run('DELETE FROM provider_models WHERE providerId = ?', [id]);
+    await cleanupOrphanedModels();
     await db.run('DELETE FROM providers WHERE id = ?', [id]);
     res.sendStatus(200);
 });
@@ -1214,23 +1222,19 @@ app.post('/api/providers/import', async (req, res) => {
             );
             // 删除旧模型关联
             await db.run('DELETE FROM provider_models WHERE providerId = ?', [existingId]);
+            await cleanupOrphanedModels();
 
-            // 重新关联模型
+            // 重新关联模型（全部创建新 managed_models 条目）
+            const modelIds = new Map();
             for (const modelName of p.models || []) {
-                let model = await db.get('SELECT * FROM managed_models WHERE name = ?', [modelName]);
-                if (!model) {
-                    const r = await db.run('INSERT INTO managed_models (name) VALUES (?)', [modelName]);
-                    model = { id: r.lastID };
-                }
-                await db.run('INSERT OR IGNORE INTO provider_models (providerId, modelId) VALUES (?, ?)', [existingId, model.id]);
+                const r = await db.run('INSERT INTO managed_models (name) VALUES (?)', [modelName]);
+                modelIds.set(modelName, r.lastID);
+                await db.run('INSERT INTO provider_models (providerId, modelId) VALUES (?, ?)', [existingId, r.lastID]);
             }
 
             // 设置默认模型
-            if (p.defaultModel) {
-                const defaultModel = await db.get('SELECT id FROM managed_models WHERE name = ?', [p.defaultModel]);
-                if (defaultModel) {
-                    await db.run('UPDATE providers SET defaultModelId = ? WHERE id = ?', [defaultModel.id, existingId]);
-                }
+            if (p.defaultModel && modelIds.has(p.defaultModel)) {
+                await db.run('UPDATE providers SET defaultModelId = ? WHERE id = ?', [modelIds.get(p.defaultModel), existingId]);
             }
 
             results.push({ name: p.name, action: 'overwritten', id: existingId });
@@ -1244,22 +1248,17 @@ app.post('/api/providers/import', async (req, res) => {
         );
         const providerId = result.lastID;
 
-        // 关联模型
+        // 关联模型（全部创建新 managed_models 条目）
+        const modelIds = new Map();
         for (const modelName of p.models || []) {
-            let model = await db.get('SELECT * FROM managed_models WHERE name = ?', [modelName]);
-            if (!model) {
-                const r = await db.run('INSERT INTO managed_models (name) VALUES (?)', [modelName]);
-                model = { id: r.lastID };
-            }
-            await db.run('INSERT OR IGNORE INTO provider_models (providerId, modelId) VALUES (?, ?)', [providerId, model.id]);
+            const r = await db.run('INSERT INTO managed_models (name) VALUES (?)', [modelName]);
+            modelIds.set(modelName, r.lastID);
+            await db.run('INSERT INTO provider_models (providerId, modelId) VALUES (?, ?)', [providerId, r.lastID]);
         }
 
         // 设置默认模型
-        if (p.defaultModel) {
-            const defaultModel = await db.get('SELECT id FROM managed_models WHERE name = ?', [p.defaultModel]);
-            if (defaultModel) {
-                await db.run('UPDATE providers SET defaultModelId = ? WHERE id = ?', [defaultModel.id, providerId]);
-            }
+        if (p.defaultModel && modelIds.has(p.defaultModel)) {
+            await db.run('UPDATE providers SET defaultModelId = ? WHERE id = ?', [modelIds.get(p.defaultModel), providerId]);
         }
 
         results.push({ name: p.name, action: 'created', id: providerId });
@@ -1595,13 +1594,10 @@ app.post('/api/models', async (req, res) => {
     }
     if (!provider) return res.status(400).json({ error: 'No active provider' });
 
-    let model = await db.get('SELECT * FROM managed_models WHERE name = ?', [name]);
-    if (!model) {
-        const r = await db.run('INSERT INTO managed_models (name) VALUES (?)', [name]);
-        model = { id: r.lastID, name };
-    }
-    await db.run('INSERT OR IGNORE INTO provider_models (providerId, modelId) VALUES (?, ?)', [provider.id, model.id]);
-    res.status(201).json({ modelId: model.id });
+    const r = await db.run('INSERT INTO managed_models (name) VALUES (?)', [name]);
+    const modelId = r.lastID;
+    await db.run('INSERT INTO provider_models (providerId, modelId) VALUES (?, ?)', [provider.id, modelId]);
+    res.status(201).json({ modelId });
 });
 
 app.put('/api/models/:id/activate', async (req, res) => {
@@ -1658,6 +1654,7 @@ app.delete('/api/models/:id', async (req, res) => {
     }
 
     await db.run('DELETE FROM provider_models WHERE providerId = ? AND modelId = ?', [provider.id, id]);
+    await cleanupOrphanedModels();
     res.sendStatus(200);
 });
 
@@ -1667,8 +1664,6 @@ app.put('/api/models/:id', async (req, res) => {
     if (!name) return res.status(400).json({ error: 'Missing model name' });
     const model = await db.get('SELECT * FROM managed_models WHERE id = ?', [id]);
     if (!model) return res.status(404).json({ error: 'Model not found' });
-    const existing = await db.get('SELECT * FROM managed_models WHERE name = ? AND id != ?', [name, id]);
-    if (existing) return res.status(409).json({ error: `Model name '${name}' already exists` });
     await db.run('UPDATE managed_models SET name = ? WHERE id = ?', [name, id]);
     res.sendStatus(200);
 });
