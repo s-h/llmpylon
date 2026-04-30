@@ -59,12 +59,16 @@ If you **subscribe to more than one LLM vendor** and run **different AI agents /
 | | |
 | --- | --- |
 | **Multi-provider** | Configure multiple providers; switch the active one in one step |
-| **Protocols** | OpenAI-compatible and Anthropic-compatible flows |
+| **Protocol conversion** | OpenAI ↔ Anthropic bidirectional conversion (toggleable), streaming SSE and tool calling supported |
+| **Protocols** | Native OpenAI / Anthropic support; conversion mode rejects native requests from non-matching clients |
 | **Key custody** | Vendor keys stay on the server; clients use app keys only |
-| **Model rules** | Wildcard mapping (e.g. `gpt-4`* → real model id) |
+| **Model management** | Manage models per provider; rename models (case-sensitive) |
+| **Model rules** | Wildcard mapping (e.g. `gpt-4*` → real model id) |
 | **Per-app scope** | Bind provider and default model per app |
-| **`llmpylon` model name** | Resolved via app / provider / global defaults (**case-insensitive**) |
-| **Stats & logs** | Request stats and conversation logs (streaming, latency, tokens, etc.) |
+| **`llmpylon` model name** | Resolved via app → provider → global defaults (**case-insensitive**) |
+| **Provider recycle bin** | Soft-delete with restore or permanent delete; model associations preserved |
+| **Stats & logs** | Request stats and conversation logs (streaming, latency, tokens, etc.) with raw/converted comparison |
+| **Config import/export** | Per-provider or global export/import (includes conversion flags, recycle bin) |
 | **Deployment** | **Docker recommended**; persist SQLite on a volume |
 
 ---
@@ -148,15 +152,16 @@ The version string comes from root [`package.json`](package.json) (`version`) an
 
 | Path | Description |
 | --- | --- |
-| `POST /proxy/`* | LLM proxy entry |
+| `POST /proxy/*` | LLM proxy entry (OpenAI / Anthropic) |
 | `GET /healthz` | Health check (includes `version` / `name`) |
 | `POST /api/auth/login` | Admin login |
-| `/api/providers/`* | Providers |
-| `/api/keys/`* | Apps (client keys) |
-| `/api/models/*` | Models |
-| `/api/model-rules/*` | Model rules |
+| `/api/providers/*` | Providers (incl. conversion toggle, recycle bin, import/export) |
+| `/api/keys/*` | Apps (client keys) |
+| `/api/models/*` | Models (per-provider, rename support) |
+| `/api/model-rules/*` | Model rules (wildcard mapping) |
+| `/api/config/*` | Global config import/export (incl. recycle bin, conversion flags) |
 | `/api/stats` | Statistics |
-| `/api/logs` | Conversation logs |
+| `/api/logs` | Conversation logs (raw + converted request/response comparison) |
 
 For details, read the source and the in-app **Client help** page.
 

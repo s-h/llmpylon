@@ -1683,11 +1683,30 @@ onUnmounted(() => {
 
           <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-8">
             <h3 class="text-lg font-bold text-gray-900 mb-2">常见问题</h3>
-            <div class="space-y-3 text-sm text-gray-700">
+           <div class="space-y-3 text-sm text-gray-700">
               <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
                 <p class="font-bold text-gray-700 mb-1">为什么我设置了模型，但实际走了另一个模型？</p>
-                <p>若请求 model 不是 {{ MAGIC_PROXY_MODEL }}（大小写不敏感），可能命中了模型规则被强制转换；若为 {{ MAGIC_PROXY_MODEL }}，则会按“应用绑定模型/厂商默认模型”选择实际模型。</p>
+                <p>若请求 model 不是 {{ MAGIC_PROXY_MODEL }}（大小写不敏感），可能命中了模型规则被强制转换；若为 {{ MAGIC_PROXY_MODEL }}，则会按"应用绑定模型/厂商默认模型"选择实际模型。</p>
               </div>
+              <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
+                <p class="font-bold text-gray-700 mb-1">如何看实际路由到的厂商/模型？</p>
+                <p>进入"对话日志"查看每条请求的 <span class="font-mono text-xs">model</span> 与 <span class="font-mono text-xs">actualModel</span>，以及目标 URL。</p>
+              </div>
+              <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
+                <p class="font-bold text-gray-700 mb-1">协议转换是如何工作的？</p>
+                <p>在厂商编辑中开启"协议强制转换"后，该厂商只接受非原生协议的客户端请求。例如：OpenAI 厂商开启转换后，只接受 Anthropic 协议的客户端请求，代理会自动进行双向转换（包括流式 SSE 转换和工具调用 Tool Call）。转换前后的请求/响应可在对话日志详情中对比查看。</p>
+              </div>
+              <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
+                <p class="font-bold text-gray-700 mb-1">工具调用（Tool Call / Function Calling）支持吗？</p>
+                <p>支持。协议转换模式下，OpenAI 与 Anthropic 的工具调用双向自动转换。对话日志详情中可通过折叠区域查看请求/响应的原始格式和转换后格式。</p>
+              </div>
+              <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
+                <p class="font-bold text-gray-700 mb-1">如何备份和恢复配置？</p>
+                <p>厂商管理页支持单个厂商的导入导出。配置管理页支持全局配置导出（含厂商、模型、应用、规则；不含管理员账号密码）和全局配置导入（覆盖式）。已删除到回收站的厂商也会包含在导出中。</p>
+              </div>
+            </div>
+          </div>
+        </div>
               <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
                 <p class="font-bold text-gray-700 mb-1">如何看实际路由到的厂商/模型？</p>
                 <p>进入“对话日志”查看每条请求的 <span class="font-mono text-xs">model</span> 与 <span class="font-mono text-xs">actualModel</span>，以及目标 URL。</p>
