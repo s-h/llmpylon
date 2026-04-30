@@ -1623,93 +1623,69 @@ onUnmounted(() => {
       <main class="flex-1 overflow-auto p-4 sm:p-6 lg:p-8">
         <div v-if="activeTab === 'help'" class="space-y-6">
           <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-8">
-            <h3 class="text-lg font-bold text-gray-900 mb-2">快速开始</h3>
-            <p class="text-sm text-gray-600 leading-relaxed">llmPylon 提供统一代理入口，客户端统一指向同一个 Base URL，通过模型名与后台策略决定最终路由到的厂商与模型。</p>
-            <div class="rounded-xl border border-gray-200 bg-gray-50 p-5 mt-6">
-              <p class="text-[10px] text-gray-400 font-bold uppercase mb-3">客户端设置</p>
-              <div class="space-y-2">
+            <h3 class="text-lg font-bold text-gray-900 mb-2">客户端设置</h3>
+            <div class="rounded-xl border border-gray-200 bg-gray-50 p-5 mt-4">
+              <div class="space-y-3">
                 <div class="flex items-center gap-2">
                   <span class="px-2 py-1 bg-purple-50 text-purple-700 rounded text-[10px] font-bold uppercase tracking-tight">Base URL</span>
-                  <code class="text-xs font-mono text-gray-700 break-all">http://你的服务器ip:3000/proxy</code>
+                  <code class="text-xs font-mono text-gray-700 break-all">http://你的服务器IP:3000/proxy</code>
                 </div>
                 <div class="flex items-center gap-2">
                   <span class="px-2 py-1 bg-purple-50 text-purple-700 rounded text-[10px] font-bold uppercase tracking-tight">API Key</span>
-                  <code class="text-xs font-mono text-gray-700 break-all">使用平台创建的应用 key</code>
+                  <code class="text-xs font-mono text-gray-700 break-all">在应用管理中创建应用，复制生成的 key</code>
                 </div>
                 <div class="flex items-center gap-2">
                   <span class="px-2 py-1 bg-purple-50 text-purple-700 rounded text-[10px] font-bold uppercase tracking-tight">Model</span>
                   <code class="text-xs font-mono text-gray-700 break-all">建议设置为 {{ MAGIC_PROXY_MODEL }}（大小写不敏感）</code>
                 </div>
               </div>
-              <p class="text-[10px] text-gray-500 mt-3 leading-relaxed">建议客户端模型统一设置为 <span class="font-mono">{{ MAGIC_PROXY_MODEL }}</span>（大小写不敏感），由代理平台统一管理模型与厂商切换。</p>
-            </div>
-            <div class="rounded-xl border border-gray-200 bg-gray-50 p-5 mt-6">
-              <p class="text-xs font-bold text-gray-500 mb-2">{{ MAGIC_PROXY_MODEL }} 是什么？</p>
-              <p class="text-sm text-gray-700 leading-relaxed">当客户端把 Model 设置为 <span class="font-mono text-xs">{{ MAGIC_PROXY_MODEL }}</span>（大小写不敏感）时，平台会自动选择实际模型：优先使用应用绑定模型，其次使用当前厂商默认模型。你可以在“厂商管理”快速切换当前生效厂商（默认厂商）。</p>
             </div>
           </div>
 
           <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-8">
-            <h3 class="text-lg font-bold text-gray-900 mb-2">如何获取客户端 Key</h3>
-            <div class="space-y-4 text-sm text-gray-700 leading-relaxed">
+            <h3 class="text-lg font-bold text-gray-900 mb-2">使用方法</h3>
+            <div class="space-y-3 text-sm text-gray-700">
               <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
-                <p class="text-xs font-bold text-gray-500 mb-2">创建应用并自动生成 Key</p>
-                <p>进入“应用管理”点击“创建应用”，平台会自动生成一个应用 key。客户端请求时使用该 key 作为 API Key。</p>
+                <p class="text-xs font-bold text-gray-500 mb-1">切换厂商和默认模型</p>
+                <p>在"厂商管理"中点击厂商卡片即可切换生效厂商；在"模型管理"中选择厂商后点击模型卡片设置该厂商的默认模型。客户端使用 {{ MAGIC_PROXY_MODEL }} 作为 model 时会自动路由。</p>
               </div>
               <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
-                <p class="text-xs font-bold text-gray-500 mb-2">厂商 Key 由平台统一托管</p>
-                <p>在“厂商管理”配置各厂商的托管 API Key。客户端只需要使用平台生成的应用 key，不直接持有厂商 key。</p>
-              </div>
-            </div>
-          </div>
-
-          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-8">
-            <h3 class="text-lg font-bold text-gray-900 mb-2">对应用指定厂商与模型</h3>
-            <div class="space-y-4 text-sm text-gray-700 leading-relaxed">
-              <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
-                <p class="text-xs font-bold text-gray-500 mb-2">应用绑定（固定路由）</p>
-                <p>在“应用管理”中可以为某个应用单独绑定厂商与模型。绑定后，该应用的请求将优先使用自己的配置，不会受“厂商管理/模型管理”的切换影响。</p>
+                <p class="text-xs font-bold text-gray-500 mb-1">创建应用并绑定模型</p>
+                <p>在"应用管理"中创建应用获得客户端 Key。可为每个应用单独绑定厂商和模型，绑定后不受全局切换影响。</p>
               </div>
               <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
-                <p class="text-xs font-bold text-gray-500 mb-2">默认路由（可快速切换）</p>
-                <p>若应用未绑定厂商与模型，则使用“厂商管理”当前生效厂商 + 该厂商默认模型。你可以在厂商管理中快速切换当前厂商，实现全局默认路由切换。</p>
+                <p class="text-xs font-bold text-gray-500 mb-1">模型规则强制映射</p>
+                <p>在"模型规则"中添加规则（支持 * 通配符，大小写敏感），请求的 model 字段命中规则后自动替换为目标模型。</p>
               </div>
               <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
-                <p class="text-xs font-bold text-gray-500 mb-2">模型规则（强制转换）</p>
-                <p>当客户端请求 Model 不是 {{ MAGIC_PROXY_MODEL }}（大小写不敏感）时，会先匹配“模型规则”进行强制转换（支持 * 通配符，大小写敏感）。客户端使用 {{ MAGIC_PROXY_MODEL }} 时不参与规则匹配。</p>
+                <p class="text-xs font-bold text-gray-500 mb-1">开启协议转换</p>
+                <p>编辑厂商，打开"协议强制转换"开关。例如：OpenAI 厂商开启后，客户端需使用 Anthropic 协议的 endpoint（<code>/proxy/v1/messages</code>）。</p>
+              </div>
+              <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
+                <p class="text-xs font-bold text-gray-500 mb-1">删除/恢复厂商</p>
+                <p>删除厂商时移入回收站（可恢复），在厂商管理页点击"回收站"进入。彻底删除从这里操作。</p>
+              </div>
+              <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
+                <p class="text-xs font-bold text-gray-500 mb-1">备份配置</p>
+                <p>厂商管理页可导出/导入单个厂商。配置管理页可导出/导入全局配置（含厂商、模型、应用、规则、回收站内容）。</p>
               </div>
             </div>
           </div>
 
           <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-8">
-            <h3 class="text-lg font-bold text-gray-900 mb-2">常见问题</h3>
-           <div class="space-y-3 text-sm text-gray-700">
+            <h3 class="text-lg font-bold text-gray-900 mb-2">排查问题</h3>
+            <div class="space-y-3 text-sm text-gray-700">
               <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
-                <p class="font-bold text-gray-700 mb-1">为什么我设置了模型，但实际走了另一个模型？</p>
-                <p>若请求 model 不是 {{ MAGIC_PROXY_MODEL }}（大小写不敏感），可能命中了模型规则被强制转换；若为 {{ MAGIC_PROXY_MODEL }}，则会按"应用绑定模型/厂商默认模型"选择实际模型。</p>
+                <p class="text-xs font-bold text-gray-500 mb-1">模型路由不符合预期</p>
+                <p>进入"对话日志"，查看请求的 <span class="font-mono text-xs">model → actualModel</span> 和目标 URL，确认模型规则和应用绑定是否正确。</p>
               </div>
               <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
-                <p class="font-bold text-gray-700 mb-1">如何看实际路由到的厂商/模型？</p>
-                <p>进入"对话日志"查看每条请求的 <span class="font-mono text-xs">model</span> 与 <span class="font-mono text-xs">actualModel</span>，以及目标 URL。</p>
+                <p class="text-xs font-bold text-gray-500 mb-1">协议错误</p>
+                <p>日志状态显示"协议错误"时，检查厂商的协议转换开关与客户端使用的 endpoint 是否匹配：转换开启时使用非原生协议，关闭时使用原生协议。</p>
               </div>
               <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
-                <p class="font-bold text-gray-700 mb-1">协议转换是如何工作的？</p>
-                <p>在厂商编辑中开启"协议强制转换"后，该厂商只接受非原生协议的客户端请求。例如：OpenAI 厂商开启转换后，只接受 Anthropic 协议的客户端请求，代理会自动进行双向转换（包括流式 SSE 转换和工具调用 Tool Call）。转换前后的请求/响应可在对话日志详情中对比查看。</p>
-              </div>
-              <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
-                <p class="font-bold text-gray-700 mb-1">工具调用（Tool Call / Function Calling）支持吗？</p>
-                <p>支持。协议转换模式下，OpenAI 与 Anthropic 的工具调用双向自动转换。对话日志详情中可通过折叠区域查看请求/响应的原始格式和转换后格式。</p>
-              </div>
-              <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
-                <p class="font-bold text-gray-700 mb-1">如何备份和恢复配置？</p>
-                <p>厂商管理页支持单个厂商的导入导出。配置管理页支持全局配置导出（含厂商、模型、应用、规则；不含管理员账号密码）和全局配置导入（覆盖式）。已删除到回收站的厂商也会包含在导出中。</p>
-              </div>
-            </div>
-          </div>
-        </div>
-              <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
-                <p class="font-bold text-gray-700 mb-1">如何看实际路由到的厂商/模型？</p>
-                <p>进入“对话日志”查看每条请求的 <span class="font-mono text-xs">model</span> 与 <span class="font-mono text-xs">actualModel</span>，以及目标 URL。</p>
+                <p class="text-xs font-bold text-gray-500 mb-1">流中断</p>
+                <p>日志状态显示"流中断"时，可能是上游响应异常或网络波动。展开对话日志详情可查看原始上游响应和转换后响应。</p>
               </div>
             </div>
           </div>
