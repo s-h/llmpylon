@@ -1201,7 +1201,7 @@ const activateModel = async (id) => {
 };
 
 const deleteModel = async (id) => {
-  const providerName = providers.find(p => p.id === selectedModelProviderId.value)?.name || '当前厂商';
+  const providerName = providers.value.find(p => p.id === selectedModelProviderId.value)?.name || '当前厂商';
   if (!confirm(`确定要从"${providerName}"中移除这个模型吗？`)) return;
   try {
     const params = {};
