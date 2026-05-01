@@ -1022,6 +1022,24 @@ app.get('/api/providers', async (req, res) => {
     res.json(enriched);
 });
 
+app.put('/api/providers/reorder', async (req, res) => {
+    const { orderedIds } = req.body || {};
+    if (!Array.isArray(orderedIds)) return res.status(400).json({ error: 'orderedIds is required' });
+    for (let i = 0; i < orderedIds.length; i++) {
+        await db.run('UPDATE providers SET position = ? WHERE id = ?', [i, orderedIds[i]]);
+    }
+    res.sendStatus(200);
+});
+
+app.put('/api/models/reorder', async (req, res) => {
+    const { orderedIds } = req.body || {};
+    if (!Array.isArray(orderedIds)) return res.status(400).json({ error: 'orderedIds is required' });
+    for (let i = 0; i < orderedIds.length; i++) {
+        await db.run('UPDATE managed_models SET position = ? WHERE id = ?', [i, orderedIds[i]]);
+    }
+    res.sendStatus(200);
+});
+
 app.post('/api/providers', async (req, res) => {
     const { name, type, baseUrl, apiKey, protocolConvert } = req.body;
     const result = await db.run(
@@ -1669,24 +1687,6 @@ app.put('/api/models/:id', async (req, res) => {
     const model = await db.get('SELECT * FROM managed_models WHERE id = ?', [id]);
     if (!model) return res.status(404).json({ error: 'Model not found' });
     await db.run('UPDATE managed_models SET name = ? WHERE id = ?', [name, id]);
-    res.sendStatus(200);
-});
-
-app.put('/api/providers/reorder', async (req, res) => {
-    const { orderedIds } = req.body || {};
-    if (!Array.isArray(orderedIds)) return res.status(400).json({ error: 'orderedIds is required' });
-    for (let i = 0; i < orderedIds.length; i++) {
-        await db.run('UPDATE providers SET position = ? WHERE id = ?', [i, orderedIds[i]]);
-    }
-    res.sendStatus(200);
-});
-
-app.put('/api/models/reorder', async (req, res) => {
-    const { orderedIds } = req.body || {};
-    if (!Array.isArray(orderedIds)) return res.status(400).json({ error: 'orderedIds is required' });
-    for (let i = 0; i < orderedIds.length; i++) {
-        await db.run('UPDATE managed_models SET position = ? WHERE id = ?', [i, orderedIds[i]]);
-    }
     res.sendStatus(200);
 });
 

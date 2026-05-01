@@ -263,9 +263,11 @@ function persistViewMode() {
 // Provider drag state
 const providerDragIndex = ref(null);
 
-function onProviderDragStart(_, idx) {
+function onProviderDragStart(e, idx) {
   if (providerSortBy.value !== 'custom') return;
   providerDragIndex.value = idx;
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('text/plain', String(idx));
 }
 
 function onProviderDragOver(e) {
@@ -282,15 +284,24 @@ function onProviderDrop(e, idx) {
   list.splice(idx, 0, moved);
   const orderedIds = list.map(p => p.id);
   providerDragIndex.value = null;
-  axios.put(`${API_BASE}/providers/reorder`, { orderedIds }).then(() => fetchProviders());
+  axios.put(`${API_BASE}/providers/reorder`, { orderedIds }).then(() => fetchProviders()).catch(e => {
+    const msg = e.response?.data?.error || e.message;
+    console.error('Reorder failed:', msg);
+  });
+}
+
+function onProviderDragEnd() {
+  providerDragIndex.value = null;
 }
 
 // Model drag state
 const modelDragIndex = ref(null);
 
-function onModelDragStart(_, idx) {
+function onModelDragStart(e, idx) {
   if (modelSortBy.value !== 'custom') return;
   modelDragIndex.value = idx;
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('text/plain', String(idx));
 }
 
 function onModelDragOver(e) {
@@ -307,7 +318,14 @@ function onModelDrop(e, idx) {
   list.splice(idx, 0, moved);
   const orderedIds = list.map(m => m.id);
   modelDragIndex.value = null;
-  axios.put(`${API_BASE}/models/reorder`, { orderedIds }).then(() => fetchManagedModels(selectedModelProviderId.value || undefined));
+  axios.put(`${API_BASE}/models/reorder`, { orderedIds }).then(() => fetchManagedModels(selectedModelProviderId.value || undefined)).catch(e => {
+    const msg = e.response?.data?.error || e.message;
+    console.error('Reorder failed:', msg);
+  });
+}
+
+function onModelDragEnd() {
+  modelDragIndex.value = null;
 }
 
 const statsRange = ref('30d');
@@ -1865,6 +1883,7 @@ onUnmounted(() => {
               @click="!p.active && activateProvider(p.id)"
               :draggable="providerSortBy === 'custom'"
               @dragstart="onProviderDragStart($event, idx)"
+              @dragend="onProviderDragEnd"
               @dragover="onProviderDragOver"
               @drop="onProviderDrop($event, idx)"
               class="bg-white p-6 rounded-xl border border-gray-200 shadow-sm hover:shadow-md transition-shadow relative overflow-hidden cursor-pointer"
@@ -1965,6 +1984,7 @@ onUnmounted(() => {
               @click="!p.active && activateProvider(p.id)"
               :draggable="providerSortBy === 'custom'"
               @dragstart="onProviderDragStart($event, idx)"
+              @dragend="onProviderDragEnd"
               @dragover="onProviderDragOver"
               @drop="onProviderDrop($event, idx)"
               class="flex items-center gap-4 px-5 py-3 border-b border-gray-100 last:border-b-0 hover:bg-gray-50 transition-colors cursor-pointer"
@@ -2167,6 +2187,7 @@ onUnmounted(() => {
               :key="m.id"
               :draggable="modelSortBy === 'custom'"
               @dragstart="onModelDragStart($event, idx)"
+              @dragend="onModelDragEnd"
               @dragover="onModelDragOver"
               @drop="onModelDrop($event, idx)"
               class="bg-white p-6 rounded-xl border border-gray-200 shadow-sm hover:shadow-md transition-shadow relative overflow-hidden cursor-pointer"
@@ -2245,6 +2266,7 @@ onUnmounted(() => {
               :key="m.id"
               :draggable="modelSortBy === 'custom'"
               @dragstart="onModelDragStart($event, idx)"
+              @dragend="onModelDragEnd"
               @dragover="onModelDragOver"
               @drop="onModelDrop($event, idx)"
               @click="activeProviderDefaultModelId !== m.id && activateModel(m.id)"
