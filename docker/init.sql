@@ -9,13 +9,19 @@ CREATE TABLE IF NOT EXISTS providers (
   baseUrl TEXT NOT NULL,
   apiKey TEXT,
   defaultModelId INTEGER,
-  active INTEGER DEFAULT 0
+  active INTEGER DEFAULT 0,
+  protocolConvert INTEGER DEFAULT 0,
+  deletedAt DATETIME,
+  createdAt DATETIME,
+  position INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS managed_models (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
-  active INTEGER DEFAULT 0
+  active INTEGER DEFAULT 0,
+  createdAt DATETIME,
+  position INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS provider_models (

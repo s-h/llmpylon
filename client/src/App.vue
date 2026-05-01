@@ -20,6 +20,9 @@ import {
   ChevronDown,
   ArrowRightLeft,
   LayoutGrid,
+  List,
+  ArrowUpDown,
+  GripVertical,
   Cpu,
   BarChart3,
   Users,
@@ -241,6 +244,72 @@ const appSettings = ref({
 const appSettingsSaving = ref(false);
 const nowMs = ref(Date.now());
 
+const providerViewMode = ref(localStorage.getItem('providerViewMode') || 'grid');
+const providerSortBy = ref(localStorage.getItem('providerSortBy') || 'custom');
+const providerSortOrder = ref(localStorage.getItem('providerSortOrder') || 'asc');
+const modelViewMode = ref(localStorage.getItem('modelViewMode') || 'grid');
+const modelSortBy = ref(localStorage.getItem('modelSortBy') || 'custom');
+const modelSortOrder = ref(localStorage.getItem('modelSortOrder') || 'asc');
+
+function persistViewMode() {
+  localStorage.setItem('providerViewMode', providerViewMode.value);
+  localStorage.setItem('providerSortBy', providerSortBy.value);
+  localStorage.setItem('providerSortOrder', providerSortOrder.value);
+  localStorage.setItem('modelViewMode', modelViewMode.value);
+  localStorage.setItem('modelSortBy', modelSortBy.value);
+  localStorage.setItem('modelSortOrder', modelSortOrder.value);
+}
+
+// Provider drag state
+const providerDragIndex = ref(null);
+
+function onProviderDragStart(_, idx) {
+  if (providerSortBy.value !== 'custom') return;
+  providerDragIndex.value = idx;
+}
+
+function onProviderDragOver(e) {
+  e.preventDefault();
+}
+
+function onProviderDrop(e, idx) {
+  e.preventDefault();
+  if (providerSortBy.value !== 'custom') return;
+  const from = providerDragIndex.value;
+  if (from === null || from === idx) return;
+  const list = [...sortedProviders.value];
+  const [moved] = list.splice(from, 1);
+  list.splice(idx, 0, moved);
+  const orderedIds = list.map(p => p.id);
+  providerDragIndex.value = null;
+  axios.put(`${API_BASE}/providers/reorder`, { orderedIds }).then(() => fetchProviders());
+}
+
+// Model drag state
+const modelDragIndex = ref(null);
+
+function onModelDragStart(_, idx) {
+  if (modelSortBy.value !== 'custom') return;
+  modelDragIndex.value = idx;
+}
+
+function onModelDragOver(e) {
+  e.preventDefault();
+}
+
+function onModelDrop(e, idx) {
+  e.preventDefault();
+  if (modelSortBy.value !== 'custom') return;
+  const from = modelDragIndex.value;
+  if (from === null || from === idx) return;
+  const list = [...sortedManagedModels.value];
+  const [moved] = list.splice(from, 1);
+  list.splice(idx, 0, moved);
+  const orderedIds = list.map(m => m.id);
+  modelDragIndex.value = null;
+  axios.put(`${API_BASE}/models/reorder`, { orderedIds }).then(() => fetchManagedModels(selectedModelProviderId.value || undefined));
+}
+
 const statsRange = ref('30d');
 const statsProviderId = ref('all');
 const statsLoading = ref(false);
@@ -318,6 +387,37 @@ const activeDefaultModel = computed(() => {
 });
 
 const enabledModelRulesCount = computed(() => modelRules.value.filter(r => r.enabled).length);
+
+function sortByField(list, field, order) {
+  const sorted = [...list].sort((a, b) => {
+    let va, vb;
+    if (field === 'name') {
+      va = (a.name || '').toLowerCase();
+      vb = (b.name || '').toLowerCase();
+      return va.localeCompare(vb);
+    }
+    if (field === 'createdAt') {
+      va = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+      vb = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+      return va - vb;
+    }
+    // custom: sort by position
+    va = a.position ?? 0;
+    vb = b.position ?? 0;
+    if (va === vb) return (a.id || 0) - (b.id || 0);
+    return va - vb;
+  });
+  if (order === 'desc') sorted.reverse();
+  return sorted;
+}
+
+const sortedProviders = computed(() => {
+  return sortByField(providers.value, providerSortBy.value, providerSortOrder.value);
+});
+
+const sortedManagedModels = computed(() => {
+  return sortByField(managedModels.value, modelSortBy.value, modelSortOrder.value);
+});
 
 const copyModelNamesForSelect = computed(() => {
   const out = [];
@@ -1737,15 +1837,42 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <!-- Normal provider list -->
-          <div v-if="!showRecycleBin" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+          <!-- Sort & view controls -->
+          <div v-if="!showRecycleBin" class="flex flex-wrap items-center gap-2">
+            <select v-model="providerSortBy" @change="persistViewMode()" class="text-xs px-3 py-1.5 border border-gray-200 rounded-lg bg-white text-gray-600 outline-none">
+              <option value="custom">自定义排序</option>
+              <option value="name">按名称</option>
+              <option value="createdAt">按创建时间</option>
+            </select>
+            <button @click="providerSortOrder = providerSortOrder === 'asc' ? 'desc' : 'asc'; persistViewMode()" class="p-1.5 text-gray-500 hover:bg-gray-100 rounded-lg transition-colors" :title="providerSortOrder === 'asc' ? '升序' : '降序'">
+              <ArrowUpDown class="w-4 h-4" :class="providerSortOrder === 'desc' ? 'rotate-180' : ''" />
+            </button>
+            <div class="flex ml-auto gap-1 bg-gray-100 rounded-lg p-0.5">
+              <button @click="providerViewMode = 'grid'; persistViewMode()" class="p-1.5 rounded-md transition-colors" :class="providerViewMode === 'grid' ? 'bg-white shadow text-blue-600' : 'text-gray-400 hover:text-gray-600'">
+                <LayoutGrid class="w-4 h-4" />
+              </button>
+              <button @click="providerViewMode = 'list'; persistViewMode()" class="p-1.5 rounded-md transition-colors" :class="providerViewMode === 'list' ? 'bg-white shadow text-blue-600' : 'text-gray-400 hover:text-gray-600'">
+                <List class="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+
+          <!-- Grid view -->
+          <div v-if="!showRecycleBin && providerViewMode === 'grid'" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
             <div 
-              v-for="p in providers" 
+              v-for="(p, idx) in sortedProviders" 
               :key="p.id"
               @click="!p.active && activateProvider(p.id)"
+              :draggable="providerSortBy === 'custom'"
+              @dragstart="onProviderDragStart($event, idx)"
+              @dragover="onProviderDragOver"
+              @drop="onProviderDrop($event, idx)"
               class="bg-white p-6 rounded-xl border border-gray-200 shadow-sm hover:shadow-md transition-shadow relative overflow-hidden cursor-pointer"
-              :class="{'border-blue-500 ring-1 ring-blue-500': p.active}"
+              :class="{'border-blue-500 ring-1 ring-blue-500': p.active, 'opacity-50': providerDragIndex === idx}"
             >
+              <div v-if="providerSortBy === 'custom'" class="absolute top-2 left-2 text-gray-300 cursor-grab active:cursor-grabbing">
+                <GripVertical class="w-4 h-4" />
+              </div>
               <div v-if="p.active" class="absolute top-0 right-0 bg-blue-500 text-white px-2 py-1 text-[10px] font-bold rounded-bl-lg flex items-center gap-1">
                 <Check class="w-3 h-3" /> 生效中
               </div>
@@ -1824,6 +1951,44 @@ onUnmounted(() => {
                   <span v-if="!(p.models || []).length" class="text-gray-400 text-xs italic">未添加</span>
                 </div>
               </div>
+            </div>
+          </div>
+          <div v-if="!showRecycleBin && providerViewMode === 'grid' && !providers.length" class="text-center py-12 bg-white rounded-xl border border-gray-200 shadow-sm text-gray-400 text-sm">
+            暂无厂商，点击"添加厂商"开始
+          </div>
+
+          <!-- List view -->
+          <div v-if="!showRecycleBin && providerViewMode === 'list'" class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+            <div 
+              v-for="(p, idx) in sortedProviders" 
+              :key="p.id"
+              @click="!p.active && activateProvider(p.id)"
+              :draggable="providerSortBy === 'custom'"
+              @dragstart="onProviderDragStart($event, idx)"
+              @dragover="onProviderDragOver"
+              @drop="onProviderDrop($event, idx)"
+              class="flex items-center gap-4 px-5 py-3 border-b border-gray-100 last:border-b-0 hover:bg-gray-50 transition-colors cursor-pointer"
+              :class="{'bg-blue-50/50 border-l-2 border-l-blue-500': p.active, 'opacity-50': providerDragIndex === idx}"
+            >
+              <span v-if="providerSortBy === 'custom'" class="text-gray-300 cursor-grab shrink-0"><GripVertical class="w-4 h-4" /></span>
+              <div class="flex-1 min-w-0">
+                <div class="flex items-center gap-2">
+                  <span class="font-bold text-sm truncate">{{ p.name }}</span>
+                  <span v-if="p.active" class="shrink-0 px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded text-[10px] font-bold">生效中</span>
+                  <span class="shrink-0 px-1.5 py-0.5 bg-gray-100 text-gray-600 rounded text-[10px] uppercase">{{ p.type }}</span>
+                  <span v-if="p.protocolConvert" class="shrink-0 px-1.5 py-0.5 bg-amber-50 text-amber-700 rounded text-[10px] border border-amber-200">转换</span>
+                </div>
+                <div class="text-[10px] text-gray-400 truncate mt-0.5">{{ p.baseUrl }}</div>
+              </div>
+              <div class="flex gap-1 shrink-0">
+                <button @click.stop="openEditModal(p)" class="p-1.5 text-blue-600 hover:bg-blue-50 rounded-lg" title="编辑"><Pencil class="w-4 h-4" /></button>
+                <button @click.stop="openCopyProviderDialog(p)" class="p-1.5 text-slate-600 hover:bg-slate-100 rounded-lg" title="复制"><Copy class="w-4 h-4" /></button>
+                <button v-if="!p.active" @click.stop="activateProvider(p.id)" class="p-1.5 text-green-600 hover:bg-green-50 rounded-lg" title="生效"><CheckCircle2 class="w-4 h-4" /></button>
+                <button @click.stop="deleteProvider(p.id)" class="p-1.5 text-red-600 hover:bg-red-50 rounded-lg" title="删除"><Trash2 class="w-4 h-4" /></button>
+              </div>
+            </div>
+            <div v-if="!providers.length" class="text-center py-12 text-gray-400 text-sm">
+              暂无厂商
             </div>
           </div>
 
@@ -1975,16 +2140,42 @@ onUnmounted(() => {
               </select>
               <span v-if="activeProviderId" class="text-[10px] text-gray-400">默认模型：{{ activeDefaultModel?.name || '未设置' }}</span>
             </div>
+            <!-- Sort & view controls -->
+            <div class="flex flex-wrap items-center gap-2">
+              <select v-model="modelSortBy" @change="persistViewMode()" class="text-xs px-3 py-1.5 border border-gray-200 rounded-lg bg-white text-gray-600 outline-none">
+                <option value="custom">自定义排序</option>
+                <option value="name">按名称</option>
+                <option value="createdAt">按创建时间</option>
+              </select>
+              <button @click="modelSortOrder = modelSortOrder === 'asc' ? 'desc' : 'asc'; persistViewMode()" class="p-1.5 text-gray-500 hover:bg-gray-100 rounded-lg transition-colors" :title="modelSortOrder === 'asc' ? '升序' : '降序'">
+                <ArrowUpDown class="w-4 h-4" :class="modelSortOrder === 'desc' ? 'rotate-180' : ''" />
+              </button>
+              <div class="flex ml-auto gap-1 bg-gray-100 rounded-lg p-0.5">
+                <button @click="modelViewMode = 'grid'; persistViewMode()" class="p-1.5 rounded-md transition-colors" :class="modelViewMode === 'grid' ? 'bg-white shadow text-blue-600' : 'text-gray-400 hover:text-gray-600'">
+                  <LayoutGrid class="w-4 h-4" />
+                </button>
+                <button @click="modelViewMode = 'list'; persistViewMode()" class="p-1.5 rounded-md transition-colors" :class="modelViewMode === 'list' ? 'bg-white shadow text-blue-600' : 'text-gray-400 hover:text-gray-600'">
+                  <List class="w-4 h-4" />
+                </button>
+              </div>
+            </div>
           </div>
 
-          <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+          <div v-if="modelViewMode === 'grid'" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
             <div 
-              v-for="m in managedModels" 
+              v-for="(m, idx) in sortedManagedModels" 
               :key="m.id"
+              :draggable="modelSortBy === 'custom'"
+              @dragstart="onModelDragStart($event, idx)"
+              @dragover="onModelDragOver"
+              @drop="onModelDrop($event, idx)"
               class="bg-white p-6 rounded-xl border border-gray-200 shadow-sm hover:shadow-md transition-shadow relative overflow-hidden cursor-pointer"
-              :class="{'border-blue-500 ring-1 ring-blue-500': activeProviderDefaultModelId === m.id}"
+              :class="{'border-blue-500 ring-1 ring-blue-500': activeProviderDefaultModelId === m.id, 'opacity-50': modelDragIndex === idx}"
               @click="activeProviderDefaultModelId !== m.id && activateModel(m.id)"
             >
+              <div v-if="modelSortBy === 'custom'" class="absolute top-2 left-2 text-gray-300 cursor-grab active:cursor-grabbing">
+                <GripVertical class="w-4 h-4" />
+              </div>
               <div v-if="activeProviderDefaultModelId === m.id" class="absolute top-0 right-0 bg-blue-500 text-white px-2 py-1 text-[10px] font-bold rounded-bl-lg flex items-center gap-1">
                 <Check class="w-3 h-3" /> 默认
               </div>
@@ -2039,8 +2230,50 @@ onUnmounted(() => {
               </div>
               <p class="text-[10px] text-gray-400">客户端请求模型为 <span class="font-bold text-green-600">{{ MAGIC_PROXY_MODEL }}</span>（大小写不敏感）时，若应用未指定模型，将使用当前厂商的默认模型。</p>
             </div>
-            <div v-if="!managedModels.length" class="col-span-full text-center py-10 text-gray-400 text-sm">
-              该厂商暂无模型，请添加模型
+             <div v-if="!managedModels.length" class="col-span-full text-center py-10 text-gray-400 text-sm">
+               该厂商暂无模型，请添加模型
+             </div>
+          </div>
+          <div v-if="modelViewMode === 'grid' && !managedModels.length" class="text-center py-12 bg-white rounded-xl border border-gray-200 shadow-sm text-gray-400 text-sm">
+            该厂商暂无模型，请添加模型
+          </div>
+
+          <!-- List view -->
+          <div v-if="modelViewMode === 'list'" class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+            <div 
+              v-for="(m, idx) in sortedManagedModels" 
+              :key="m.id"
+              :draggable="modelSortBy === 'custom'"
+              @dragstart="onModelDragStart($event, idx)"
+              @dragover="onModelDragOver"
+              @drop="onModelDrop($event, idx)"
+              @click="activeProviderDefaultModelId !== m.id && activateModel(m.id)"
+              class="flex items-center gap-4 px-5 py-3 border-b border-gray-100 last:border-b-0 hover:bg-gray-50 transition-colors cursor-pointer"
+              :class="{'bg-blue-50/50 border-l-2 border-l-blue-500': activeProviderDefaultModelId === m.id, 'opacity-50': modelDragIndex === idx}"
+            >
+              <span v-if="modelSortBy === 'custom'" class="text-gray-300 cursor-grab shrink-0"><GripVertical class="w-4 h-4" /></span>
+              <div v-if="editingModel && editingModel.id === m.id" class="flex flex-1 items-center gap-3">
+                <input v-model="editingModelName" @keyup.enter="saveEditModel" @keyup.escape="cancelEditModel" class="px-3 py-1.5 border border-gray-300 rounded text-sm font-bold outline-none focus:ring-2 focus:ring-blue-500" placeholder="模型名称" autofocus @click.stop />
+                <button @click.stop="saveEditModel" class="px-3 py-1 bg-blue-600 text-white rounded text-xs font-bold">保存</button>
+                <button @click.stop="cancelEditModel" class="px-3 py-1 bg-gray-100 text-gray-600 rounded text-xs font-bold">取消</button>
+              </div>
+              <template v-else>
+                <div class="flex-1 min-w-0">
+                  <div class="flex items-center gap-2">
+                    <span class="font-bold text-sm truncate">{{ m.name }}</span>
+                    <span v-if="activeProviderDefaultModelId === m.id" class="shrink-0 px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded text-[10px] font-bold">默认</span>
+                  </div>
+                  <div v-if="m.createdAt" class="text-[10px] text-gray-400 mt-0.5">创建于 {{ formatTime(m.createdAt) }}</div>
+                </div>
+                <div class="flex gap-1 shrink-0">
+                  <button @click.stop="startEditModel(m)" class="p-1.5 text-blue-600 hover:bg-blue-50 rounded-lg" title="编辑"><Pencil class="w-4 h-4" /></button>
+                  <button v-if="activeProviderDefaultModelId !== m.id" @click.stop="activateModel(m.id)" class="p-1.5 text-green-600 hover:bg-green-50 rounded-lg" title="默认"><CheckCircle2 class="w-4 h-4" /></button>
+                  <button @click.stop="deleteModel(m.id)" class="p-1.5 text-red-600 hover:bg-red-50 rounded-lg" title="删除"><Trash2 class="w-4 h-4" /></button>
+                </div>
+              </template>
+            </div>
+            <div v-if="!managedModels.length" class="text-center py-12 text-gray-400 text-sm">
+              该厂商暂无模型
             </div>
           </div>
         </div>

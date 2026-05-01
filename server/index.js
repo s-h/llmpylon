@@ -1001,7 +1001,7 @@ async function cleanupOrphanedModels() {
 
 // Providers API
 app.get('/api/providers', async (req, res) => {
-    const providers = await db.all('SELECT * FROM providers WHERE deletedAt IS NULL ORDER BY id ASC');
+    const providers = await db.all('SELECT * FROM providers WHERE deletedAt IS NULL ORDER BY position ASC, id ASC');
     const models = await db.all(
         `
         SELECT pm.providerId, m.id as modelId, m.name as modelName
@@ -1054,11 +1054,11 @@ app.get('/api/providers/:id/models', async (req, res) => {
     if (!provider) return res.status(404).json({ error: 'Provider not found' });
     const models = await db.all(
         `
-        SELECT m.id, m.name
+        SELECT m.id, m.name, m.position, m.createdAt
         FROM provider_models pm
         JOIN managed_models m ON pm.modelId = m.id
         WHERE pm.providerId = ?
-        ORDER BY m.name ASC
+        ORDER BY m.position ASC, m.id ASC
         `,
         [id]
     );
@@ -1072,7 +1072,8 @@ app.post('/api/providers/:id/models', async (req, res) => {
     const provider = await db.get('SELECT * FROM providers WHERE id = ?', [id]);
     if (!provider) return res.status(404).json({ error: 'Provider not found' });
 
-    const r = await db.run('INSERT INTO managed_models (name) VALUES (?)', [name]);
+    const lastPos = await db.get('SELECT COALESCE(MAX(position), -1) + 1 as nextPos FROM managed_models');
+    const r = await db.run('INSERT INTO managed_models (name, position) VALUES (?, ?)', [name, lastPos.nextPos]);
     const modelId = r.lastID;
     await db.run('INSERT INTO provider_models (providerId, modelId) VALUES (?, ?)', [id, modelId]);
     res.status(201).json({ modelId });
@@ -1225,9 +1226,10 @@ app.post('/api/providers/import', async (req, res) => {
             await cleanupOrphanedModels();
 
             // 重新关联模型（全部创建新 managed_models 条目）
+            let nextPos = (await db.get('SELECT COALESCE(MAX(position), -1) + 1 as pos FROM managed_models')).pos;
             const modelIds = new Map();
             for (const modelName of p.models || []) {
-                const r = await db.run('INSERT INTO managed_models (name) VALUES (?)', [modelName]);
+                const r = await db.run('INSERT INTO managed_models (name, position) VALUES (?, ?)', [modelName, nextPos++]);
                 modelIds.set(modelName, r.lastID);
                 await db.run('INSERT INTO provider_models (providerId, modelId) VALUES (?, ?)', [existingId, r.lastID]);
             }
@@ -1249,9 +1251,10 @@ app.post('/api/providers/import', async (req, res) => {
         const providerId = result.lastID;
 
         // 关联模型（全部创建新 managed_models 条目）
+        let nextPos = (await db.get('SELECT COALESCE(MAX(position), -1) + 1 as pos FROM managed_models')).pos;
         const modelIds = new Map();
         for (const modelName of p.models || []) {
-            const r = await db.run('INSERT INTO managed_models (name) VALUES (?)', [modelName]);
+            const r = await db.run('INSERT INTO managed_models (name, position) VALUES (?, ?)', [modelName, nextPos++]);
             modelIds.set(modelName, r.lastID);
             await db.run('INSERT INTO provider_models (providerId, modelId) VALUES (?, ?)', [providerId, r.lastID]);
         }
@@ -1271,10 +1274,10 @@ app.post('/api/providers/import', async (req, res) => {
 app.get('/api/config/export', async (req, res) => {
     const includeSecrets = String(req.query.includeSecrets || '') === '1';
     const providers = await db.all(
-        'SELECT id, name, type, baseUrl, apiKey, defaultModelId, active, protocolConvert, deletedAt FROM providers ORDER BY id ASC'
+        'SELECT id, name, type, baseUrl, apiKey, defaultModelId, active, protocolConvert, deletedAt, createdAt, position FROM providers ORDER BY id ASC'
     );
     const managedModels = await db.all(
-        'SELECT id, name, active FROM managed_models ORDER BY id ASC'
+        'SELECT id, name, active, createdAt, position FROM managed_models ORDER BY id ASC'
     );
     const providerModels = await db.all(
         'SELECT providerId, modelId FROM provider_models ORDER BY providerId ASC, modelId ASC'
@@ -1332,15 +1335,15 @@ app.post('/api/config/import', async (req, res) => {
 
         for (const m of managedModels) {
             await db.run(
-                'INSERT INTO managed_models (id, name, active) VALUES (?, ?, ?)',
-                [m.id, m.name, m.active ? 1 : 0]
+                'INSERT INTO managed_models (id, name, active, createdAt, position) VALUES (?, ?, ?, ?, ?)',
+                [m.id, m.name, m.active ? 1 : 0, m.createdAt || null, m.position ?? 0]
             );
         }
 
         for (const p of providers) {
             await db.run(
-                'INSERT INTO providers (id, name, type, baseUrl, apiKey, defaultModelId, active, protocolConvert, deletedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                [p.id, p.name, p.type, p.baseUrl, p.apiKey || null, p.defaultModelId || null, p.active ? 1 : 0, p.protocolConvert ? 1 : 0, p.deletedAt || null]
+                'INSERT INTO providers (id, name, type, baseUrl, apiKey, defaultModelId, active, protocolConvert, deletedAt, createdAt, position) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                [p.id, p.name, p.type, p.baseUrl, p.apiKey || null, p.defaultModelId || null, p.active ? 1 : 0, p.protocolConvert ? 1 : 0, p.deletedAt || null, p.createdAt || null, p.position ?? 0]
             );
         }
 
@@ -1572,11 +1575,11 @@ app.get('/api/models', async (req, res) => {
     if (!provider) return res.json({ providerId: null, defaultModelId: null, models: [] });
     const models = await db.all(
         `
-        SELECT m.id, m.name
+        SELECT m.id, m.name, m.position, m.createdAt
         FROM provider_models pm
         JOIN managed_models m ON pm.modelId = m.id
         WHERE pm.providerId = ?
-        ORDER BY m.name ASC
+        ORDER BY m.position ASC, m.id ASC
         `,
         [provider.id]
     );
@@ -1594,7 +1597,8 @@ app.post('/api/models', async (req, res) => {
     }
     if (!provider) return res.status(400).json({ error: 'No active provider' });
 
-    const r = await db.run('INSERT INTO managed_models (name) VALUES (?)', [name]);
+    const lastPos = await db.get('SELECT COALESCE(MAX(position), -1) + 1 as nextPos FROM managed_models');
+    const r = await db.run('INSERT INTO managed_models (name, position) VALUES (?, ?)', [name, lastPos.nextPos]);
     const modelId = r.lastID;
     await db.run('INSERT INTO provider_models (providerId, modelId) VALUES (?, ?)', [provider.id, modelId]);
     res.status(201).json({ modelId });
@@ -1665,6 +1669,24 @@ app.put('/api/models/:id', async (req, res) => {
     const model = await db.get('SELECT * FROM managed_models WHERE id = ?', [id]);
     if (!model) return res.status(404).json({ error: 'Model not found' });
     await db.run('UPDATE managed_models SET name = ? WHERE id = ?', [name, id]);
+    res.sendStatus(200);
+});
+
+app.put('/api/providers/reorder', async (req, res) => {
+    const { orderedIds } = req.body || {};
+    if (!Array.isArray(orderedIds)) return res.status(400).json({ error: 'orderedIds is required' });
+    for (let i = 0; i < orderedIds.length; i++) {
+        await db.run('UPDATE providers SET position = ? WHERE id = ?', [i, orderedIds[i]]);
+    }
+    res.sendStatus(200);
+});
+
+app.put('/api/models/reorder', async (req, res) => {
+    const { orderedIds } = req.body || {};
+    if (!Array.isArray(orderedIds)) return res.status(400).json({ error: 'orderedIds is required' });
+    for (let i = 0; i < orderedIds.length; i++) {
+        await db.run('UPDATE managed_models SET position = ? WHERE id = ?', [i, orderedIds[i]]);
+    }
     res.sendStatus(200);
 });
 

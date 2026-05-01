@@ -165,6 +165,30 @@ async function setupDb() {
     if (!providerCols.some(c => c.name === 'deletedAt')) {
         await db.exec('ALTER TABLE providers ADD COLUMN deletedAt DATETIME');
     }
+    if (!providerCols.some(c => c.name === 'createdAt')) {
+        await db.exec('ALTER TABLE providers ADD COLUMN createdAt DATETIME');
+    }
+    if (!providerCols.some(c => c.name === 'position')) {
+        await db.exec('ALTER TABLE providers ADD COLUMN position INTEGER');
+    }
+    // Backfill provider position for existing rows
+    const unpositionedProviders = await db.all('SELECT id FROM providers WHERE position IS NULL ORDER BY id ASC');
+    for (let i = 0; i < unpositionedProviders.length; i++) {
+        await db.run('UPDATE providers SET position = ? WHERE id = ?', [i, unpositionedProviders[i].id]);
+    }
+
+    // Migration: managed_models columns
+    const mmCols = await db.all('PRAGMA table_info(managed_models)');
+    if (!mmCols.some(c => c.name === 'createdAt')) {
+        await db.exec('ALTER TABLE managed_models ADD COLUMN createdAt DATETIME');
+    }
+    if (!mmCols.some(c => c.name === 'position')) {
+        await db.exec('ALTER TABLE managed_models ADD COLUMN position INTEGER');
+    }
+    const unpositionedModels = await db.all('SELECT id FROM managed_models WHERE position IS NULL ORDER BY id ASC');
+    for (let i = 0; i < unpositionedModels.length; i++) {
+        await db.run('UPDATE managed_models SET position = ? WHERE id = ?', [i, unpositionedModels[i].id]);
+    }
 
     // Migration for client_keys
     const keyCols = await db.all('PRAGMA table_info(client_keys)');
