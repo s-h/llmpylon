@@ -62,12 +62,15 @@ If you **subscribe to more than one LLM vendor** and run **different AI agents /
 | **Protocol conversion** | OpenAI ↔ Anthropic bidirectional conversion (toggleable), streaming SSE and tool calling supported |
 | **Protocols** | Native OpenAI / Anthropic support; conversion mode rejects native requests from non-matching clients |
 | **Key custody** | Vendor keys stay on the server; clients use app keys only |
-| **Model management** | Manage models per provider; rename models (case-sensitive) |
+| **Model management** | Grid/list dual views; sort by name, creation time, or custom drag; rename (case-sensitive); preferences auto-saved |
 | **Model rules** | Wildcard mapping (e.g. `gpt-4*` → real model id) |
 | **Per-app scope** | Bind provider and default model per app |
 | **`llmpylon` model name** | Resolved via app → provider → global defaults (**case-insensitive**) |
 | **Provider recycle bin** | Soft-delete with restore or permanent delete; model associations preserved |
-| **Stats & logs** | Request stats and conversation logs (streaming, latency, tokens, etc.) with raw/converted comparison |
+| **Copy provider** | One-click duplicate of a provider and its models; "copy" suffix auto-appended |
+| **Stats & logs** | Real-time WebSocket log push; detail view compares raw vs converted request/response; paginated browsing |
+| **User management** | Multi-admin accounts; create, edit, delete, and force password change |
+| **Runtime configuration** | Log/stats retention days, request timeout, upstream header filtering — all configurable from the UI |
 | **Config import/export** | Per-provider or global export/import (includes conversion flags, recycle bin) |
 | **Deployment** | **Docker recommended**; persist SQLite on a volume |
 
