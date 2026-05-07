@@ -207,7 +207,10 @@ const APP_SETTINGS_KEYS = {
     LOG_RETENTION_DAYS: 'log_retention_days',
     STATS_RETENTION_DAYS: 'stats_retention_days',
     UPSTREAM_TIMEOUT_SECONDS: 'upstream_timeout_seconds',
-    UPSTREAM_HEADERS_BLOCKLIST: 'upstream_headers_blocklist'
+    UPSTREAM_HEADERS_BLOCKLIST: 'upstream_headers_blocklist',
+    STREAM_CHUNK_TIMEOUT_SECONDS: 'stream_chunk_timeout_seconds',
+    STREAM_RETRY_ENABLED: 'stream_retry_enabled',
+    STREAM_MAX_RETRIES: 'stream_max_retries'
 };
 
 const UPSTREAM_TIMEOUT_MIN_SEC = 5;
@@ -220,6 +223,27 @@ async function getUpstreamTimeoutSeconds() {
     if (!Number.isFinite(raw) || raw < UPSTREAM_TIMEOUT_MIN_SEC) return UPSTREAM_TIMEOUT_DEFAULT_SEC;
     return Math.min(UPSTREAM_TIMEOUT_MAX_SEC, raw);
 }
+
+const STREAM_CHUNK_TIMEOUT_DEFAULT_SEC = 120;
+const STREAM_CHUNK_TIMEOUT_MIN_SEC = 10;
+const STREAM_CHUNK_TIMEOUT_MAX_SEC = 3600;
+
+async function getStreamChunkTimeoutSeconds() {
+    const raw = await getAppSettingInt(APP_SETTINGS_KEYS.STREAM_CHUNK_TIMEOUT_SECONDS, STREAM_CHUNK_TIMEOUT_DEFAULT_SEC);
+    if (!Number.isFinite(raw) || raw < STREAM_CHUNK_TIMEOUT_MIN_SEC) return STREAM_CHUNK_TIMEOUT_DEFAULT_SEC;
+    return Math.min(STREAM_CHUNK_TIMEOUT_MAX_SEC, raw);
+}
+
+async function getStreamRetryConfig() {
+    const enabled = await getAppSettingInt(APP_SETTINGS_KEYS.STREAM_RETRY_ENABLED, 1);
+    const maxRetries = await getAppSettingInt(APP_SETTINGS_KEYS.STREAM_MAX_RETRIES, 2);
+    return {
+        enabled: enabled === 1,
+        maxRetries: Math.max(0, Math.min(5, maxRetries))
+    };
+}
+
+const STREAM_RETRYABLE_STATUS = new Set([429, 502, 503, 529]);
 
 async function getAppSettingInt(key, defaultVal) {
     const row = await db.get('SELECT value FROM app_settings WHERE key = ?', [key]);
@@ -1471,6 +1495,7 @@ app.get('/api/logs', async (req, res) => {
             l.clientUserAgent, l.proxyUserAgent, l.clientIp, l.httpMethod, l.requestPath,
             l.isStream, l.streamBroken, l.requestBytes, l.responseBytes, l.latencyMs,
             l.upstreamStatus, l.clientStatus, l.tokensIn, l.tokensOut, l.tokensTotal,
+            l.ttfbMs, l.chunkCount, l.streamDurationMs, l.disconnectReason,
             p.name as providerName, ck.name as clientKeyName
         FROM conversation_logs l
         LEFT JOIN providers p ON l.providerId = p.id
@@ -1519,7 +1544,9 @@ app.get('/api/settings', async (req, res) => {
     const statsRetentionDays = await getAppSettingInt(APP_SETTINGS_KEYS.STATS_RETENTION_DAYS, 0);
     const upstreamTimeoutSeconds = await getUpstreamTimeoutSeconds();
     const upstreamHeadersBlocklist = await getUpstreamHeadersBlocklist();
-    res.json({ logRetentionDays, statsRetentionDays, upstreamTimeoutSeconds, upstreamHeadersBlocklist });
+    const streamChunkTimeoutSeconds = await getStreamChunkTimeoutSeconds();
+    const streamRetryConfig = await getStreamRetryConfig();
+    res.json({ logRetentionDays, statsRetentionDays, upstreamTimeoutSeconds, upstreamHeadersBlocklist, streamChunkTimeoutSeconds, streamRetryEnabled: streamRetryConfig.enabled, streamMaxRetries: streamRetryConfig.maxRetries });
 });
 
 app.put('/api/settings', async (req, res) => {
@@ -1542,8 +1569,22 @@ app.put('/api/settings', async (req, res) => {
     await setAppSetting(APP_SETTINGS_KEYS.STATS_RETENTION_DAYS, statsRetentionDays);
     await setAppSetting(APP_SETTINGS_KEYS.UPSTREAM_TIMEOUT_SECONDS, upstreamTimeoutSeconds);
     await setAppSetting(APP_SETTINGS_KEYS.UPSTREAM_HEADERS_BLOCKLIST, JSON.stringify(upstreamHeadersBlocklist));
+
+    // Streaming settings
+    let streamChunkTimeoutSeconds = parseInt(body.streamChunkTimeoutSeconds, 10);
+    if (!Number.isFinite(streamChunkTimeoutSeconds)) streamChunkTimeoutSeconds = STREAM_CHUNK_TIMEOUT_DEFAULT_SEC;
+    streamChunkTimeoutSeconds = Math.min(STREAM_CHUNK_TIMEOUT_MAX_SEC, Math.max(STREAM_CHUNK_TIMEOUT_MIN_SEC, streamChunkTimeoutSeconds));
+    await setAppSetting(APP_SETTINGS_KEYS.STREAM_CHUNK_TIMEOUT_SECONDS, streamChunkTimeoutSeconds);
+
+    let streamRetryEnabled = body.streamRetryEnabled !== undefined ? (body.streamRetryEnabled ? 1 : 0) : 1;
+    let streamMaxRetries = parseInt(body.streamMaxRetries, 10);
+    if (!Number.isFinite(streamMaxRetries)) streamMaxRetries = 2;
+    streamMaxRetries = Math.max(0, Math.min(5, streamMaxRetries));
+    await setAppSetting(APP_SETTINGS_KEYS.STREAM_RETRY_ENABLED, streamRetryEnabled);
+    await setAppSetting(APP_SETTINGS_KEYS.STREAM_MAX_RETRIES, streamMaxRetries);
+
     await runRetentionPurge();
-    res.json({ logRetentionDays, statsRetentionDays, upstreamTimeoutSeconds, upstreamHeadersBlocklist });
+    res.json({ logRetentionDays, statsRetentionDays, upstreamTimeoutSeconds, upstreamHeadersBlocklist, streamChunkTimeoutSeconds, streamRetryEnabled: streamRetryEnabled === 1, streamMaxRetries });
 });
 
 app.post('/api/stats/clear', async (req, res) => {
@@ -2191,7 +2232,9 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
     if (stream) {
         let streamBytesTotal = 0;
         let proxyUserAgent = null;
+        const requestAtMs = Date.now();
         try {
+            // --- Build target body & headers (same for all retry attempts) ---
             let targetBody = { ...req.body, model: actualModel };
             let upstreamHeaders = {};
 
@@ -2235,8 +2278,8 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                 const latencyMs = new Date(responseAt) - new Date(requestAt);
                 const rb = Buffer.byteLength(msg, 'utf8');
                 await db.run(
-                    `UPDATE conversation_logs SET responseBody = ?, status = ?, responseAt = ?, targetUrl = ?, proxyUserAgent = ?, latencyMs = ?, upstreamStatus = ?, clientStatus = ?, responseBytes = ?, streamBroken = ?, tokensIn = ?, tokensOut = ?, tokensTotal = ? WHERE id = ?`,
-                    [msg, 'error', responseAt, targetUrl, null, Number.isFinite(latencyMs) ? Math.round(latencyMs) : null, null, 400, rb, 0, 0, 0, 0, logId]
+                    `UPDATE conversation_logs SET responseBody = ?, status = ?, responseAt = ?, targetUrl = ?, proxyUserAgent = ?, latencyMs = ?, upstreamStatus = ?, clientStatus = ?, responseBytes = ?, streamBroken = ?, tokensIn = ?, tokensOut = ?, tokensTotal = ?, disconnectReason = ? WHERE id = ?`,
+                    [msg, 'error', responseAt, targetUrl, null, Number.isFinite(latencyMs) ? Math.round(latencyMs) : null, null, 400, rb, 0, 0, 0, 0, 'unsupported_type', logId]
                 );
                 io.to('admins').emit('log_update', {
                     id: logId,
@@ -2261,6 +2304,7 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
 
             proxyUserAgent = pickOutgoingUserAgent(upstreamHeaders);
 
+            // --- Log proxy request headers (once, outside retry loop) ---
             const proxyHeadersForLog = { ...upstreamHeaders };
             if (proxyHeadersForLog['authorization']) {
                 const auth = proxyHeadersForLog['authorization'];
@@ -2269,184 +2313,384 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
             if (proxyHeadersForLog['x-api-key']) {
                 proxyHeadersForLog['x-api-key'] = '***masked***';
             }
-            const proxyRequestHeaders = JSON.stringify(proxyHeadersForLog);
-            await db.run('UPDATE conversation_logs SET proxyRequestHeaders = ? WHERE id = ?', [proxyRequestHeaders, logId]);
-
+            await db.run('UPDATE conversation_logs SET proxyRequestHeaders = ? WHERE id = ?', [JSON.stringify(proxyHeadersForLog), logId]);
             await db.run('UPDATE conversation_logs SET proxyRequestBody = ? WHERE id = ?', [JSON.stringify(targetBody), logId]);
-            const upstream = await axiosInstance.post(targetUrl, targetBody, {
-                headers: upstreamHeaders,
-                responseType: 'stream',
-                validateStatus: () => true,
-                timeout: upstreamTimeoutMs
-            });
 
-            res.status(upstream.status);
-            const passHeaders = [
-                'content-type',
-                'cache-control',
-                'connection',
-                'transfer-encoding',
-                'x-request-id',
-                'anthropic-request-id'
-            ];
-            for (const h of passHeaders) {
-                if (upstream.headers[h]) {
-                    res.setHeader(h, upstream.headers[h]);
+            // --- Streaming settings ---
+            const chunkTimeoutMs = (await getStreamChunkTimeoutSeconds()) * 1000;
+            const retryConfig = await getStreamRetryConfig();
+            const maxAttempts = retryConfig.enabled ? 1 + retryConfig.maxRetries : 1;
+
+            // --- Client disconnect tracking (persists across retries) ---
+            let clientDisconnected = false;
+            const onClientClose = () => {
+                if (!res.writableEnded) {
+                    clientDisconnected = true;
                 }
-            }
-
-            let responseData = '';
-            let pendingChunkForLog = '';
-            let lastEmitTs = 0;
-            const sseConvertState = {};
-            const emitPendingChunk = () => {
-                if (!pendingChunkForLog) return;
-                io.to('admins').emit('log_update', {
-                    id: logId,
-                    status: 'waiting',
-                    targetUrl,
-                    appendResponseChunk: true,
-                    streamChunk: pendingChunkForLog
-                });
-                pendingChunkForLog = '';
-                lastEmitTs = Date.now();
             };
+            res.on('close', onClientClose);
 
-            const sseBuffer = { data: '' };
-            let rawResponseData = '';
-            await new Promise((resolve, reject) => {
-                const src = upstream.data;
-                let ended = false;
+            try {
+                let finalUpstream = null;
+                let finalStatus = 'error';
+                let finalResponseBody = '';
+                let finalResponseAt = null;
+                let finalUsage = { tokensIn: 0, tokensOut: 0, tokensTotal: 0 };
+                let finalDisconnectReason = 'unknown';
+                let sentBytesToClient = false;
+                let lastError = null;
+                let chunkCount = 0;
+                let firstChunkAt = null;
+                let rawResponseData = '';
 
-                src.on('data', (chunk) => {
-                    let text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
-                    if (needsResponseConversion) {
-                        rawResponseData += text;
-                        sseBuffer.data += text;
-                        const parts = sseBuffer.data.split('\n\n');
-                        sseBuffer.data = parts.pop() || '';
-                        let converted = '';
-                        for (const part of parts) {
-                            const trimmed = part.trim();
-                            if (!trimmed) continue;
-                            if (provider.type === 'openai') {
-                                converted += convertOpenAIStreamToAnthropic(trimmed + '\n\n', sseConvertState);
-                            } else if (provider.type === 'anthropic') {
-                                converted += convertAnthropicStreamToOpenAI(trimmed + '\n\n', sseConvertState);
+                for (let attempt = 0; attempt < maxAttempts; attempt++) {
+                    if (clientDisconnected) {
+                        finalDisconnectReason = 'client_disconnect';
+                        break;
+                    }
+
+                    // Reset per-attempt state
+                    streamBytesTotal = 0;
+                    chunkCount = 0;
+                    firstChunkAt = null;
+                    rawResponseData = '';
+                    let streamCompleted = false;
+                    let chunkTimeoutTimer = null;
+                    const sseConvertState = {};
+                    let responseData = '';
+                    let pendingChunkForLog = '';
+                    let lastEmitTs = 0;
+
+                    const emitPendingChunk = () => {
+                        if (!pendingChunkForLog) return;
+                        io.to('admins').emit('log_update', {
+                            id: logId,
+                            status: 'waiting',
+                            targetUrl,
+                            appendResponseChunk: true,
+                            streamChunk: pendingChunkForLog
+                        });
+                        pendingChunkForLog = '';
+                        lastEmitTs = Date.now();
+                    };
+
+                    try {
+                        const upstream = await axiosInstance.post(targetUrl, targetBody, {
+                            headers: upstreamHeaders,
+                            responseType: 'stream',
+                            validateStatus: () => true,
+                            timeout: upstreamTimeoutMs
+                        });
+
+                        finalUpstream = upstream;
+
+                        // --- Check for retryable status before reading body ---
+                        if (!sentBytesToClient && STREAM_RETRYABLE_STATUS.has(upstream.status) && attempt < maxAttempts - 1) {
+                            const retryDelay = Math.pow(2, attempt) * 1000;
+                            console.log(`[Proxy] Stream retry: upstream status ${upstream.status}, attempt ${attempt + 1}/${maxAttempts}, waiting ${retryDelay}ms`);
+                            // Consume the stream to free the connection
+                            upstream.data.destroy();
+                            await new Promise(r => setTimeout(r, retryDelay));
+                            continue;
+                        }
+
+                        // --- Set response status & headers (only on first successful attempt) ---
+                        if (!res.headersSent) {
+                            res.status(upstream.status);
+                            const passHeaders = [
+                                'content-type',
+                                'cache-control',
+                                'connection',
+                                'transfer-encoding',
+                                'x-request-id',
+                                'anthropic-request-id'
+                            ];
+                            for (const h of passHeaders) {
+                                if (upstream.headers[h]) {
+                                    res.setHeader(h, upstream.headers[h]);
+                                }
                             }
                         }
-                        if (!converted) return;
-                        text = converted;
-                    }
-                    streamBytesTotal += Buffer.byteLength(text, 'utf8');
-                    responseData += text;
-                    pendingChunkForLog += text;
-                    res.write(text);
-                    if (Date.now() - lastEmitTs > 180) emitPendingChunk();
-                });
 
-                src.on('end', () => {
-                    ended = true;
-                    if (needsResponseConversion && sseBuffer.data.trim()) {
-                        const flushed = provider.type === 'openai'
-                            ? convertOpenAIStreamToAnthropic(sseBuffer.data.trim() + '\n\n', sseConvertState)
-                            : convertAnthropicStreamToOpenAI(sseBuffer.data.trim() + '\n\n', sseConvertState);
-                        if (flushed) {
-                            streamBytesTotal += Buffer.byteLength(flushed, 'utf8');
-                            responseData += flushed;
-                            pendingChunkForLog += flushed;
-                            res.write(flushed);
+                        const sseBuffer = { data: '' };
+
+                        // --- Chunk timeout detector ---
+                        let lastChunkAt = Date.now();
+                        chunkTimeoutTimer = null;
+                        if (chunkTimeoutMs > 0) {
+                            chunkTimeoutTimer = setInterval(() => {
+                                if (Date.now() - lastChunkAt > chunkTimeoutMs) {
+                                    console.warn(`[Proxy] Stream chunk timeout (${chunkTimeoutMs}ms) for log ${logId}`);
+                                    upstream.data.destroy(new Error('Chunk timeout'));
+                                }
+                            }, 10000);
                         }
-                        sseBuffer.data = '';
+
+                        await new Promise((resolve, reject) => {
+                            const src = upstream.data;
+                            let ended = false;
+
+                            src.on('data', (chunk) => {
+                                if (clientDisconnected) {
+                                    src.destroy(new Error('Client disconnected'));
+                                    return;
+                                }
+
+                                lastChunkAt = Date.now();
+                                chunkCount++;
+
+                                // --- TTFB: record first chunk arrival ---
+                                if (!firstChunkAt) {
+                                    firstChunkAt = Date.now();
+                                }
+
+                                let text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
+
+                                if (needsResponseConversion) {
+                                    rawResponseData += text;
+                                    sseBuffer.data += text;
+                                    const parts = sseBuffer.data.split('\n\n');
+                                    sseBuffer.data = parts.pop() || '';
+                                    let converted = '';
+                                    for (const part of parts) {
+                                        const trimmed = part.trim();
+                                        if (!trimmed) continue;
+                                        if (provider.type === 'openai') {
+                                            converted += convertOpenAIStreamToAnthropic(trimmed + '\n\n', sseConvertState);
+                                        } else if (provider.type === 'anthropic') {
+                                            converted += convertAnthropicStreamToOpenAI(trimmed + '\n\n', sseConvertState);
+                                        }
+                                    }
+                                    if (!converted) return;
+                                    text = converted;
+
+                                    // --- Check for stream completion in converted output ---
+                                    if (text.includes('data: [DONE]') || text.includes('"message_stop"')) {
+                                        streamCompleted = true;
+                                    }
+                                } else {
+                                    // --- Native protocol: detect completion markers ---
+                                    if (provider.type === 'openai' && text.includes('data: [DONE]')) {
+                                        streamCompleted = true;
+                                    } else if (provider.type === 'anthropic' && text.includes('event: message_stop')) {
+                                        streamCompleted = true;
+                                    }
+                                }
+
+                                streamBytesTotal += Buffer.byteLength(text, 'utf8');
+                                responseData += text;
+                                pendingChunkForLog += text;
+                                sentBytesToClient = true;
+                                res.write(text);
+                                if (Date.now() - lastEmitTs > 180) emitPendingChunk();
+                            });
+
+                            src.on('end', () => {
+                                ended = true;
+                                if (needsResponseConversion && sseBuffer.data.trim()) {
+                                    const flushed = provider.type === 'openai'
+                                        ? convertOpenAIStreamToAnthropic(sseBuffer.data.trim() + '\n\n', sseConvertState)
+                                        : convertAnthropicStreamToOpenAI(sseBuffer.data.trim() + '\n\n', sseConvertState);
+                                    if (flushed) {
+                                        streamBytesTotal += Buffer.byteLength(flushed, 'utf8');
+                                        responseData += flushed;
+                                        pendingChunkForLog += flushed;
+                                        res.write(flushed);
+                                        if (flushed.includes('data: [DONE]') || flushed.includes('"message_stop"')) {
+                                            streamCompleted = true;
+                                        }
+                                    }
+                                    sseBuffer.data = '';
+                                }
+                                emitPendingChunk();
+                                resolve();
+                            });
+
+                            src.on('error', (err) => {
+                                if (ended) return;
+                                reject(err);
+                            });
+
+                            if (clientDisconnected) {
+                                src.destroy(new Error('Client disconnected'));
+                            }
+                        });
+
+                        // --- Clean up chunk timeout timer ---
+                        if (chunkTimeoutTimer) {
+                            clearInterval(chunkTimeoutTimer);
+                            chunkTimeoutTimer = null;
+                        }
+
+                        // --- Flush remaining data from protocol conversion ---
+                        if (needsResponseConversion && sseBuffer.data.trim()) {
+                            const flushed = provider.type === 'openai'
+                                ? convertOpenAIStreamToAnthropic(sseBuffer.data.trim() + '\n\n', sseConvertState)
+                                : convertAnthropicStreamToOpenAI(sseBuffer.data.trim() + '\n\n', sseConvertState);
+                            if (flushed) {
+                                streamBytesTotal += Buffer.byteLength(flushed, 'utf8');
+                                responseData += flushed;
+                                res.write(flushed);
+                            }
+                            sseBuffer.data = '';
+                        }
+
+                        if (!res.writableEnded) {
+                            res.end();
+                        }
+
+                        // --- Determine disconnect reason ---
+                        if (clientDisconnected) {
+                            finalDisconnectReason = 'client_disconnect';
+                        } else if (!streamCompleted && upstream.status >= 200 && upstream.status < 300) {
+                            finalDisconnectReason = 'incomplete';
+                        } else {
+                            finalDisconnectReason = 'normal';
+                        }
+
+                        // --- Stream integrity check: mark incomplete streams as broken ---
+                        const httpOk = upstream.status >= 200 && upstream.status < 300;
+                        if (httpOk && !streamCompleted) {
+                            finalStatus = 'error';
+                            console.warn(`[Proxy] Incomplete stream (no termination event) for log ${logId}, provider=${provider.name}`);
+                        } else {
+                            finalStatus = httpOk ? 'completed' : 'error';
+                        }
+
+                        finalResponseBody = responseData;
+                        finalResponseAt = new Date().toISOString();
+                        finalUsage = extractUsage(responseData);
+
+                        if (finalStatus === 'error') {
+                            console.error(`[Proxy] Upstream error ${upstream.status} for ${targetUrl}: ${(responseData || '(empty)').substring(0, 2000)}`);
+                        }
+
+                        break; // Success (or non-retryable result), exit retry loop
+
+                    } catch (streamErr) {
+                        // --- Clean up chunk timeout timer on error ---
+                        if (chunkTimeoutTimer) {
+                            clearInterval(chunkTimeoutTimer);
+                        }
+
+                        lastError = streamErr;
+
+                        // --- Determine error type ---
+                        const isChunkTimeout = streamErr.message === 'Chunk timeout';
+                        const isClientDisconnect = clientDisconnected || streamErr.message === 'Client disconnected';
+
+                        if (isClientDisconnect) {
+                            finalDisconnectReason = 'client_disconnect';
+                            break; // Don't retry on client disconnect
+                        }
+
+                        if (isChunkTimeout) {
+                            finalDisconnectReason = 'chunk_timeout';
+                            break; // Don't retry on chunk timeout
+                        }
+
+                        // --- Retryable? Only if no bytes sent to client yet ---
+                        if (!sentBytesToClient && finalUpstream && STREAM_RETRYABLE_STATUS.has(finalUpstream.status) && attempt < maxAttempts - 1) {
+                            const retryDelay = Math.pow(2, attempt) * 1000;
+                            console.log(`[Proxy] Stream retry on error, attempt ${attempt + 1}/${maxAttempts}, waiting ${retryDelay}ms: ${streamErr.message}`);
+                            await new Promise(r => setTimeout(r, retryDelay));
+                            continue;
+                        }
+
+                        // --- Non-retryable error ---
+                        finalDisconnectReason = 'upstream_error';
+                        finalResponseAt = new Date().toISOString();
+                        finalResponseBody = streamErr.message || 'Streaming proxy failed';
+                        const cfgUa = pickOutgoingUserAgent(streamErr.config?.headers);
+                        const upstreamStatus = streamErr.response?.status ?? (finalUpstream?.status ?? null);
+                        const clientStatus = res.headersSent ? (res.statusCode || streamErr.response?.status || 500) : (streamErr.response?.status || 500);
+                        finalUsage = extractUsage(streamErr.response?.data);
+                        const errLatencyMs = new Date(finalResponseAt) - new Date(requestAt);
+
+                        await db.run(
+                            `UPDATE conversation_logs SET responseBody = ?, status = ?, responseAt = ?, targetUrl = ?, proxyUserAgent = ?, latencyMs = ?, upstreamStatus = ?, clientStatus = ?, responseBytes = ?, streamBroken = ?, tokensIn = ?, tokensOut = ?, tokensTotal = ?, ttfbMs = ?, chunkCount = ?, streamDurationMs = ?, disconnectReason = ? WHERE id = ?`,
+                            [
+                                finalResponseBody, 'error', finalResponseAt, targetUrl || streamErr.config?.url, proxyUserAgent,
+                                Number.isFinite(errLatencyMs) ? Math.round(errLatencyMs) : null, upstreamStatus, clientStatus,
+                                streamBytesTotal, 1, finalUsage.tokensIn, finalUsage.tokensOut, finalUsage.tokensTotal,
+                                firstChunkAt ? firstChunkAt - requestAtMs : null, chunkCount,
+                                firstChunkAt ? new Date(finalResponseAt) - firstChunkAt : null, finalDisconnectReason, logId
+                            ]
+                        );
+                        await db.run(
+                            `INSERT INTO stats_events (appId, providerId, requestedModel, actualModel, status, requestAt, responseAt, latencyMs, tokensIn, tokensOut, tokensTotal, errorMessage)
+                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                            [clientKeyData.id, provider.id, model || 'unknown', actualModel || null, 'error', requestAt, finalResponseAt,
+                             Number.isFinite(errLatencyMs) ? Math.round(errLatencyMs) : null, finalUsage.tokensIn, finalUsage.tokensOut, finalUsage.tokensTotal,
+                             streamErr.message || 'Streaming proxy failed']
+                        );
+                        if (rawResponseData) {
+                            await db.run('UPDATE conversation_logs SET proxyResponseBody = ? WHERE id = ?', [rawResponseData, logId]);
+                        }
+                        io.to('admins').emit('log_update', {
+                            id: logId, status: 'error', responseBody: finalResponseBody, responseAt: finalResponseAt,
+                            targetUrl: targetUrl || streamErr.config?.url, proxyUserAgent: proxyUserAgent,
+                            latencyMs: Number.isFinite(errLatencyMs) ? Math.round(errLatencyMs) : null,
+                            upstreamStatus, clientStatus, responseBytes: streamBytesTotal, streamBroken: 1,
+                            tokensIn: finalUsage.tokensIn, tokensOut: finalUsage.tokensOut, tokensTotal: finalUsage.tokensTotal
+                        });
+                        if (!res.headersSent) {
+                            return res.status(streamErr.response?.status || 500).json(streamErr.response?.data || { error: finalResponseBody });
+                        }
+                        if (!res.writableEnded) res.end();
+                        return;
                     }
-                    emitPendingChunk();
-                    resolve();
+                }
+
+                // --- Write final log (success / incomplete / client disconnect) ---
+                const finalLatencyMs = new Date(finalResponseAt) - new Date(requestAt);
+                const finalClientStatus = finalUpstream ? finalUpstream.status : 0;
+                const streamBroken = (finalStatus === 'error' || finalDisconnectReason === 'incomplete') ? 1 : 0;
+
+                await db.run(
+                    `UPDATE conversation_logs SET responseBody = ?, status = ?, responseAt = ?, targetUrl = ?, proxyUserAgent = ?, latencyMs = ?, upstreamStatus = ?, clientStatus = ?, responseBytes = ?, streamBroken = ?, tokensIn = ?, tokensOut = ?, tokensTotal = ?, ttfbMs = ?, chunkCount = ?, streamDurationMs = ?, disconnectReason = ? WHERE id = ?`,
+                    [
+                        finalResponseBody, finalStatus, finalResponseAt, targetUrl, proxyUserAgent,
+                        Number.isFinite(finalLatencyMs) ? Math.round(finalLatencyMs) : null,
+                        finalUpstream ? finalUpstream.status : null, finalClientStatus, streamBytesTotal,
+                        streamBroken, finalUsage.tokensIn, finalUsage.tokensOut, finalUsage.tokensTotal,
+                        firstChunkAt ? firstChunkAt - requestAtMs : null, chunkCount,
+                        firstChunkAt && finalResponseAt ? new Date(finalResponseAt) - firstChunkAt : null,
+                        finalDisconnectReason, logId
+                    ]
+                );
+
+                await db.run(
+                    `INSERT INTO stats_events (appId, providerId, requestedModel, actualModel, status, requestAt, responseAt, latencyMs, tokensIn, tokensOut, tokensTotal, errorMessage)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                    [
+                        clientKeyData.id, provider.id, model || 'unknown', actualModel || null, finalStatus,
+                        requestAt, finalResponseAt, Number.isFinite(finalLatencyMs) ? Math.round(finalLatencyMs) : null,
+                        finalUsage.tokensIn, finalUsage.tokensOut, finalUsage.tokensTotal,
+                        finalStatus === 'error' ? `disconnectReason=${finalDisconnectReason}` : null
+                    ]
+                );
+
+                if (rawResponseData) {
+                    await db.run('UPDATE conversation_logs SET proxyResponseBody = ? WHERE id = ?', [rawResponseData, logId]);
+                }
+
+                io.to('admins').emit('log_update', {
+                    id: logId, status: finalStatus, responseBody: finalResponseBody, responseAt: finalResponseAt,
+                    targetUrl, proxyUserAgent,
+                    latencyMs: Number.isFinite(finalLatencyMs) ? Math.round(finalLatencyMs) : null,
+                    upstreamStatus: finalUpstream ? finalUpstream.status : null,
+                    clientStatus: finalClientStatus, responseBytes: streamBytesTotal,
+                    streamBroken, tokensIn: finalUsage.tokensIn, tokensOut: finalUsage.tokensOut, tokensTotal: finalUsage.tokensTotal,
+                    ttfbMs: firstChunkAt ? firstChunkAt - requestAtMs : null,
+                    chunkCount, streamDurationMs: firstChunkAt && finalResponseAt ? new Date(finalResponseAt) - firstChunkAt : null,
+                    disconnectReason: finalDisconnectReason
                 });
+                return;
 
-                src.on('error', (err) => {
-                    if (ended) return;
-                    reject(err);
-                });
-
-                res.on('close', () => {
-                    if (!res.writableEnded) {
-                        src.destroy(new Error('Client disconnected'));
-                    }
-                });
-            });
-
-            if (!res.writableEnded) {
-                res.end();
+            } finally {
+                res.removeListener('close', onClientClose);
             }
-
-            const responseAt = new Date().toISOString();
-            const status = upstream.status >= 200 && upstream.status < 300 ? 'completed' : 'error';
-            if (status === 'error') {
-                console.error(`[Proxy] Upstream error ${upstream.status} for ${targetUrl}: ${(responseData || '(empty)').substring(0, 2000)}`);
-            }
-            const latencyMs = new Date(responseAt) - new Date(requestAt);
-            const usage = extractUsage(responseData);
-            const clientStatus = upstream.status;
-            await db.run(
-                `UPDATE conversation_logs SET responseBody = ?, status = ?, responseAt = ?, targetUrl = ?, proxyUserAgent = ?, latencyMs = ?, upstreamStatus = ?, clientStatus = ?, responseBytes = ?, streamBroken = ?, tokensIn = ?, tokensOut = ?, tokensTotal = ? WHERE id = ?`,
-                [
-                    responseData,
-                    status,
-                    responseAt,
-                    targetUrl,
-                    proxyUserAgent,
-                    Number.isFinite(latencyMs) ? Math.round(latencyMs) : null,
-                    upstream.status,
-                    clientStatus,
-                    streamBytesTotal,
-                    0,
-                    usage.tokensIn,
-                    usage.tokensOut,
-                    usage.tokensTotal,
-                    logId
-                ]
-            );
-
-            await db.run(
-                `INSERT INTO stats_events (appId, providerId, requestedModel, actualModel, status, requestAt, responseAt, latencyMs, tokensIn, tokensOut, tokensTotal, errorMessage)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [
-                    clientKeyData.id,
-                    provider.id,
-                    model || 'unknown',
-                    actualModel || null,
-                    status,
-                    requestAt,
-                    responseAt,
-                    Number.isFinite(latencyMs) ? Math.round(latencyMs) : null,
-                    usage.tokensIn,
-                    usage.tokensOut,
-                    usage.tokensTotal,
-                    status === 'error' ? `Upstream status ${upstream.status}` : null
-                ]
-            );
-
-            if (rawResponseData) {
-                await db.run('UPDATE conversation_logs SET proxyResponseBody = ? WHERE id = ?', [rawResponseData, logId]);
-            }
-
-            io.to('admins').emit('log_update', {
-                id: logId,
-                status,
-                responseBody: responseData,
-                responseAt,
-                targetUrl,
-                proxyUserAgent,
-                latencyMs: Number.isFinite(latencyMs) ? Math.round(latencyMs) : null,
-                upstreamStatus: upstream.status,
-                clientStatus,
-                responseBytes: streamBytesTotal,
-                streamBroken: 0,
-                tokensIn: usage.tokensIn,
-                tokensOut: usage.tokensOut,
-                tokensTotal: usage.tokensTotal
-            });
-            return;
         } catch (error) {
             const responseAt = new Date().toISOString();
             const errorBody = error?.message || 'Streaming proxy failed';
@@ -2456,7 +2700,7 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
             const clientStatus = res.headersSent ? (res.statusCode || error.response?.status || 500) : (error.response?.status || 500);
             const usage = extractUsage(error.response?.data);
             await db.run(
-                `UPDATE conversation_logs SET responseBody = ?, status = ?, responseAt = ?, targetUrl = ?, proxyUserAgent = ?, latencyMs = ?, upstreamStatus = ?, clientStatus = ?, responseBytes = ?, streamBroken = ?, tokensIn = ?, tokensOut = ?, tokensTotal = ? WHERE id = ?`,
+                `UPDATE conversation_logs SET responseBody = ?, status = ?, responseAt = ?, targetUrl = ?, proxyUserAgent = ?, latencyMs = ?, upstreamStatus = ?, clientStatus = ?, responseBytes = ?, streamBroken = ?, tokensIn = ?, tokensOut = ?, tokensTotal = ?, disconnectReason = ? WHERE id = ?`,
                 [
                     errorBody,
                     'error',
@@ -2471,6 +2715,7 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                     usage.tokensIn,
                     usage.tokensOut,
                     usage.tokensTotal,
+                    'upstream_error',
                     logId
                 ]
             );

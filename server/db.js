@@ -251,6 +251,12 @@ async function setupDb() {
     await addLogCol('proxyRequestBody', 'TEXT');
     await addLogCol('proxyResponseBody', 'TEXT');
 
+    // Streaming enhancements
+    await addLogCol('ttfbMs', 'INTEGER');
+    await addLogCol('chunkCount', 'INTEGER');
+    await addLogCol('streamDurationMs', 'INTEGER');
+    await addLogCol('disconnectReason', 'TEXT');
+
     await db.exec(`
         CREATE TABLE IF NOT EXISTS app_settings (
             key TEXT PRIMARY KEY NOT NULL,
@@ -268,6 +274,15 @@ async function setupDb() {
     );
     await db.run(
         "INSERT OR IGNORE INTO app_settings (key, value) VALUES ('upstream_headers_blocklist', '[\"host\",\"content-length\",\"connection\",\"accept-encoding\"]')"
+    );
+    await db.run(
+        "INSERT OR IGNORE INTO app_settings (key, value) VALUES ('stream_chunk_timeout_seconds', '120')"
+    );
+    await db.run(
+        "INSERT OR IGNORE INTO app_settings (key, value) VALUES ('stream_retry_enabled', '1')"
+    );
+    await db.run(
+        "INSERT OR IGNORE INTO app_settings (key, value) VALUES ('stream_max_retries', '2')"
     );
 
     const adminUserCols = await db.all('PRAGMA table_info(admin_users)');
