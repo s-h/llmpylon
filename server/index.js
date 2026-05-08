@@ -607,6 +607,7 @@ function convertOpenAIStreamToAnthropic(chunkText, state) {
             const data = line.slice(6).trim();
             if (data === '[DONE]') {
                 if (state.thinkingBlockOpen) {
+                    result += 'event: content_block_delta\ndata: {"type":"content_block_delta","index":' + (state.blockIndex || 0) + ',"delta":{"type":"signature_delta","signature":"' + (state.messageId || 'msg_unknown') + '"}}\n\n';
                     result += 'event: content_block_stop\ndata: {"type":"content_block_stop","index":' + (state.blockIndex || 0) + '}\n\n';
                     state.thinkingBlockOpen = false;
                     state.blockIndex = (state.blockIndex || 0) + 1;
@@ -628,9 +629,10 @@ function convertOpenAIStreamToAnthropic(chunkText, state) {
                         if (!state.hasStarted && (delta.role === 'assistant' || delta.content != null || delta.tool_calls || finishReason)) {
                             state.hasStarted = true;
                             state.blockIndex = 0;
+                            state.messageId = parsed.id || 'msg_unknown';
                             result += 'event: message_start\ndata: ' + JSON.stringify({
                                 type: 'message_start',
-                                message: { id: parsed.id || 'msg_unknown', type: 'message', role: 'assistant', content: [], model: parsed.model || '' }
+                                message: { id: state.messageId, type: 'message', role: 'assistant', content: [], model: parsed.model || '', stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } }
                             }) + '\n\n';
                         }
 
@@ -638,6 +640,7 @@ function convertOpenAIStreamToAnthropic(chunkText, state) {
                             for (const tc of delta.tool_calls) {
                                 if (tc.id && tc.function && tc.function.name) {
                                     if (state.thinkingBlockOpen) {
+                                        result += 'event: content_block_delta\ndata: {"type":"content_block_delta","index":' + state.blockIndex + ',"delta":{"type":"signature_delta","signature":"' + (state.messageId || 'msg_unknown') + '"}}\n\n';
                                         result += 'event: content_block_stop\ndata: {"type":"content_block_stop","index":' + state.blockIndex + '}\n\n';
                                         state.thinkingBlockOpen = false;
                                         state.blockIndex++;
@@ -664,8 +667,9 @@ function convertOpenAIStreamToAnthropic(chunkText, state) {
                             }
                         }
 
-                        if (delta.content != null && !delta.tool_calls) {
+                        if (delta.content != null && delta.content !== '' && !delta.tool_calls) {
                             if (state.thinkingBlockOpen) {
+                                result += 'event: content_block_delta\ndata: {"type":"content_block_delta","index":' + state.blockIndex + ',"delta":{"type":"signature_delta","signature":"' + (state.messageId || 'msg_unknown') + '"}}\n\n';
                                 result += 'event: content_block_stop\ndata: {"type":"content_block_stop","index":' + state.blockIndex + '}\n\n';
                                 state.thinkingBlockOpen = false;
                                 state.blockIndex++;
@@ -704,7 +708,7 @@ function convertOpenAIStreamToAnthropic(chunkText, state) {
                             if (!state.thinkingBlockOpen) {
                                 result += 'event: content_block_start\ndata: ' + JSON.stringify({
                                     type: 'content_block_start', index: state.blockIndex,
-                                    content_block: { type: 'thinking', thinking: '' }
+                                    content_block: { type: 'thinking', thinking: '', signature: '' }
                                 }) + '\n\n';
                                 state.thinkingBlockOpen = true;
                             }
@@ -728,6 +732,7 @@ function convertOpenAIStreamToAnthropic(chunkText, state) {
                                 state.blockIndex++;
                             }
                             if (state.thinkingBlockOpen) {
+                                result += 'event: content_block_delta\ndata: {"type":"content_block_delta","index":' + state.blockIndex + ',"delta":{"type":"signature_delta","signature":"' + (state.messageId || 'msg_unknown') + '"}}\n\n';
                                 result += 'event: content_block_stop\ndata: {"type":"content_block_stop","index":' + state.blockIndex + '}\n\n';
                                 state.thinkingBlockOpen = false;
                                 state.blockIndex++;
@@ -738,7 +743,8 @@ function convertOpenAIStreamToAnthropic(chunkText, state) {
                                 : finishReason === 'content_filter' ? 'refusal' : finishReason;
                             result += 'event: message_delta\ndata: ' + JSON.stringify({
                                 type: 'message_delta',
-                                delta: { stop_reason: anthropicStopReason, stop_sequence: null }
+                                delta: { stop_reason: anthropicStopReason, stop_sequence: null },
+                                usage: { output_tokens: 0 }
                             }) + '\n\n';
                         }
                     }
@@ -2410,9 +2416,43 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                                     res.setHeader(h, upstream.headers[h]);
                                 }
                             }
+                            res.setHeader('X-Accel-Buffering', 'no');
+                            if (!res.getHeader('Cache-Control')) {
+                                res.setHeader('Cache-Control', 'no-cache, no-transform');
+                            }
+                            res.flushHeaders();
+                            if (req.socket && typeof req.socket.setNoDelay === 'function') {
+                                req.socket.setNoDelay(true);
+                            }
                         }
 
                         const sseBuffer = { data: '' };
+
+                        // --- Write buffer for batching SSE writes ---
+                        let writeBuffer = '';
+                        let writeBufferTimer = null;
+                        const WRITE_BUFFER_SIZE = 4096;
+                        const flushWriteBuffer = () => {
+                            if (writeBufferTimer) {
+                                clearTimeout(writeBufferTimer);
+                                writeBufferTimer = null;
+                            }
+                            if (!writeBuffer) return;
+                            const data = writeBuffer;
+                            writeBuffer = '';
+                            streamBytesTotal += Buffer.byteLength(data, 'utf8');
+                            responseData += data;
+                            pendingChunkForLog += data;
+                            sentBytesToClient = true;
+                            res.write(data);
+                            if (Date.now() - lastEmitTs > 180) emitPendingChunk();
+                        };
+                        const bufferWrite = (text) => {
+                            writeBuffer += text;
+                            if (writeBuffer.length >= WRITE_BUFFER_SIZE) {
+                                flushWriteBuffer();
+                            }
+                        };
 
                         // --- Chunk timeout detector ---
                         let lastChunkAt = Date.now();
@@ -2477,12 +2517,10 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                                     }
                                 }
 
-                                streamBytesTotal += Buffer.byteLength(text, 'utf8');
-                                responseData += text;
-                                pendingChunkForLog += text;
-                                sentBytesToClient = true;
-                                res.write(text);
-                                if (Date.now() - lastEmitTs > 180) emitPendingChunk();
+                                bufferWrite(text);
+                                if (text.includes('"message_stop"') || text.includes('"content_block_stop"') || text.includes('"message_delta"') || text.includes('data: [DONE]') || text.includes('"content_block_start"')) {
+                                    flushWriteBuffer();
+                                }
                             });
 
                             src.on('end', () => {
@@ -2492,22 +2530,21 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                                         ? convertOpenAIStreamToAnthropic(sseBuffer.data.trim() + '\n\n', sseConvertState)
                                         : convertAnthropicStreamToOpenAI(sseBuffer.data.trim() + '\n\n', sseConvertState);
                                     if (flushed) {
-                                        streamBytesTotal += Buffer.byteLength(flushed, 'utf8');
-                                        responseData += flushed;
-                                        pendingChunkForLog += flushed;
-                                        res.write(flushed);
+                                        bufferWrite(flushed);
                                         if (flushed.includes('data: [DONE]') || flushed.includes('"message_stop"')) {
                                             streamCompleted = true;
                                         }
                                     }
                                     sseBuffer.data = '';
                                 }
+                                flushWriteBuffer();
                                 emitPendingChunk();
                                 resolve();
                             });
 
                             src.on('error', (err) => {
                                 if (ended) return;
+                                flushWriteBuffer();
                                 reject(err);
                             });
 
@@ -2568,6 +2605,13 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
 
                         if (isClientDisconnect) {
                             finalDisconnectReason = 'client_disconnect';
+                            finalResponseBody = responseData;
+                            finalResponseAt = new Date().toISOString();
+                            finalUsage = extractUsage(responseData);
+                            if (streamCompleted && finalUpstream && finalUpstream.status >= 200 && finalUpstream.status < 300) {
+                                finalStatus = 'completed';
+                            }
+                            console.warn(`[Proxy] Client disconnected (log ${logId}): sent=${streamBytesTotal}bytes, chunks=${chunkCount}, completed=${streamCompleted}, lastSSE_len=${(responseData || '').length}, socketAlive=${req.socket ? !req.socket.destroyed : 'N/A'}, ua=${clientUserAgent || '?'}`);
                             break; // Don't retry on client disconnect
                         }
 
