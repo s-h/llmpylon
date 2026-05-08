@@ -41,7 +41,11 @@ import {
   Percent,
   Zap,
   Timer,
-  TrendingUp
+  TrendingUp,
+  Gauge,
+  Radio,
+  WifiOff,
+  HardDrive
 } from 'lucide-vue-next';
 
 use([CanvasRenderer, CalendarComponent, GridComponent, LegendComponent, TooltipComponent, VisualMapComponent, HeatmapChart, LineChart, PieChart]);
@@ -330,6 +334,8 @@ function onModelDragEnd() {
 
 const statsRange = ref('30d');
 const statsProviderId = ref('all');
+const statsIsStream = ref('all');
+const statsClientProtocol = ref('all');
 const statsLoading = ref(false);
 const statsData = ref(null);
 
@@ -339,6 +345,12 @@ const fetchStats = async () => {
     const params = { range: statsRange.value };
     if (statsProviderId.value !== 'all') {
       params.providerId = statsProviderId.value;
+    }
+    if (statsIsStream.value !== 'all') {
+      params.isStream = statsIsStream.value;
+    }
+    if (statsClientProtocol.value !== 'all') {
+      params.clientProtocol = statsClientProtocol.value;
     }
     const res = await axios.get(`${API_BASE}/stats`, { params });
     statsData.value = res.data;
@@ -371,7 +383,8 @@ const formatBytes = (n) => {
   if (!Number.isFinite(num) || num < 0) return '-';
   if (num < 1024) return `${num} B`;
   if (num < 1024 * 1024) return `${(num / 1024).toFixed(1)} KB`;
-  return `${(num / (1024 * 1024)).toFixed(2)} MB`;
+  if (num < 1024 * 1024 * 1024) return `${(num / (1024 * 1024)).toFixed(2)} MB`;
+  return `${(num / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 };
 
 const formatLogLatency = (log) => {
@@ -514,8 +527,18 @@ const statsSummary = computed(() => {
     errorCount,
     errorRate,
     tokensTotal: Number(s.tokensTotal || 0),
+    tokensInTotal: Number(s.tokensInTotal || 0),
+    tokensOutTotal: Number(s.tokensOutTotal || 0),
     avgLatencyMs: s.avgLatencyMs === null || s.avgLatencyMs === undefined ? null : Number(s.avgLatencyMs),
-    activeDays: Number(s.activeDays || 0)
+    activeDays: Number(s.activeDays || 0),
+    streamCount: Number(s.streamCount || 0),
+    nonStreamCount: Number(s.nonStreamCount || 0),
+    ttfbAvgMs: s.ttfbAvgMs === null || s.ttfbAvgMs === undefined ? null : Number(s.ttfbAvgMs),
+    responseBytesTotal: Number(s.responseBytesTotal || 0),
+    streamBrokenCount: Number(s.streamBrokenCount || 0),
+    streamBrokenRate: Number(s.streamBrokenRate || 0),
+    latencyPercentiles: statsData.value?.latencyPercentiles || null,
+    ttfbPercentiles: statsData.value?.ttfbPercentiles || null
   };
 });
 
@@ -609,27 +632,29 @@ const tokensOption = computed(() => {
   const days = ts?.days || [];
   return {
     tooltip: { trigger: 'axis' },
-    legend: { data: ['Tokens'], top: 0 },
-    grid: { left: 40, right: 20, top: 40, bottom: 30 },
+    legend: { data: ['Tokens 入', 'Tokens 出'], top: 0 },
+    grid: { left: 50, right: 20, top: 40, bottom: 30 },
     xAxis: { type: 'category', data: days, axisLabel: { color: '#6b7280' } },
     yAxis: { type: 'value', axisLabel: { color: '#6b7280' } },
     series: [
-      { name: 'Tokens', type: 'line', smooth: true, data: ts?.tokensTotal || [], showSymbol: false }
+      { name: 'Tokens 入', type: 'line', smooth: true, data: ts?.tokensIn || [], showSymbol: false, lineStyle: { color: '#0891b2' }, itemStyle: { color: '#0891b2' } },
+      { name: 'Tokens 出', type: 'line', smooth: true, data: ts?.tokensOut || [], showSymbol: false, lineStyle: { color: '#0d9488' }, itemStyle: { color: '#0d9488' } }
     ]
   };
 });
 
-const latencyOption = computed(() => {
+const latencyTtfbOption = computed(() => {
   const ts = statsData.value?.timeseries;
   const days = ts?.days || [];
   return {
     tooltip: { trigger: 'axis' },
-    legend: { data: ['平均耗时(ms)'], top: 0 },
-    grid: { left: 40, right: 20, top: 40, bottom: 30 },
+    legend: { data: ['平均耗时', 'TTFB'], top: 0 },
+    grid: { left: 50, right: 20, top: 40, bottom: 30 },
     xAxis: { type: 'category', data: days, axisLabel: { color: '#6b7280' } },
     yAxis: { type: 'value', axisLabel: { color: '#6b7280' } },
     series: [
-      { name: '平均耗时(ms)', type: 'line', smooth: true, data: ts?.avgLatencyMs || [], showSymbol: false }
+      { name: '平均耗时', type: 'line', smooth: true, data: ts?.avgLatencyMs || [], showSymbol: false, lineStyle: { color: '#059669' }, itemStyle: { color: '#059669' } },
+      { name: 'TTFB', type: 'line', smooth: true, data: ts?.ttfbAvgMs || [], showSymbol: false, lineStyle: { color: '#7c3aed' }, itemStyle: { color: '#7c3aed' } }
     ]
   };
 });
@@ -651,6 +676,51 @@ const modelPieOption = computed(() => {
         emphasis: { label: { show: true, fontSize: 12 } }
       }
     ]
+  };
+});
+
+const errorRateOption = computed(() => {
+  const ts = statsData.value?.timeseries;
+  const days = ts?.days || [];
+  return {
+    tooltip: { trigger: 'axis', valueFormatter: (v) => (v * 100).toFixed(2) + '%' },
+    legend: { data: ['错误率'], top: 0 },
+    grid: { left: 50, right: 20, top: 40, bottom: 30 },
+    xAxis: { type: 'category', data: days, axisLabel: { color: '#6b7280' } },
+    yAxis: { type: 'value', axisLabel: { color: '#6b7280', formatter: (v) => (v * 100).toFixed(0) + '%' }, min: 0 },
+    series: [
+      { name: '错误率', type: 'line', smooth: true, data: ts?.errorRate || [], showSymbol: false, areaStyle: { color: 'rgba(244,63,94,0.08)' }, lineStyle: { color: '#f43f5e' }, itemStyle: { color: '#f43f5e' } }
+    ]
+  };
+});
+
+const protocolPieOption = computed(() => {
+  const rows = statsData.value?.distributions?.byClientProtocol || [];
+  const data = rows.map(r => ({ name: r.name, value: Number(r.tokens || 0) }));
+  return {
+    tooltip: { trigger: 'item' },
+    legend: { type: 'scroll', orient: 'vertical', right: 10, top: 10, bottom: 10 },
+    series: [{ type: 'pie', radius: ['40%', '70%'], center: ['40%', '55%'], data, avoidLabelOverlap: true, label: { show: false }, emphasis: { label: { show: true, fontSize: 12 } } }]
+  };
+});
+
+const streamPieOption = computed(() => {
+  const rows = statsData.value?.distributions?.byStreamType || [];
+  const data = rows.map(r => ({ name: r.name, value: Number(r.tokens || 0) }));
+  return {
+    tooltip: { trigger: 'item' },
+    legend: { type: 'scroll', orient: 'vertical', right: 10, top: 10, bottom: 10 },
+    series: [{ type: 'pie', radius: ['40%', '70%'], center: ['40%', '55%'], data, avoidLabelOverlap: true, label: { show: false }, emphasis: { label: { show: true, fontSize: 12 } } }]
+  };
+});
+
+const errorCategoryPieOption = computed(() => {
+  const rows = statsData.value?.distributions?.byErrorCategory || [];
+  const data = rows.map(r => ({ name: r.name, value: Number(r.requests || 0) }));
+  return {
+    tooltip: { trigger: 'item' },
+    legend: { type: 'scroll', orient: 'vertical', right: 10, top: 10, bottom: 10 },
+    series: [{ type: 'pie', radius: ['40%', '70%'], center: ['40%', '55%'], data, avoidLabelOverlap: true, label: { show: false }, emphasis: { label: { show: true, fontSize: 12 } } }]
   };
 });
 
@@ -840,11 +910,29 @@ const saveAppSettings = async () => {
 const clearAllStats = async () => {
   if (!confirm('确定清空全部统计数据？此操作不可恢复。')) return;
   try {
-    const res = await axios.post(`${API_BASE}/stats/clear`);
+    const res = await axios.post(`${API_BASE}/stats/clear`, { range: statsRange.value });
     alert(`已清空 ${res.data.changes ?? 0} 条统计记录`);
     if (activeTab.value === 'stats') fetchStats();
   } catch (e) {
     alert('清空失败: ' + (e.response?.data?.error || e.message));
+  }
+};
+
+const exportStats = async () => {
+  try {
+    const params = { range: statsRange.value, format: 'csv' };
+    if (statsProviderId.value !== 'all') params.providerId = statsProviderId.value;
+    if (statsIsStream.value !== 'all') params.isStream = statsIsStream.value;
+    if (statsClientProtocol.value !== 'all') params.clientProtocol = statsClientProtocol.value;
+    const res = await axios.get(`${API_BASE}/stats/export`, { params, responseType: 'blob' });
+    const url = URL.createObjectURL(new Blob([res.data]));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'stats_export.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    alert('导出失败: ' + (e.response?.data?.error || e.message));
   }
 };
 
@@ -1543,6 +1631,18 @@ watch(statsRange, () => {
 });
 
 watch(statsProviderId, () => {
+  if (activeTab.value === 'stats') {
+    if (isAuthenticated.value) fetchStats();
+  }
+});
+
+watch(statsIsStream, () => {
+  if (activeTab.value === 'stats') {
+    if (isAuthenticated.value) fetchStats();
+  }
+});
+
+watch(statsClientProtocol, () => {
   if (activeTab.value === 'stats') {
     if (isAuthenticated.value) fetchStats();
   }
@@ -2490,6 +2590,14 @@ onUnmounted(() => {
                 <Trash2 class="h-4 w-4 opacity-90" />
                 清空统计
               </button>
+              <button
+                type="button"
+                @click="exportStats"
+                class="inline-flex shrink-0 items-center gap-2 rounded-xl border border-white/15 bg-white/10 px-4 py-2.5 text-sm font-semibold text-cyan-200 backdrop-blur-sm transition hover:bg-white/15"
+              >
+                <Download class="h-4 w-4 opacity-90" />
+                导出 CSV
+              </button>
             </div>
 
             <div class="relative mt-6 flex flex-col gap-4 rounded-xl border border-white/10 bg-white/[0.06] p-4 backdrop-blur-md sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
@@ -2556,6 +2664,30 @@ onUnmounted(() => {
                 </label>
                 <span class="text-[11px] text-slate-500">热力图不受厂商筛选影响</span>
               </div>
+              <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-4">
+                <label class="flex items-center gap-2 text-xs font-medium text-slate-300">
+                  <span class="whitespace-nowrap">类型</span>
+                  <select
+                    v-model="statsIsStream"
+                    class="min-w-[7rem] rounded-lg border border-white/15 bg-slate-900/40 px-3 py-2 text-xs font-semibold text-white outline-none ring-0 focus:border-cyan-400/50"
+                  >
+                    <option value="all" class="text-slate-900">全部</option>
+                    <option value="1" class="text-slate-900">流式</option>
+                    <option value="0" class="text-slate-900">非流式</option>
+                  </select>
+                </label>
+                <label class="flex items-center gap-2 text-xs font-medium text-slate-300">
+                  <span class="whitespace-nowrap">协议</span>
+                  <select
+                    v-model="statsClientProtocol"
+                    class="min-w-[7rem] rounded-lg border border-white/15 bg-slate-900/40 px-3 py-2 text-xs font-semibold text-white outline-none ring-0 focus:border-cyan-400/50"
+                  >
+                    <option value="all" class="text-slate-900">全部</option>
+                    <option value="openai" class="text-slate-900">OpenAI</option>
+                    <option value="anthropic" class="text-slate-900">Anthropic</option>
+                  </select>
+                </label>
+              </div>
             </div>
           </div>
 
@@ -2565,7 +2697,7 @@ onUnmounted(() => {
           </div>
 
           <div v-else class="space-y-8">
-            <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
+            <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-6">
               <div class="group relative overflow-hidden rounded-2xl border border-slate-200/90 bg-white p-5 shadow-sm transition hover:border-slate-300 hover:shadow-md">
                 <div class="flex items-start justify-between gap-3">
                   <div class="rounded-xl bg-blue-50 p-2.5 text-blue-600">
@@ -2596,11 +2728,20 @@ onUnmounted(() => {
               <div class="group relative overflow-hidden rounded-2xl border border-slate-200/90 bg-white p-5 shadow-sm transition hover:border-slate-300 hover:shadow-md">
                 <div class="flex items-start justify-between gap-3">
                   <div class="rounded-xl bg-cyan-50 p-2.5 text-cyan-600">
-                    <Zap class="h-5 w-5" />
+                    <Download class="h-5 w-5" />
                   </div>
                 </div>
-                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-slate-500">Tokens</p>
-                <p class="mt-1 text-3xl font-bold tabular-nums tracking-tight text-cyan-700">{{ statsSummary ? formatNumber(statsSummary.tokensTotal) : '—' }}</p>
+                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-slate-500">Tokens 入</p>
+                <p class="mt-1 text-3xl font-bold tabular-nums tracking-tight text-cyan-700">{{ statsSummary ? formatNumber(statsSummary.tokensInTotal) : '—' }}</p>
+              </div>
+              <div class="group relative overflow-hidden rounded-2xl border border-slate-200/90 bg-white p-5 shadow-sm transition hover:border-slate-300 hover:shadow-md">
+                <div class="flex items-start justify-between gap-3">
+                  <div class="rounded-xl bg-teal-50 p-2.5 text-teal-600">
+                    <Upload class="h-5 w-5" />
+                  </div>
+                </div>
+                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-slate-500">Tokens 出</p>
+                <p class="mt-1 text-3xl font-bold tabular-nums tracking-tight text-teal-700">{{ statsSummary ? formatNumber(statsSummary.tokensOutTotal) : '—' }}</p>
               </div>
               <div class="group relative overflow-hidden rounded-2xl border border-slate-200/90 bg-white p-5 shadow-sm transition hover:border-slate-300 hover:shadow-md sm:col-span-2 xl:col-span-1">
                 <div class="flex items-start justify-between gap-3">
@@ -2611,6 +2752,60 @@ onUnmounted(() => {
                 <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-slate-500">平均耗时</p>
                 <p class="mt-1 text-3xl font-bold tabular-nums tracking-tight text-emerald-700">{{ statsSummary ? formatMs(statsSummary.avgLatencyMs) : '—' }}</p>
               </div>
+            </div>
+
+            <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+              <div class="group relative overflow-hidden rounded-2xl border border-slate-200/90 bg-white p-5 shadow-sm transition hover:border-slate-300 hover:shadow-md">
+                <div class="flex items-start justify-between gap-3">
+                  <div class="rounded-xl bg-violet-50 p-2.5 text-violet-600">
+                    <Radio class="h-5 w-5" />
+                  </div>
+                </div>
+                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-slate-500">流式请求</p>
+                <p class="mt-1 text-3xl font-bold tabular-nums tracking-tight text-violet-700">{{ statsSummary ? formatNumber(statsSummary.streamCount) : '—' }}</p>
+              </div>
+              <div class="group relative overflow-hidden rounded-2xl border border-slate-200/90 bg-white p-5 shadow-sm transition hover:border-slate-300 hover:shadow-md">
+                <div class="flex items-start justify-between gap-3">
+                  <div class="rounded-xl bg-purple-50 p-2.5 text-purple-600">
+                    <Gauge class="h-5 w-5" />
+                  </div>
+                </div>
+                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-slate-500">TTFB 平均</p>
+                <p class="mt-1 text-3xl font-bold tabular-nums tracking-tight text-purple-700">{{ statsSummary ? formatMs(statsSummary.ttfbAvgMs) : '—' }}</p>
+              </div>
+              <div class="group relative overflow-hidden rounded-2xl border border-slate-200/90 bg-white p-5 shadow-sm transition hover:border-slate-300 hover:shadow-md">
+                <div class="flex items-start justify-between gap-3">
+                  <div class="rounded-xl bg-sky-50 p-2.5 text-sky-600">
+                    <HardDrive class="h-5 w-5" />
+                  </div>
+                </div>
+                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-slate-500">数据传输</p>
+                <p class="mt-1 text-3xl font-bold tabular-nums tracking-tight text-sky-700">{{ statsSummary ? formatBytes(statsSummary.responseBytesTotal) : '—' }}</p>
+              </div>
+              <div class="group relative overflow-hidden rounded-2xl border border-slate-200/90 bg-white p-5 shadow-sm transition hover:border-slate-300 hover:shadow-md">
+                <div class="flex items-start justify-between gap-3">
+                  <div class="rounded-xl bg-orange-50 p-2.5 text-orange-600">
+                    <WifiOff class="h-5 w-5" />
+                  </div>
+                </div>
+                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-slate-500">流中断率</p>
+                <p class="mt-1 text-3xl font-bold tabular-nums tracking-tight text-orange-700">{{ statsSummary ? (statsSummary.streamBrokenRate * 100).toFixed(2) + '%' : '—' }}</p>
+              </div>
+            </div>
+
+            <div v-if="statsSummary?.latencyPercentiles || statsSummary?.ttfbPercentiles" class="flex flex-wrap gap-4 rounded-2xl border border-slate-200/90 bg-white p-5 shadow-sm">
+              <template v-if="statsSummary?.latencyPercentiles">
+                <span class="text-xs font-semibold uppercase tracking-wide text-slate-400 self-center">延迟分位数</span>
+                <span class="inline-flex items-center rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700">P50 {{ formatMs(statsSummary.latencyPercentiles.p50) }}</span>
+                <span class="inline-flex items-center rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700">P90 {{ formatMs(statsSummary.latencyPercentiles.p90) }}</span>
+                <span class="inline-flex items-center rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700">P99 {{ formatMs(statsSummary.latencyPercentiles.p99) }}</span>
+              </template>
+              <template v-if="statsSummary?.ttfbPercentiles">
+                <span class="text-xs font-semibold uppercase tracking-wide text-slate-400 self-center ml-4">TTFB 分位数</span>
+                <span class="inline-flex items-center rounded-full bg-purple-50 px-3 py-1 text-xs font-medium text-purple-700">P50 {{ formatMs(statsSummary.ttfbPercentiles.p50) }}</span>
+                <span class="inline-flex items-center rounded-full bg-purple-50 px-3 py-1 text-xs font-medium text-purple-700">P90 {{ formatMs(statsSummary.ttfbPercentiles.p90) }}</span>
+                <span class="inline-flex items-center rounded-full bg-purple-50 px-3 py-1 text-xs font-medium text-purple-700">P99 {{ formatMs(statsSummary.ttfbPercentiles.p99) }}</span>
+              </template>
             </div>
 
             <div class="rounded-2xl border border-slate-200/90 bg-white p-6 shadow-sm">
@@ -2640,7 +2835,7 @@ onUnmounted(() => {
               </div>
             </div>
 
-            <div class="grid grid-cols-1 gap-6 xl:grid-cols-2">
+            <div class="grid grid-cols-1 gap-6 sm:grid-cols-2 xl:grid-cols-3">
               <div class="rounded-2xl border border-slate-200/90 bg-white p-6 shadow-sm">
                 <div class="mb-4 flex items-center gap-2">
                   <TrendingUp class="h-4 w-4 text-slate-400" />
@@ -2650,20 +2845,24 @@ onUnmounted(() => {
               </div>
               <div class="rounded-2xl border border-slate-200/90 bg-white p-6 shadow-sm">
                 <div class="mb-4 flex items-center gap-2">
+                  <AlertTriangle class="h-4 w-4 text-rose-400" />
+                  <h3 class="text-sm font-semibold text-slate-900">错误率趋势</h3>
+                </div>
+                <VChart :option="errorRateOption" autoresize class="h-64" />
+              </div>
+              <div class="rounded-2xl border border-slate-200/90 bg-white p-6 shadow-sm">
+                <div class="mb-4 flex items-center gap-2">
                   <Zap class="h-4 w-4 text-slate-400" />
                   <h3 class="text-sm font-semibold text-slate-900">Tokens 趋势</h3>
                 </div>
                 <VChart :option="tokensOption" autoresize class="h-64" />
               </div>
-            </div>
-
-            <div class="grid grid-cols-1 gap-6 xl:grid-cols-2">
               <div class="rounded-2xl border border-slate-200/90 bg-white p-6 shadow-sm">
                 <div class="mb-4 flex items-center gap-2">
                   <Timer class="h-4 w-4 text-slate-400" />
-                  <h3 class="text-sm font-semibold text-slate-900">平均耗时趋势</h3>
+                  <h3 class="text-sm font-semibold text-slate-900">延迟与 TTFB</h3>
                 </div>
-                <VChart :option="latencyOption" autoresize class="h-64" />
+                <VChart :option="latencyTtfbOption" autoresize class="h-64" />
               </div>
               <div class="rounded-2xl border border-slate-200/90 bg-white p-6 shadow-sm">
                 <div class="mb-4 flex items-center gap-2">
@@ -2671,6 +2870,30 @@ onUnmounted(() => {
                   <h3 class="text-sm font-semibold text-slate-900">模型占比（按 Tokens）</h3>
                 </div>
                 <VChart :option="modelPieOption" autoresize class="h-64" />
+              </div>
+              <div class="rounded-2xl border border-slate-200/90 bg-white p-6 shadow-sm">
+                <div class="mb-4 flex items-center gap-2">
+                  <ArrowRightLeft class="h-4 w-4 text-slate-400" />
+                  <h3 class="text-sm font-semibold text-slate-900">协议分布（按 Tokens）</h3>
+                </div>
+                <VChart :option="protocolPieOption" autoresize class="h-64" />
+              </div>
+            </div>
+
+            <div class="grid grid-cols-1 gap-6 sm:grid-cols-2">
+              <div class="rounded-2xl border border-slate-200/90 bg-white p-6 shadow-sm">
+                <div class="mb-4 flex items-center gap-2">
+                  <AlertTriangle class="h-4 w-4 text-rose-400" />
+                  <h3 class="text-sm font-semibold text-slate-900">错误分类</h3>
+                </div>
+                <VChart :option="errorCategoryPieOption" autoresize class="h-64" />
+              </div>
+              <div class="rounded-2xl border border-slate-200/90 bg-white p-6 shadow-sm">
+                <div class="mb-4 flex items-center gap-2">
+                  <Radio class="h-4 w-4 text-slate-400" />
+                  <h3 class="text-sm font-semibold text-slate-900">流式类型分布（按 Tokens）</h3>
+                </div>
+                <VChart :option="streamPieOption" autoresize class="h-64" />
               </div>
             </div>
 

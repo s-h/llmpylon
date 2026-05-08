@@ -1594,8 +1594,80 @@ app.put('/api/settings', async (req, res) => {
 });
 
 app.post('/api/stats/clear', async (req, res) => {
-    const r = await db.run('DELETE FROM stats_events');
+    const { range, appId, providerId, model, status } = req.body || {};
+    let whereSql = '';
+    const params = [];
+    const clauses = [];
+    if (range) {
+        const { from, to } = normalizeStatsRange(range);
+        if (from) {
+            clauses.push('requestAt >= ?');
+            params.push(from.toISOString());
+        }
+        if (to) {
+            clauses.push('requestAt <= ?');
+            params.push(to.toISOString());
+        }
+    }
+    if (appId) { clauses.push('appId = ?'); params.push(Number(appId)); }
+    if (providerId) { clauses.push('providerId = ?'); params.push(Number(providerId)); }
+    if (model) { clauses.push('actualModel = ?'); params.push(model); }
+    if (status) { clauses.push('status = ?'); params.push(status); }
+    whereSql = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const r = await db.run(`DELETE FROM stats_events ${whereSql}`, params);
     res.json({ ok: true, changes: r.changes });
+});
+
+app.get('/api/stats/export', async (req, res) => {
+    const { range, appId, providerId, model, status, format } = req.query;
+    const { from, to } = normalizeStatsRange(range);
+    const where = [];
+    const params = [];
+    if (from) { where.push('e.requestAt >= ?'); params.push(from.toISOString()); }
+    if (to)   { where.push('e.requestAt <= ?'); params.push(to.toISOString()); }
+    if (appId)      { where.push('e.appId = ?');      params.push(Number(appId)); }
+    if (providerId) { where.push('e.providerId = ?'); params.push(Number(providerId)); }
+    if (model)      { where.push('e.actualModel = ?'); params.push(model); }
+    if (status)     { where.push('e.status = ?');      params.push(status); }
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+    const rows = await db.all(
+        `SELECT e.id, e.requestAt, e.actualModel, e.status, e.latencyMs, e.tokensIn, e.tokensOut, e.tokensTotal,
+                e.isStream, e.ttfbMs, e.chunkCount, e.responseBytes, e.streamBroken,
+                e.clientProtocol, e.retryCount, e.upstreamStatus, e.clientStatus, e.errorMessage,
+                COALESCE(p.name, 'unknown') as providerName,
+                COALESCE(ck.name, 'unknown') as appName
+         FROM stats_events e
+         LEFT JOIN providers p ON e.providerId = p.id
+         LEFT JOIN client_keys ck ON e.appId = ck.id
+         ${whereSql}
+         ORDER BY e.requestAt DESC
+         LIMIT 50000`,
+        params
+    );
+
+    const fmt = (format || 'csv').toLowerCase();
+    if (fmt === 'json') {
+        return res.json({ count: rows.length, rows });
+    }
+
+    const headers = ['id','requestAt','actualModel','status','latencyMs','tokensIn','tokensOut','tokensTotal',
+                      'isStream','ttfbMs','chunkCount','responseBytes','streamBroken',
+                      'clientProtocol','retryCount','upstreamStatus','clientStatus','errorMessage',
+                      'providerName','appName'];
+    const csvLines = [headers.join(',')];
+    for (const r of rows) {
+        csvLines.push(headers.map(h => {
+            const v = r[h];
+            if (v === null || v === undefined) return '';
+            const s = String(v);
+            if (s.includes(',') || s.includes('"') || s.includes('\n')) return '"' + s.replace(/"/g, '""') + '"';
+            return s;
+        }).join(','));
+    }
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="stats_export.csv"');
+    res.send(csvLines.join('\n'));
 });
 
 app.get('/api/models/catalog', async (req, res) => {
@@ -1780,7 +1852,7 @@ app.delete('/api/model-rules/:id', async (req, res) => {
 });
 
 app.get('/api/stats', async (req, res) => {
-    const { range, appId, providerId, model, status } = req.query;
+    const { range, appId, providerId, model, status, isStream, clientProtocol, errorCategory } = req.query;
     const { range: normalizedRange, from, to } = normalizeStatsRange(range);
 
     const buildWhere = ({ includeProvider }) => {
@@ -1810,6 +1882,22 @@ app.get('/api/stats', async (req, res) => {
             where.push('e.status = ?');
             params.push(status);
         }
+        if (isStream !== undefined && isStream !== '' && isStream !== null) {
+            where.push('e.isStream = ?');
+            params.push(Number(isStream));
+        }
+        if (clientProtocol) {
+            where.push('e.clientProtocol = ?');
+            params.push(clientProtocol);
+        }
+        if (errorCategory) {
+            if (errorCategory === 'timeout')       where.push("(e.errorMessage LIKE '%timeout%' OR e.errorMessage LIKE '%ETIMEDOUT%' OR e.errorMessage LIKE '%Chunk timeout%')");
+            else if (errorCategory === 'auth')     where.push("(e.errorMessage LIKE '%Invalid API Key%' OR e.errorMessage LIKE '%Unauthorized%' OR e.status = 'error' AND e.upstreamStatus IN (401,403))");
+            else if (errorCategory === 'network')  where.push("(e.errorMessage LIKE '%ECONNREFUSED%' OR e.errorMessage LIKE '%ENOTFOUND%' OR e.errorMessage LIKE '%EAI_AGAIN%' OR e.errorMessage LIKE '%socket hang up%')");
+            else if (errorCategory === 'stream_broken') where.push('e.streamBroken = 1');
+            else if (errorCategory === 'upstream_4xx')  where.push('e.upstreamStatus >= 400 AND e.upstreamStatus < 500');
+            else if (errorCategory === 'upstream_5xx')  where.push('e.upstreamStatus >= 500');
+        }
         const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
         return { where, params, whereSql };
     };
@@ -1823,8 +1911,15 @@ app.get('/api/stats', async (req, res) => {
           COUNT(*) as requestCount,
           SUM(CASE WHEN e.status = 'error' THEN 1 ELSE 0 END) as errorCount,
           SUM(COALESCE(e.tokensTotal, 0)) as tokensTotal,
+          SUM(COALESCE(e.tokensIn, 0)) as tokensInTotal,
+          SUM(COALESCE(e.tokensOut, 0)) as tokensOutTotal,
           AVG(CASE WHEN e.latencyMs IS NOT NULL THEN e.latencyMs ELSE NULL END) as avgLatencyMs,
-          COUNT(DISTINCT date(e.requestAt, 'localtime')) as activeDays
+          COUNT(DISTINCT date(e.requestAt, 'localtime')) as activeDays,
+          SUM(CASE WHEN e.isStream = 1 THEN 1 ELSE 0 END) as streamCount,
+          SUM(CASE WHEN e.isStream = 0 THEN 1 ELSE 0 END) as nonStreamCount,
+          AVG(CASE WHEN e.isStream = 1 THEN e.ttfbMs ELSE NULL END) as ttfbAvgMs,
+          SUM(COALESCE(e.responseBytes, 0)) as responseBytesTotal,
+          SUM(CASE WHEN e.streamBroken = 1 THEN 1 ELSE 0 END) as streamBrokenCount
         FROM stats_events e
         ${whereSql}
         `,
@@ -1838,7 +1933,10 @@ app.get('/api/stats', async (req, res) => {
           COUNT(*) as requests,
           SUM(CASE WHEN e.status = 'error' THEN 1 ELSE 0 END) as errors,
           SUM(COALESCE(e.tokensTotal, 0)) as tokensTotal,
-          AVG(CASE WHEN e.latencyMs IS NOT NULL THEN e.latencyMs ELSE NULL END) as avgLatencyMs
+          SUM(COALESCE(e.tokensIn, 0)) as tokensIn,
+          SUM(COALESCE(e.tokensOut, 0)) as tokensOut,
+          AVG(CASE WHEN e.latencyMs IS NOT NULL THEN e.latencyMs ELSE NULL END) as avgLatencyMs,
+          AVG(CASE WHEN e.isStream = 1 THEN e.ttfbMs ELSE NULL END) as ttfbAvgMs
         FROM stats_events e
         ${whereSql}
         GROUP BY day
@@ -1906,6 +2004,8 @@ app.get('/api/stats', async (req, res) => {
         SELECT
           COALESCE(e.actualModel, e.requestedModel, 'unknown') as name,
           SUM(COALESCE(e.tokensTotal, 0)) as tokens,
+          SUM(COALESCE(e.tokensIn, 0)) as tokensIn,
+          SUM(COALESCE(e.tokensOut, 0)) as tokensOut,
           COUNT(*) as requests
         FROM stats_events e
         ${whereSql}
@@ -1921,6 +2021,8 @@ app.get('/api/stats', async (req, res) => {
         SELECT
           COALESCE(p.name, 'unknown') as name,
           SUM(COALESCE(e.tokensTotal, 0)) as tokens,
+          SUM(COALESCE(e.tokensIn, 0)) as tokensIn,
+          SUM(COALESCE(e.tokensOut, 0)) as tokensOut,
           COUNT(*) as requests
         FROM stats_events e
         LEFT JOIN providers p ON e.providerId = p.id
@@ -1937,6 +2039,8 @@ app.get('/api/stats', async (req, res) => {
         SELECT
           COALESCE(ck.name, 'unknown') as name,
           SUM(COALESCE(e.tokensTotal, 0)) as tokens,
+          SUM(COALESCE(e.tokensIn, 0)) as tokensIn,
+          SUM(COALESCE(e.tokensOut, 0)) as tokensOut,
           COUNT(*) as requests
         FROM stats_events e
         LEFT JOIN client_keys ck ON e.appId = ck.id
@@ -1960,6 +2064,110 @@ app.get('/api/stats', async (req, res) => {
         `,
         params
     );
+
+    const byClientProtocolRows = await db.all(
+        `
+        SELECT
+          COALESCE(e.clientProtocol, 'unknown') as name,
+          SUM(COALESCE(e.tokensTotal, 0)) as tokens,
+          SUM(COALESCE(e.tokensIn, 0)) as tokensIn,
+          SUM(COALESCE(e.tokensOut, 0)) as tokensOut,
+          COUNT(*) as requests
+        FROM stats_events e
+        ${whereSql}
+        GROUP BY name
+        ORDER BY requests DESC
+        `,
+        params
+    );
+
+    const byStreamTypeRows = await db.all(
+        `
+        SELECT
+          CASE WHEN e.isStream = 1 THEN 'stream' WHEN e.isStream = 0 THEN 'non-stream' ELSE 'unknown' END as name,
+          SUM(COALESCE(e.tokensTotal, 0)) as tokens,
+          SUM(COALESCE(e.tokensIn, 0)) as tokensIn,
+          SUM(COALESCE(e.tokensOut, 0)) as tokensOut,
+          COUNT(*) as requests
+        FROM stats_events e
+        ${whereSql}
+        GROUP BY name
+        ORDER BY requests DESC
+        `,
+        params
+    );
+
+    const byErrorCategoryRows = await db.all(
+        `
+        SELECT
+          CASE
+            WHEN e.errorMessage LIKE '%timeout%' OR e.errorMessage LIKE '%ETIMEDOUT%' OR e.errorMessage LIKE '%Chunk timeout%' THEN 'timeout'
+            WHEN e.errorMessage LIKE '%Invalid API Key%' OR e.errorMessage LIKE '%Unauthorized%' THEN 'auth'
+            WHEN e.errorMessage LIKE '%ECONNREFUSED%' OR e.errorMessage LIKE '%ENOTFOUND%' OR e.errorMessage LIKE '%EAI_AGAIN%' OR e.errorMessage LIKE '%socket hang up%' THEN 'network'
+            WHEN e.streamBroken = 1 THEN 'stream_broken'
+            WHEN e.upstreamStatus >= 400 AND e.upstreamStatus < 500 THEN 'upstream_4xx'
+            WHEN e.upstreamStatus >= 500 THEN 'upstream_5xx'
+            ELSE 'other'
+          END as name,
+          COUNT(*) as requests,
+          COALESCE(SUM(e.tokensTotal), 0) as tokens
+        FROM stats_events e
+        ${whereSql} ${whereSql ? 'AND' : 'WHERE'} e.status = 'error'
+        GROUP BY name
+        ORDER BY requests DESC
+        `,
+        params
+    );
+
+    const PERCENTILE_LIMIT = 100000;
+    let latencyPercentiles = null;
+    let ttfbPercentiles = null;
+
+    const latencyCountRow = await db.get(
+        `SELECT COUNT(*) as cnt FROM stats_events e ${whereSql ? whereSql + ' AND e.latencyMs IS NOT NULL' : 'WHERE e.latencyMs IS NOT NULL'}`,
+        params
+    );
+    if (latencyCountRow?.cnt > 0 && latencyCountRow.cnt <= PERCENTILE_LIMIT) {
+        const pWhere = whereSql ? whereSql + ' AND e.latencyMs IS NOT NULL' : 'WHERE e.latencyMs IS NOT NULL';
+        const values = await db.all(
+            `SELECT e.latencyMs FROM stats_events e ${pWhere} ORDER BY e.latencyMs`,
+            params
+        );
+        if (values.length > 0) {
+            const arr = values.map(r => r.latencyMs);
+            const p = (arr, pct) => {
+                const idx = (arr.length - 1) * pct / 100;
+                const lo = Math.floor(idx);
+                const hi = Math.ceil(idx);
+                if (lo === hi) return arr[lo];
+                return Math.round(arr[lo] + (arr[hi] - arr[lo]) * (idx - lo));
+            };
+            latencyPercentiles = { p50: p(arr, 50), p90: p(arr, 90), p99: p(arr, 99) };
+        }
+    }
+
+    const ttfbCountRow = await db.get(
+        `SELECT COUNT(*) as cnt FROM stats_events e ${whereSql ? whereSql + ' AND e.isStream = 1 AND e.ttfbMs IS NOT NULL' : 'WHERE e.isStream = 1 AND e.ttfbMs IS NOT NULL'}`,
+        params
+    );
+    if (ttfbCountRow?.cnt > 0 && ttfbCountRow.cnt <= PERCENTILE_LIMIT) {
+        const tWhere = whereSql ? whereSql + ' AND e.isStream = 1 AND e.ttfbMs IS NOT NULL' : 'WHERE e.isStream = 1 AND e.ttfbMs IS NOT NULL';
+        const values = await db.all(
+            `SELECT e.ttfbMs FROM stats_events e ${tWhere} ORDER BY e.ttfbMs`,
+            params
+        );
+        if (values.length > 0) {
+            const arr = values.map(r => r.ttfbMs);
+            const p = (arr, pct) => {
+                const idx = (arr.length - 1) * pct / 100;
+                const lo = Math.floor(idx);
+                const hi = Math.ceil(idx);
+                if (lo === hi) return arr[lo];
+                return Math.round(arr[lo] + (arr[hi] - arr[lo]) * (idx - lo));
+            };
+            ttfbPercentiles = { p50: p(arr, 50), p90: p(arr, 90), p99: p(arr, 99) };
+        }
+    }
 
     const topSlowRows = await db.all(
         `
@@ -2003,15 +2211,27 @@ app.get('/api/stats', async (req, res) => {
         params
     );
 
+    const sc = summaryRow?.streamCount || 0;
+    const brk = summaryRow?.streamBrokenCount || 0;
     res.json({
         range: normalizedRange,
         summary: {
             requestCount: summaryRow?.requestCount || 0,
             errorCount: summaryRow?.errorCount || 0,
             tokensTotal: summaryRow?.tokensTotal || 0,
+            tokensInTotal: summaryRow?.tokensInTotal || 0,
+            tokensOutTotal: summaryRow?.tokensOutTotal || 0,
             avgLatencyMs: summaryRow?.avgLatencyMs ?? null,
-            activeDays: summaryRow?.activeDays || 0
+            activeDays: summaryRow?.activeDays || 0,
+            streamCount: sc,
+            nonStreamCount: summaryRow?.nonStreamCount || 0,
+            ttfbAvgMs: summaryRow?.ttfbAvgMs ?? null,
+            responseBytesTotal: summaryRow?.responseBytesTotal || 0,
+            streamBrokenCount: brk,
+            streamBrokenRate: sc > 0 ? Math.round(brk / sc * 10000) / 10000 : 0
         },
+        latencyPercentiles,
+        ttfbPercentiles,
         heatmap: heatmapRows.map(r => [r.day, r.value]),
         heatmapYear: heatmapYearRows.map(r => [r.day, r.value]),
         heatmapYearRange: [formatLocalDay(yearFrom), formatLocalDay(yearTo)],
@@ -2020,13 +2240,20 @@ app.get('/api/stats', async (req, res) => {
             requests: timeseriesRows.map(r => r.requests),
             errors: timeseriesRows.map(r => r.errors),
             tokensTotal: timeseriesRows.map(r => r.tokensTotal),
-            avgLatencyMs: timeseriesRows.map(r => r.avgLatencyMs)
+            tokensIn: timeseriesRows.map(r => r.tokensIn),
+            tokensOut: timeseriesRows.map(r => r.tokensOut),
+            avgLatencyMs: timeseriesRows.map(r => r.avgLatencyMs),
+            ttfbAvgMs: timeseriesRows.map(r => r.ttfbAvgMs),
+            errorRate: timeseriesRows.map(r => r.requests > 0 ? Math.round(r.errors / r.requests * 10000) / 10000 : 0)
         },
         distributions: {
             byModel: byModelRows,
             byProvider: byProviderRows,
             byApp: byAppRows,
-            byStatus: byStatusRows
+            byStatus: byStatusRows,
+            byClientProtocol: byClientProtocolRows,
+            byStreamType: byStreamTypeRows,
+            byErrorCategory: byErrorCategoryRows
         },
         top: {
             slow: topSlowRows,
@@ -2226,10 +2453,11 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
             tokensOut: 0,
             tokensTotal: 0
         });
+        const clientProtocol = isClientOpenAI ? 'openai' : isClientAnthropic ? 'anthropic' : 'unknown';
         await db.run(
-            `INSERT INTO stats_events (appId, providerId, requestedModel, actualModel, status, requestAt, responseAt, latencyMs, tokensIn, tokensOut, tokensTotal, errorMessage)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?)`,
-            [clientKeyData.id, provider.id, model || 'unknown', actualModel || null, 'error', requestAt, responseAt, null, fullMsg]
+            `INSERT INTO stats_events (appId, providerId, requestedModel, actualModel, status, requestAt, responseAt, latencyMs, tokensIn, tokensOut, tokensTotal, errorMessage, isStream, ttfbMs, streamDurationMs, chunkCount, responseBytes, streamBroken, clientProtocol, retryCount, upstreamStatus, clientStatus)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, 0, NULL, NULL, NULL, 0, 0, ?, 0, NULL, ?)`,
+            [clientKeyData.id, provider.id, model || 'unknown', actualModel || null, 'error', requestAt, responseAt, null, fullMsg, clientProtocol, 400]
         );
         return res.status(400).json({ error: fullMsg });
     }
@@ -2262,6 +2490,9 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                 }
                 targetUrl = buildTargetUrl(provider.baseUrl, pathSuffix, provider.type, needsResponseConversion);
                 upstreamHeaders = await buildUpstreamHeaders(req.headers, provider.apiKey, true, false);
+                if (targetBody.stream) {
+                    targetBody.stream_options = targetBody.stream_options || { include_usage: true };
+                }
             } else if (provider.type === 'anthropic') {
                 if (needsResponseConversion) {
                     const converted = convertOpenAIMessagesToAnthropic(req.body.messages || []);
@@ -2348,8 +2579,10 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                 let chunkCount = 0;
                 let firstChunkAt = null;
                 let rawResponseData = '';
+                let retryCount = 0;
 
                 for (let attempt = 0; attempt < maxAttempts; attempt++) {
+                    retryCount = attempt;
                     if (clientDisconnected) {
                         finalDisconnectReason = 'client_disconnect';
                         break;
@@ -2583,7 +2816,7 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
 
                         finalResponseBody = responseData;
                         finalResponseAt = new Date().toISOString();
-                        finalUsage = extractUsage(responseData);
+                        finalUsage = mergeUsageMax(extractUsage(responseData), extractUsage(rawResponseData));
 
                         if (finalStatus === 'error') {
                             console.error(`[Proxy] Upstream error ${upstream.status} for ${targetUrl}: ${(responseData || '(empty)').substring(0, 2000)}`);
@@ -2607,7 +2840,7 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                             finalDisconnectReason = 'client_disconnect';
                             finalResponseBody = responseData;
                             finalResponseAt = new Date().toISOString();
-                            finalUsage = extractUsage(responseData);
+                        finalUsage = mergeUsageMax(extractUsage(responseData), extractUsage(rawResponseData));
                             if (streamCompleted && finalUpstream && finalUpstream.status >= 200 && finalUpstream.status < 300) {
                                 finalStatus = 'completed';
                             }
@@ -2647,12 +2880,15 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                                 firstChunkAt ? new Date(finalResponseAt) - firstChunkAt : null, finalDisconnectReason, logId
                             ]
                         );
+                        const clientProtocol = isClientOpenAI ? 'openai' : isClientAnthropic ? 'anthropic' : 'unknown';
+                        const ttfb = firstChunkAt ? firstChunkAt - requestAtMs : null;
+                        const streamDur = firstChunkAt ? Math.round(new Date(finalResponseAt) - firstChunkAt) : null;
                         await db.run(
-                            `INSERT INTO stats_events (appId, providerId, requestedModel, actualModel, status, requestAt, responseAt, latencyMs, tokensIn, tokensOut, tokensTotal, errorMessage)
-                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                            `INSERT INTO stats_events (appId, providerId, requestedModel, actualModel, status, requestAt, responseAt, latencyMs, tokensIn, tokensOut, tokensTotal, errorMessage, isStream, ttfbMs, streamDurationMs, chunkCount, responseBytes, streamBroken, clientProtocol, retryCount, upstreamStatus, clientStatus)
+                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
                             [clientKeyData.id, provider.id, model || 'unknown', actualModel || null, 'error', requestAt, finalResponseAt,
                              Number.isFinite(errLatencyMs) ? Math.round(errLatencyMs) : null, finalUsage.tokensIn, finalUsage.tokensOut, finalUsage.tokensTotal,
-                             streamErr.message || 'Streaming proxy failed']
+                             streamErr.message || 'Streaming proxy failed', ttfb, streamDur, chunkCount, streamBytesTotal, clientProtocol, attempt, upstreamStatus, clientStatus]
                         );
                         if (rawResponseData) {
                             await db.run('UPDATE conversation_logs SET proxyResponseBody = ? WHERE id = ?', [rawResponseData, logId]);
@@ -2694,14 +2930,20 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                     ]
                 );
 
+                const clientProtocol = isClientOpenAI ? 'openai' : isClientAnthropic ? 'anthropic' : 'unknown';
+                const ttfb = firstChunkAt ? firstChunkAt - requestAtMs : null;
+                const streamDur = firstChunkAt && finalResponseAt ? Math.round(new Date(finalResponseAt) - firstChunkAt) : null;
                 await db.run(
-                    `INSERT INTO stats_events (appId, providerId, requestedModel, actualModel, status, requestAt, responseAt, latencyMs, tokensIn, tokensOut, tokensTotal, errorMessage)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                    `INSERT INTO stats_events (appId, providerId, requestedModel, actualModel, status, requestAt, responseAt, latencyMs, tokensIn, tokensOut, tokensTotal, errorMessage, isStream, ttfbMs, streamDurationMs, chunkCount, responseBytes, streamBroken, clientProtocol, retryCount, upstreamStatus, clientStatus)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                     [
                         clientKeyData.id, provider.id, model || 'unknown', actualModel || null, finalStatus,
                         requestAt, finalResponseAt, Number.isFinite(finalLatencyMs) ? Math.round(finalLatencyMs) : null,
                         finalUsage.tokensIn, finalUsage.tokensOut, finalUsage.tokensTotal,
-                        finalStatus === 'error' ? `disconnectReason=${finalDisconnectReason}` : null
+                        finalStatus === 'error' ? `disconnectReason=${finalDisconnectReason}` : null,
+                        ttfb, streamDur, chunkCount, streamBytesTotal,
+                        streamBroken, clientProtocol, retryCount,
+                        finalUpstream ? finalUpstream.status : null, finalClientStatus
                     ]
                 );
 
@@ -2753,9 +2995,10 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                     logId
                 ]
             );
+            const clientProtocol = isClientOpenAI ? 'openai' : isClientAnthropic ? 'anthropic' : 'unknown';
             await db.run(
-                `INSERT INTO stats_events (appId, providerId, requestedModel, actualModel, status, requestAt, responseAt, latencyMs, tokensIn, tokensOut, tokensTotal, errorMessage)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                `INSERT INTO stats_events (appId, providerId, requestedModel, actualModel, status, requestAt, responseAt, latencyMs, tokensIn, tokensOut, tokensTotal, errorMessage, isStream, ttfbMs, streamDurationMs, chunkCount, responseBytes, streamBroken, clientProtocol, retryCount, upstreamStatus, clientStatus)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, NULL, NULL, ?, 1, ?, 0, ?, ?)`,
                 [
                     clientKeyData.id,
                     provider.id,
@@ -2768,7 +3011,11 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                     usage.tokensIn,
                     usage.tokensOut,
                     usage.tokensTotal,
-                    error?.message || 'Streaming proxy failed'
+                    error?.message || 'Streaming proxy failed',
+                    streamBytesTotal,
+                    clientProtocol,
+                    upstreamStatus,
+                    clientStatus
                 ]
             );
             io.to('admins').emit('log_update', {
@@ -2979,9 +3226,10 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
             ]
         );
 
+        const clientProtocol = isClientOpenAI ? 'openai' : isClientAnthropic ? 'anthropic' : 'unknown';
         await db.run(
-            `INSERT INTO stats_events (appId, providerId, requestedModel, actualModel, status, requestAt, responseAt, latencyMs, tokensIn, tokensOut, tokensTotal, errorMessage)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO stats_events (appId, providerId, requestedModel, actualModel, status, requestAt, responseAt, latencyMs, tokensIn, tokensOut, tokensTotal, errorMessage, isStream, ttfbMs, streamDurationMs, chunkCount, responseBytes, streamBroken, clientProtocol, retryCount, upstreamStatus, clientStatus)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, NULL, ?, 0, ?, 0, ?, ?)`,
             [
                 clientKeyData.id,
                 provider.id,
@@ -2994,7 +3242,11 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                 usage.tokensIn,
                 usage.tokensOut,
                 usage.tokensTotal,
-                null
+                null,
+                responseBytes,
+                clientProtocol,
+                response.status,
+                response.status
             ]
         );
 
@@ -3060,9 +3312,10 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
             ]
         );
 
+        const clientProtocol = isClientOpenAI ? 'openai' : isClientAnthropic ? 'anthropic' : 'unknown';
         await db.run(
-            `INSERT INTO stats_events (appId, providerId, requestedModel, actualModel, status, requestAt, responseAt, latencyMs, tokensIn, tokensOut, tokensTotal, errorMessage)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO stats_events (appId, providerId, requestedModel, actualModel, status, requestAt, responseAt, latencyMs, tokensIn, tokensOut, tokensTotal, errorMessage, isStream, ttfbMs, streamDurationMs, chunkCount, responseBytes, streamBroken, clientProtocol, retryCount, upstreamStatus, clientStatus)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, NULL, ?, 0, ?, 0, ?, ?)`,
             [
                 clientKeyData.id,
                 provider.id,
@@ -3075,7 +3328,11 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                 usage.tokensIn,
                 usage.tokensOut,
                 usage.tokensTotal,
-                error.message || null
+                error.message || null,
+                responseBytes,
+                clientProtocol,
+                upstreamStatus,
+                clientStatus
             ]
         );
 

@@ -257,6 +257,27 @@ async function setupDb() {
     await addLogCol('streamDurationMs', 'INTEGER');
     await addLogCol('disconnectReason', 'TEXT');
 
+    // Migration for stats_events
+    const statsEvtCols = await db.all('PRAGMA table_info(stats_events)');
+    const statsEvtColNames = statsEvtCols.map(c => c.name);
+    const addStatsCol = async (name, ddl) => {
+        if (!statsEvtColNames.includes(name)) {
+            await db.exec(`ALTER TABLE stats_events ADD COLUMN ${name} ${ddl}`);
+        }
+    };
+    await addStatsCol('isStream', 'INTEGER DEFAULT 0');
+    await addStatsCol('ttfbMs', 'INTEGER');
+    await addStatsCol('streamDurationMs', 'INTEGER');
+    await addStatsCol('chunkCount', 'INTEGER');
+    await addStatsCol('responseBytes', 'INTEGER');
+    await addStatsCol('streamBroken', 'INTEGER DEFAULT 0');
+    await addStatsCol('clientProtocol', 'TEXT');
+    await addStatsCol('retryCount', 'INTEGER DEFAULT 0');
+    await addStatsCol('upstreamStatus', 'INTEGER');
+    await addStatsCol('clientStatus', 'INTEGER');
+    await db.exec('CREATE INDEX IF NOT EXISTS idx_stats_events_isStream ON stats_events(isStream)');
+    await db.exec('CREATE INDEX IF NOT EXISTS idx_stats_events_clientProtocol ON stats_events(clientProtocol)');
+
     await db.exec(`
         CREATE TABLE IF NOT EXISTS app_settings (
             key TEXT PRIMARY KEY NOT NULL,
