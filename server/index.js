@@ -2522,19 +2522,6 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                             chunkTimeoutTimer = null;
                         }
 
-                        // --- Flush remaining data from protocol conversion ---
-                        if (needsResponseConversion && sseBuffer.data.trim()) {
-                            const flushed = provider.type === 'openai'
-                                ? convertOpenAIStreamToAnthropic(sseBuffer.data.trim() + '\n\n', sseConvertState)
-                                : convertAnthropicStreamToOpenAI(sseBuffer.data.trim() + '\n\n', sseConvertState);
-                            if (flushed) {
-                                streamBytesTotal += Buffer.byteLength(flushed, 'utf8');
-                                responseData += flushed;
-                                res.write(flushed);
-                            }
-                            sseBuffer.data = '';
-                        }
-
                         if (!res.writableEnded) {
                             res.end();
                         }
@@ -2601,7 +2588,6 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                         finalDisconnectReason = 'upstream_error';
                         finalResponseAt = new Date().toISOString();
                         finalResponseBody = streamErr.message || 'Streaming proxy failed';
-                        const cfgUa = pickOutgoingUserAgent(streamErr.config?.headers);
                         const upstreamStatus = streamErr.response?.status ?? (finalUpstream?.status ?? null);
                         const clientStatus = res.headersSent ? (res.statusCode || streamErr.response?.status || 500) : (streamErr.response?.status || 500);
                         finalUsage = extractUsage(streamErr.response?.data);
@@ -2632,7 +2618,10 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                             targetUrl: targetUrl || streamErr.config?.url, proxyUserAgent: proxyUserAgent,
                             latencyMs: Number.isFinite(errLatencyMs) ? Math.round(errLatencyMs) : null,
                             upstreamStatus, clientStatus, responseBytes: streamBytesTotal, streamBroken: 1,
-                            tokensIn: finalUsage.tokensIn, tokensOut: finalUsage.tokensOut, tokensTotal: finalUsage.tokensTotal
+                            tokensIn: finalUsage.tokensIn, tokensOut: finalUsage.tokensOut, tokensTotal: finalUsage.tokensTotal,
+                            ttfbMs: firstChunkAt ? firstChunkAt - requestAtMs : null,
+                            chunkCount, streamDurationMs: firstChunkAt ? new Date(finalResponseAt) - firstChunkAt : null,
+                            disconnectReason: finalDisconnectReason
                         });
                         if (!res.headersSent) {
                             return res.status(streamErr.response?.status || 500).json(streamErr.response?.data || { error: finalResponseBody });
@@ -2643,6 +2632,7 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                 }
 
                 // --- Write final log (success / incomplete / client disconnect) ---
+                if (!finalResponseAt) finalResponseAt = new Date().toISOString();
                 const finalLatencyMs = new Date(finalResponseAt) - new Date(requestAt);
                 const finalClientStatus = finalUpstream ? finalUpstream.status : 0;
                 const streamBroken = (finalStatus === 'error' || finalDisconnectReason === 'incomplete') ? 1 : 0;
