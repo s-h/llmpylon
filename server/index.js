@@ -174,6 +174,45 @@ function pickOutgoingUserAgent(headers) {
     return v != null && String(v).trim() ? String(v) : null;
 }
 
+const CLIENT_APP_RULES = [
+    { name: 'Claude Code (CLI)',   ua: /claude-code|claude\.ai/i },
+    { name: 'Claude Code (VS Code)', ua: /vscode.*claude-code|claude-code.*vscode/i },
+    { name: 'OpenCode',            ua: /opencode/i },
+    { name: 'OpenClaw',            ua: /openclaw/i },
+    { name: 'Codex CLI',           ua: /codex-cli|openai-codex/i },
+    { name: 'Cline',               ua: /cline/i },
+    { name: 'Roo Code',            ua: /roo-code|roocode/i },
+    { name: 'Gemini CLI',          ua: /gemini-cli|google-gemini/i },
+    { name: 'Qwen Code',           ua: /qwen-code/i },
+    { name: 'Cursor',              ua: /cursor/i },
+    { name: 'Windsurf',            ua: /windsurf/i },
+    { name: 'Trae',                ua: /trae/i },
+    { name: 'GitHub Copilot',      ua: /copilot/i },
+    { name: 'Aider',               ua: /aider/i },
+    { name: 'VS Code',             ua: /vscode/i },
+    { name: 'JetBrains',           ua: /intellij|jetbrains|pycharm|webstorm|goland|phpstorm|rubymine|rider|clion|datagrip|android-studio/i },
+    { name: '终端工具',            ua: /^curl\//i },
+    { name: '终端工具',            ua: /httpie|HTTPie/i },
+    { name: '终端工具',            ua: /python-requests|python-httpx|aiohttp/i },
+    { name: '终端工具',            ua: /insomnia|postman-runtime|paw/i },
+    { name: '浏览器',              ua: /mozilla.*chrome|mozilla.*safari|mozilla.*firefox|mozilla.*edge/i },
+    { name: 'LangChain',           ua: /langchain/i },
+    { name: 'LlamaIndex',          ua: /llamaindex/i },
+    { name: 'Dify',                ua: /dify/i },
+    { name: 'Open WebUI',          ua: /open-webui/i },
+    { name: 'LobeChat',            ua: /lobechat/i },
+    { name: 'NextChat',            ua: /nextchat|chatgpt-next-web/i },
+];
+
+function detectClientApp(headers) {
+    if (!headers || typeof headers !== 'object') return null;
+    const ua = headers['user-agent'] || headers['User-Agent'] || '';
+    for (const rule of CLIENT_APP_RULES) {
+        if (rule.ua && rule.ua.test(ua)) return rule.name;
+    }
+    return null;
+}
+
 /** Avoid logging raw API keys in stderr when upstream requests fail */
 function redactSensitiveHeaders(headers) {
     if (!headers || typeof headers !== 'object') return headers;
@@ -2364,6 +2403,7 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
     const requestAt = new Date().toISOString();
     const clientUrl = req.url;
     const clientUserAgent = req.headers['user-agent'] ? String(req.headers['user-agent']) : null;
+    const clientApp = detectClientApp(req.headers);
     const clientIp = getClientIp(req);
     const httpMethod = req.method;
     const requestPath = pathSuffix;
@@ -2385,8 +2425,8 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
     const logResult = await db.run(
         `INSERT INTO conversation_logs (
             providerId, clientKeyId, model, actualModel, requestBody, status, requestAt, clientUrl,
-            clientUserAgent, clientIp, httpMethod, requestPath, isStream, requestBytes, clientRequestHeaders
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            clientUserAgent, clientIp, httpMethod, requestPath, isStream, requestBytes, clientRequestHeaders, clientApp
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
             provider.id,
             clientKeyData.id,
@@ -2402,7 +2442,8 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
             requestPath,
             isStreamFlag,
             requestBytes,
-            clientRequestHeaders
+            clientRequestHeaders,
+            clientApp
         ]
         );
     const logId = logResult.lastID;
@@ -2418,6 +2459,7 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
         clientUrl,
         actualModel,
         clientUserAgent,
+        clientApp,
         clientIp,
         httpMethod,
         requestPath,

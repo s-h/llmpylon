@@ -3149,6 +3149,7 @@ onUnmounted(() => {
                   <td class="px-6 py-4 text-gray-500 font-mono text-xs">{{ formatTime(log.requestAt || log.createdAt) }}</td>
                   <td class="px-6 py-4">
                     <span class="px-2 py-1 bg-purple-50 text-purple-700 rounded text-[10px] font-bold uppercase tracking-tight">{{ log.clientKeyName || '未知' }}</span>
+                    <span v-if="log.clientApp" class="ml-1 text-[8px] text-gray-400 italic">{{ log.clientApp }}</span>
                   </td>
                   <td class="px-6 py-4 font-medium">{{ log.providerName }}</td>
                   <td class="px-6 py-4 font-mono text-xs">
@@ -3761,6 +3762,7 @@ onUnmounted(() => {
             <div class="flex-1 p-3 bg-gray-50 rounded-lg border border-gray-100">
               <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">客户端密钥</p>
               <p class="text-sm font-medium text-purple-700">{{ selectedLog.clientKeyName || '未知' }}</p>
+              <p v-if="selectedLog.clientApp" class="text-[10px] text-gray-400 mt-0.5">{{ selectedLog.clientApp }}</p>
             </div>
             <div class="flex-1 p-3 bg-gray-50 rounded-lg border border-gray-100">
               <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">生效厂商</p>

@@ -256,6 +256,7 @@ async function setupDb() {
     await addLogCol('chunkCount', 'INTEGER');
     await addLogCol('streamDurationMs', 'INTEGER');
     await addLogCol('disconnectReason', 'TEXT');
+    await addLogCol('clientApp', 'TEXT');
 
     // Migration for stats_events
     const statsEvtCols = await db.all('PRAGMA table_info(stats_events)');
