@@ -5,6 +5,7 @@ const cors = require('cors');
 const bodyParser = require('body-parser');
 const axios = require('axios');
 const setupDb = require('./db');
+const { initNotifier, getNotifier } = require('./notifier');
 const https = require('https');
 const crypto = require('crypto');
 const path = require('path');
@@ -175,7 +176,7 @@ function pickOutgoingUserAgent(headers) {
 }
 
 const CLIENT_APP_RULES = [
-    { name: 'Claude Code (CLI)',   ua: /claude-code|claude\.ai/i },
+    { name: 'Claude Code (CLI)',   ua: /claude-cli|claude-code|claude\.ai/i },
     { name: 'Claude Code (VS Code)', ua: /vscode.*claude-code|claude-code.*vscode/i },
     { name: 'OpenCode',            ua: /opencode/i },
     { name: 'OpenClaw',            ua: /openclaw/i },
@@ -242,6 +243,10 @@ function truncateForErrorLog(data, maxLen = 4000) {
     }
 }
 
+function safeJsonParse(str, defaultVal) {
+    try { return JSON.parse(str); } catch { return defaultVal; }
+}
+
 const APP_SETTINGS_KEYS = {
     LOG_RETENTION_DAYS: 'log_retention_days',
     STATS_RETENTION_DAYS: 'stats_retention_days',
@@ -249,7 +254,9 @@ const APP_SETTINGS_KEYS = {
     UPSTREAM_HEADERS_BLOCKLIST: 'upstream_headers_blocklist',
     STREAM_CHUNK_TIMEOUT_SECONDS: 'stream_chunk_timeout_seconds',
     STREAM_RETRY_ENABLED: 'stream_retry_enabled',
-    STREAM_MAX_RETRIES: 'stream_max_retries'
+    STREAM_MAX_RETRIES: 'stream_max_retries',
+    NOTIFICATION_COOLDOWN_SECONDS: 'notification_cooldown_seconds',
+    NOTIFICATION_LOG_RETENTION_DAYS: 'notification_log_retention_days'
 };
 
 const UPSTREAM_TIMEOUT_MIN_SEC = 5;
@@ -380,6 +387,15 @@ async function runRetentionPurge() {
             [cutoff]
         );
         if (r.changes > 0) console.log(`[Retention] Removed ${r.changes} stats_events (older than ${statsDays}d)`);
+    }
+    const notifLogDays = await getAppSettingInt(APP_SETTINGS_KEYS.NOTIFICATION_LOG_RETENTION_DAYS, 7);
+    if (notifLogDays > 0) {
+        const cutoff = new Date(now - notifLogDays * 86400000).toISOString();
+        const r = await db.run(
+            'DELETE FROM notification_logs WHERE createdAt IS NOT NULL AND createdAt < ?',
+            [cutoff]
+        );
+        if (r.changes > 0) console.log(`[Retention] Removed ${r.changes} notification_logs (older than ${notifLogDays}d)`);
     }
 }
 
@@ -1370,7 +1386,7 @@ app.get('/api/config/export', async (req, res) => {
         'SELECT providerId, modelId FROM provider_models ORDER BY providerId ASC, modelId ASC'
     );
     const apps = await db.all(
-        'SELECT id, name, key, enabled, providerId, managedModelId FROM client_keys ORDER BY id ASC'
+        'SELECT id, name, key, enabled, providerId, managedModelId, colorRgb, deletedAt FROM client_keys ORDER BY id ASC'
     );
     const modelRules = await db.all(
         'SELECT id, pattern, targetModel, priority, enabled FROM model_rules ORDER BY priority DESC, id ASC'
@@ -1443,8 +1459,8 @@ app.post('/api/config/import', async (req, res) => {
 
         for (const a of apps) {
             await db.run(
-                'INSERT INTO client_keys (id, name, key, enabled, providerId, managedModelId) VALUES (?, ?, ?, ?, ?, ?)',
-                [a.id, a.name, a.key, a.enabled ? 1 : 0, a.providerId || null, a.managedModelId || null]
+                'INSERT INTO client_keys (id, name, key, enabled, providerId, managedModelId, colorRgb, deletedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                [a.id, a.name, a.key, a.enabled ? 1 : 0, a.providerId || null, a.managedModelId || null, a.colorRgb || null, a.deletedAt || null]
             );
         }
 
@@ -1481,7 +1497,7 @@ app.post('/api/config/import', async (req, res) => {
 
 // Client Keys API (Now Apps API)
 app.get('/api/keys', async (req, res) => {
-    const keys = await db.all('SELECT * FROM client_keys');
+    const keys = await db.all('SELECT * FROM client_keys WHERE deletedAt IS NULL');
     res.json(keys);
 });
 
@@ -1494,10 +1510,10 @@ app.post('/api/keys', async (req, res) => {
 
 app.put('/api/keys/:id', async (req, res) => {
     const { id } = req.params;
-    const { name, providerId, managedModelId } = req.body;
+    const { name, providerId, managedModelId, colorRgb } = req.body;
     await db.run(
-        'UPDATE client_keys SET name = ?, providerId = ?, managedModelId = ? WHERE id = ?',
-        [name, providerId || null, managedModelId || null, id]
+        'UPDATE client_keys SET name = ?, providerId = ?, managedModelId = ?, colorRgb = ? WHERE id = ?',
+        [name, providerId || null, managedModelId || null, colorRgb || null, id]
     );
     res.sendStatus(200);
 });
@@ -1510,7 +1526,50 @@ app.put('/api/keys/:id/toggle', async (req, res) => {
 
 app.delete('/api/keys/:id', async (req, res) => {
     const { id } = req.params;
-    await db.run('DELETE FROM client_keys WHERE id = ?', [id]);
+    const keyId = parseInt(id, 10);
+    // Update notification_configs: remove key from clientKeyIds arrays
+    const configs = await db.all('SELECT id, clientKeyIds FROM notification_configs');
+    for (const cfg of configs) {
+        const ids = safeJsonParse(cfg.clientKeyIds, []);
+        const filtered = ids.filter(kid => kid !== keyId);
+        if (filtered.length === 0) {
+            await db.run('DELETE FROM notification_configs WHERE id = ?', [cfg.id]);
+        } else {
+            await db.run('UPDATE notification_configs SET clientKeyIds = ? WHERE id = ?', [JSON.stringify(filtered), cfg.id]);
+        }
+    }
+    await db.run('UPDATE client_keys SET deletedAt = ?, enabled = 0 WHERE id = ?', [new Date().toISOString(), keyId]);
+    res.sendStatus(200);
+});
+
+// Key recycle bin
+app.get('/api/keys/deleted', async (req, res) => {
+    const keys = await db.all('SELECT * FROM client_keys WHERE deletedAt IS NOT NULL ORDER BY deletedAt DESC');
+    res.json(keys);
+});
+
+app.post('/api/keys/:id/restore', async (req, res) => {
+    const { id } = req.params;
+    await db.run('UPDATE client_keys SET deletedAt = NULL WHERE id = ?', [id]);
+    res.sendStatus(200);
+});
+
+app.delete('/api/keys/:id/permanent', async (req, res) => {
+    const { id } = req.params;
+    const keyId = parseInt(id, 10);
+    // Update notification_configs: remove key from clientKeyIds arrays
+    const configs = await db.all('SELECT id, clientKeyIds FROM notification_configs');
+    for (const cfg of configs) {
+        const ids = safeJsonParse(cfg.clientKeyIds, []);
+        const filtered = ids.filter(kid => kid !== keyId);
+        if (filtered.length === 0) {
+            await db.run('DELETE FROM notification_configs WHERE id = ?', [cfg.id]);
+        } else {
+            await db.run('UPDATE notification_configs SET clientKeyIds = ? WHERE id = ?', [JSON.stringify(filtered), cfg.id]);
+        }
+    }
+    await db.run('DELETE FROM notification_logs WHERE clientKeyId = ?', [keyId]);
+    await db.run('DELETE FROM client_keys WHERE id = ?', [keyId]);
     res.sendStatus(200);
 });
 
@@ -1540,7 +1599,8 @@ app.get('/api/logs', async (req, res) => {
             l.clientUserAgent, l.proxyUserAgent, l.clientIp, l.httpMethod, l.requestPath,
             l.isStream, l.streamBroken, l.requestBytes, l.responseBytes, l.latencyMs,
             l.upstreamStatus, l.clientStatus, l.tokensIn, l.tokensOut, l.tokensTotal,
-            l.ttfbMs, l.chunkCount, l.streamDurationMs, l.disconnectReason,
+            l.ttfbMs, l.chunkCount, l.streamDurationMs, l.disconnectReason, l.clientApp,
+            substr(l.responseBody, 1, 200) as responseBody,
             p.name as providerName, ck.name as clientKeyName
         FROM conversation_logs l
         LEFT JOIN providers p ON l.providerId = p.id
@@ -1591,7 +1651,9 @@ app.get('/api/settings', async (req, res) => {
     const upstreamHeadersBlocklist = await getUpstreamHeadersBlocklist();
     const streamChunkTimeoutSeconds = await getStreamChunkTimeoutSeconds();
     const streamRetryConfig = await getStreamRetryConfig();
-    res.json({ logRetentionDays, statsRetentionDays, upstreamTimeoutSeconds, upstreamHeadersBlocklist, streamChunkTimeoutSeconds, streamRetryEnabled: streamRetryConfig.enabled, streamMaxRetries: streamRetryConfig.maxRetries });
+    const notificationCooldownSeconds = await getAppSettingInt(APP_SETTINGS_KEYS.NOTIFICATION_COOLDOWN_SECONDS, 5);
+    const notificationLogRetentionDays = await getAppSettingInt(APP_SETTINGS_KEYS.NOTIFICATION_LOG_RETENTION_DAYS, 7);
+    res.json({ logRetentionDays, statsRetentionDays, upstreamTimeoutSeconds, upstreamHeadersBlocklist, streamChunkTimeoutSeconds, streamRetryEnabled: streamRetryConfig.enabled, streamMaxRetries: streamRetryConfig.maxRetries, notificationCooldownSeconds, notificationLogRetentionDays });
 });
 
 app.put('/api/settings', async (req, res) => {
@@ -1628,8 +1690,18 @@ app.put('/api/settings', async (req, res) => {
     await setAppSetting(APP_SETTINGS_KEYS.STREAM_RETRY_ENABLED, streamRetryEnabled);
     await setAppSetting(APP_SETTINGS_KEYS.STREAM_MAX_RETRIES, streamMaxRetries);
 
+    let notificationCooldownSeconds = parseInt(body.notificationCooldownSeconds, 10);
+    if (!Number.isFinite(notificationCooldownSeconds) || notificationCooldownSeconds < 1) notificationCooldownSeconds = 5;
+    notificationCooldownSeconds = Math.min(300, notificationCooldownSeconds);
+    await setAppSetting(APP_SETTINGS_KEYS.NOTIFICATION_COOLDOWN_SECONDS, notificationCooldownSeconds);
+
+    let notificationLogRetentionDays = parseInt(body.notificationLogRetentionDays, 10);
+    if (!Number.isFinite(notificationLogRetentionDays) || notificationLogRetentionDays < 0) notificationLogRetentionDays = 7;
+    notificationLogRetentionDays = Math.min(365, notificationLogRetentionDays);
+    await setAppSetting(APP_SETTINGS_KEYS.NOTIFICATION_LOG_RETENTION_DAYS, notificationLogRetentionDays);
+
     await runRetentionPurge();
-    res.json({ logRetentionDays, statsRetentionDays, upstreamTimeoutSeconds, upstreamHeadersBlocklist, streamChunkTimeoutSeconds, streamRetryEnabled: streamRetryEnabled === 1, streamMaxRetries });
+    res.json({ logRetentionDays, statsRetentionDays, upstreamTimeoutSeconds, upstreamHeadersBlocklist, streamChunkTimeoutSeconds, streamRetryEnabled: streamRetryEnabled === 1, streamMaxRetries, notificationCooldownSeconds, notificationLogRetentionDays });
 });
 
 app.post('/api/stats/clear', async (req, res) => {
@@ -2308,16 +2380,35 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
     const isClientAnthropic = isClientProtocolAnthropic(req.url);
 
     // Authenticate client key
+    const requestAt = new Date().toISOString();
+    const clientUserAgent = req.headers['user-agent'] ? String(req.headers['user-agent']) : null;
+    const clientApp = detectClientApp(req.headers);
+    const clientIp = getClientIp(req);
     const authHeader = req.headers['authorization']?.split(' ')[1] || req.headers['x-api-key'];
     if (!authHeader) {
+        const responseAt = new Date().toISOString();
+        await db.run(
+            `INSERT INTO conversation_logs (model, status, responseBody, requestAt, responseAt, clientStatus, clientUserAgent, clientIp, httpMethod, requestPath, clientApp) VALUES (?, 'error', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            ['unknown', '{"error":"Missing API Key"}', requestAt, responseAt, 401, clientUserAgent, clientIp, req.method, req.url, clientApp]
+        );
         return res.status(401).json({ error: 'Missing API Key' });
     }
 
     const clientKeyData = await db.get('SELECT * FROM client_keys WHERE key = ?', [authHeader]);
     if (!clientKeyData) {
+        const responseAt = new Date().toISOString();
+        await db.run(
+            `INSERT INTO conversation_logs (model, status, responseBody, requestAt, responseAt, clientStatus, clientUserAgent, clientIp, httpMethod, requestPath, clientApp) VALUES (?, 'error', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            ['unknown', '{"error":"Invalid API Key"}', requestAt, responseAt, 403, clientUserAgent, clientIp, req.method, req.url, clientApp]
+        );
         return res.status(403).json({ error: 'Invalid API Key' });
     }
     if (!clientKeyData.enabled) {
+        const responseAt = new Date().toISOString();
+        await db.run(
+            `INSERT INTO conversation_logs (model, status, responseBody, requestAt, responseAt, clientStatus, clientUserAgent, clientIp, httpMethod, requestPath, clientApp) VALUES (?, 'error', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            ['unknown', '{"error":"API Key is disabled"}', requestAt, responseAt, 403, clientUserAgent, clientIp, req.method, req.url, clientApp]
+        );
         return res.status(403).json({ error: 'API Key is disabled' });
     }
 
@@ -2400,11 +2491,7 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
     if (!pathSuffix.startsWith('/')) pathSuffix = `/${pathSuffix}`;
 
     // Create log entry
-    const requestAt = new Date().toISOString();
     const clientUrl = req.url;
-    const clientUserAgent = req.headers['user-agent'] ? String(req.headers['user-agent']) : null;
-    const clientApp = detectClientApp(req.headers);
-    const clientIp = getClientIp(req);
     const httpMethod = req.method;
     const requestPath = pathSuffix;
     const isStreamFlag = stream ? 1 : 0;
@@ -2501,6 +2588,7 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, 0, NULL, NULL, NULL, 0, 0, ?, 0, NULL, ?)`,
             [clientKeyData.id, provider.id, model || 'unknown', actualModel || null, 'error', requestAt, responseAt, null, fullMsg, clientProtocol, 400]
         );
+        getNotifier()?.handleRequestCompleted(logId);
         return res.status(400).json({ error: fullMsg });
     }
 
@@ -2574,6 +2662,7 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                     tokensOut: 0,
                     tokensTotal: 0
                 });
+                getNotifier()?.handleRequestCompleted(logId);
                 return res.status(400).json({ error: msg });
             }
 
@@ -2945,6 +3034,7 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                             chunkCount, streamDurationMs: firstChunkAt ? new Date(finalResponseAt) - firstChunkAt : null,
                             disconnectReason: finalDisconnectReason
                         });
+                        getNotifier()?.handleRequestCompleted(logId);
                         if (!res.headersSent) {
                             return res.status(streamErr.response?.status || 500).json(streamErr.response?.data || { error: finalResponseBody });
                         }
@@ -3004,6 +3094,7 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                     chunkCount, streamDurationMs: firstChunkAt && finalResponseAt ? new Date(finalResponseAt) - firstChunkAt : null,
                     disconnectReason: finalDisconnectReason
                 });
+                getNotifier()?.handleRequestCompleted(logId);
                 return;
 
             } finally {
@@ -3076,6 +3167,7 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
                 tokensOut: usage.tokensOut,
                 tokensTotal: usage.tokensTotal
             });
+            getNotifier()?.handleRequestCompleted(logId);
             if (!res.headersSent) {
                 return res.status(error.response?.status || 500).json(error.response?.data || { error: errorBody });
             }
@@ -3314,6 +3406,7 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
             tokensTotal: usage.tokensTotal
         });
 
+        getNotifier()?.handleRequestCompleted(logId);
         res.json(response.data);
 
     } catch (error) {
@@ -3394,8 +3487,172 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
             tokensOut: usage.tokensOut,
             tokensTotal: usage.tokensTotal
         });
+        getNotifier()?.handleRequestCompleted(logId);
         res.status(error.response?.status || 500).json(errorData);
     }
+});
+
+// Notification configs CRUD
+app.get('/api/notification-configs', async (req, res) => {
+    const configs = await db.all('SELECT * FROM notification_configs ORDER BY id');
+    const allKeys = await db.all('SELECT id, name FROM client_keys');
+    const keyMap = {};
+    for (const k of allKeys) keyMap[k.id] = k.name;
+    res.json(configs.map(c => {
+        const ids = safeJsonParse(c.clientKeyIds, []);
+        return {
+            ...c,
+            clientKeyIds: ids,
+            clientKeyNames: ids.map(id => keyMap[id] || ('App #' + id)).join(', '),
+            headers: safeJsonParse(c.headers, {}),
+            filterClientApps: safeJsonParse(c.filterClientApps, []),
+            filterStatuses: safeJsonParse(c.filterStatuses, [])
+        };
+    }));
+});
+
+app.post('/api/notification-configs', async (req, res) => {
+    const body = req.body || {};
+    const clientKeyIds = Array.isArray(body.clientKeyIds) ? body.clientKeyIds.filter(id => Number.isFinite(id) && id > 0) : [];
+    if (clientKeyIds.length === 0) {
+        return res.status(400).json({ error: 'clientKeyIds is required (non-empty array of ids)' });
+    }
+    // Validate all keys exist
+    for (const id of clientKeyIds) {
+        const keyExists = await db.get('SELECT id FROM client_keys WHERE id = ?', [id]);
+        if (!keyExists) return res.status(400).json({ error: 'Invalid clientKeyId: ' + id });
+    }
+
+    const result = await db.run(
+        `INSERT INTO notification_configs (enabled, webhookUrl, httpMethod, headers, bodyTemplate, cooldownSeconds, filterClientApps, filterStatuses, clientKeyIds)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+            body.enabled ? 1 : 0,
+            String(body.webhookUrl || ''),
+            String(body.httpMethod || 'POST'),
+            JSON.stringify(body.headers || {}),
+            String(body.bodyTemplate || ''),
+            parseInt(body.cooldownSeconds, 10) || 5,
+            JSON.stringify(body.filterClientApps || []),
+            JSON.stringify(body.filterStatuses || []),
+            JSON.stringify(clientKeyIds)
+        ]
+    );
+    res.json({ id: result.lastID });
+});
+
+app.put('/api/notification-configs/:id', async (req, res) => {
+    const configId = parseInt(req.params.id, 10);
+    const existing = await db.get('SELECT * FROM notification_configs WHERE id = ?', [configId]);
+    if (!existing) return res.status(404).json({ error: 'Not found' });
+
+    const body = req.body || {};
+    await db.run(
+        `UPDATE notification_configs SET enabled = ?, webhookUrl = ?, httpMethod = ?, headers = ?, bodyTemplate = ?, cooldownSeconds = ?, filterClientApps = ?, filterStatuses = ?, clientKeyIds = ? WHERE id = ?`,
+        [
+            body.enabled !== undefined ? (body.enabled ? 1 : 0) : existing.enabled,
+            body.webhookUrl !== undefined ? String(body.webhookUrl) : existing.webhookUrl,
+            body.httpMethod !== undefined ? String(body.httpMethod) : existing.httpMethod,
+            body.headers !== undefined ? JSON.stringify(body.headers) : existing.headers,
+            body.bodyTemplate !== undefined ? String(body.bodyTemplate) : existing.bodyTemplate,
+            body.cooldownSeconds !== undefined ? (parseInt(body.cooldownSeconds, 10) || 5) : existing.cooldownSeconds,
+            body.filterClientApps !== undefined ? JSON.stringify(body.filterClientApps) : existing.filterClientApps,
+            body.filterStatuses !== undefined ? JSON.stringify(body.filterStatuses) : existing.filterStatuses,
+            body.clientKeyIds !== undefined ? JSON.stringify(body.clientKeyIds) : existing.clientKeyIds,
+            configId
+        ]
+    );
+    const updated = await db.get('SELECT * FROM notification_configs WHERE id = ?', [configId]);
+    res.json(updated);
+});
+
+app.delete('/api/notification-configs/:id', async (req, res) => {
+    const configId = parseInt(req.params.id, 10);
+    const existing = await db.get('SELECT * FROM notification_configs WHERE id = ?', [configId]);
+    if (!existing) return res.status(404).json({ error: 'Not found' });
+    await db.run('DELETE FROM notification_configs WHERE id = ?', [configId]);
+    res.json({ ok: true });
+});
+
+// Notification logs API
+app.get('/api/notification-logs', async (req, res) => {
+    const page = Math.max(1, Number(req.query.page || 1));
+    const pageSize = Math.min(200, Math.max(1, Number(req.query.pageSize || 20)));
+    const clientKeyId = req.query.clientKeyId ? parseInt(req.query.clientKeyId, 10) : null;
+    const status = req.query.status || null;
+
+    let whereSql = '';
+    const params = [];
+    if (Number.isFinite(clientKeyId)) {
+        whereSql += ' AND nl.clientKeyId = ?';
+        params.push(clientKeyId);
+    }
+    if (status && status !== 'all') {
+        whereSql += ' AND nl.status = ?';
+        params.push(status);
+    }
+
+    const countRow = await db.get(
+        `SELECT COUNT(*) as cnt FROM notification_logs nl WHERE 1=1 ${whereSql}`,
+        params
+    );
+    const total = countRow?.cnt || 0;
+
+    const rows = await db.all(
+        `SELECT nl.*, ck.name as clientKeyName
+         FROM notification_logs nl
+         LEFT JOIN client_keys ck ON ck.id = nl.clientKeyId
+         WHERE 1=1 ${whereSql}
+         ORDER BY nl.id DESC
+         LIMIT ? OFFSET ?`,
+        [...params, pageSize, (page - 1) * pageSize]
+    );
+
+    res.json({ rows, total, page, pageSize, totalPages: Math.ceil(total / pageSize) });
+});
+
+app.get('/api/notification-logs/:id', async (req, res) => {
+    const row = await db.get(
+        `SELECT nl.*, ck.name as clientKeyName
+         FROM notification_logs nl
+         LEFT JOIN client_keys ck ON ck.id = nl.clientKeyId
+         WHERE nl.id = ?`,
+        [req.params.id]
+    );
+    if (!row) return res.status(404).json({ error: 'Not found' });
+    res.json(row);
+});
+
+app.delete('/api/notification-logs', async (req, res) => {
+    const clientKeyId = req.query.clientKeyId ? parseInt(req.query.clientKeyId, 10) : null;
+    let result;
+    if (Number.isFinite(clientKeyId)) {
+        result = await db.run('DELETE FROM notification_logs WHERE clientKeyId = ?', [clientKeyId]);
+    } else {
+        result = await db.run('DELETE FROM notification_logs');
+    }
+    res.json({ ok: true, deleted: result.changes });
+});
+
+// Client colors API
+app.get('/api/client-colors', async (req, res) => {
+    const rows = await db.all('SELECT clientApp, rgb FROM client_colors ORDER BY clientApp');
+    const map = {};
+    for (const r of rows) map[r.clientApp] = r.rgb;
+    res.json(map);
+});
+
+app.put('/api/client-colors', async (req, res) => {
+    const body = req.body || {};
+    for (const [clientApp, rgb] of Object.entries(body)) {
+        if (typeof rgb === 'string' && rgb.trim()) {
+            await db.run(
+                'INSERT INTO client_colors (clientApp, rgb) VALUES (?, ?) ON CONFLICT(clientApp) DO UPDATE SET rgb = excluded.rgb',
+                [clientApp, rgb.trim()]
+            );
+        }
+    }
+    res.json({ ok: true });
 });
 
 // Error for incorrect paths
@@ -3417,6 +3674,7 @@ if (fs.existsSync(clientIndexFile)) {
 
 async function start() {
     db = await setupDb();
+    initNotifier(db);
     await runRetentionPurge().catch((e) => console.error('[Retention]', e));
     setInterval(() => {
         runRetentionPurge().catch((e) => console.error('[Retention]', e));

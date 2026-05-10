@@ -34,6 +34,8 @@ async function setupDb() {
             enabled INTEGER DEFAULT 1, -- 0 or 1
             providerId INTEGER,
             managedModelId INTEGER,
+            colorRgb TEXT,
+            deletedAt DATETIME,
             FOREIGN KEY (providerId) REFERENCES providers(id),
             FOREIGN KEY (managedModelId) REFERENCES managed_models(id)
         )
@@ -199,6 +201,25 @@ async function setupDb() {
     if (!keyColNames.includes('managedModelId')) {
         await db.exec('ALTER TABLE client_keys ADD COLUMN managedModelId INTEGER');
     }
+    if (!keyColNames.includes('colorRgb')) {
+        await db.exec('ALTER TABLE client_keys ADD COLUMN colorRgb TEXT');
+    }
+    if (!keyColNames.includes('deletedAt')) {
+        await db.exec('ALTER TABLE client_keys ADD COLUMN deletedAt DATETIME');
+    }
+
+    // Seed colors for keys without one (round-robin from 24-color pool)
+    const KEY_COLOR_POOL = [
+        '239,138,98','245,158,11','16,185,129','20,184,166','6,182,212','56,189,248',
+        '59,130,246','99,102,241','139,92,246','168,85,247','217,70,239','236,72,153',
+        '244,63,94','239,68,68','251,146,60','250,204,21','132,204,22','34,197,94',
+        '45,212,191','129,140,248','192,132,252','244,114,182','251,113,133','148,163,184'
+    ];
+    const uncolored = await db.all('SELECT id FROM client_keys WHERE colorRgb IS NULL OR colorRgb = \'\' ORDER BY id');
+    for (let i = 0; i < uncolored.length; i++) {
+        await db.run('UPDATE client_keys SET colorRgb = ? WHERE id = ?',
+            [KEY_COLOR_POOL[i % KEY_COLOR_POOL.length], uncolored[i].id]);
+    }
 
     // Migration for conversation_logs
     const logCols = await db.all('PRAGMA table_info(conversation_logs)');
@@ -306,6 +327,96 @@ async function setupDb() {
     await db.run(
         "INSERT OR IGNORE INTO app_settings (key, value) VALUES ('stream_max_retries', '2')"
     );
+    await db.run(
+        "INSERT OR IGNORE INTO app_settings (key, value) VALUES ('notification_cooldown_seconds', '5')"
+    );
+    await db.run(
+        "INSERT OR IGNORE INTO app_settings (key, value) VALUES ('notification_log_retention_days', '7')"
+    );
+
+    await db.exec(`
+        CREATE TABLE IF NOT EXISTS notification_configs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            clientKeyId INTEGER UNIQUE NOT NULL,
+            enabled INTEGER DEFAULT 0,
+            webhookUrl TEXT DEFAULT '',
+            httpMethod TEXT DEFAULT 'POST',
+            headers TEXT DEFAULT '{}',
+            bodyTemplate TEXT DEFAULT '',
+            cooldownSeconds INTEGER DEFAULT 5,
+            filterClientApps TEXT DEFAULT '[]',
+            filterStatuses TEXT DEFAULT '[]',
+            clientKeyIds TEXT DEFAULT '[]',
+            createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (clientKeyId) REFERENCES client_keys(id)
+        )
+    `);
+
+    await db.exec(`
+        CREATE TABLE IF NOT EXISTS notification_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            clientKeyId INTEGER,
+            status TEXT NOT NULL DEFAULT 'pending',
+            webhookUrl TEXT,
+            httpMethod TEXT,
+            requestHeaders TEXT,
+            requestBodyPreview TEXT,
+            responseStatusCode INTEGER,
+            responseBodyPreview TEXT,
+            errorMessage TEXT,
+            roundSummary TEXT,
+            createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (clientKeyId) REFERENCES client_keys(id)
+        )
+    `);
+
+    await db.exec(`
+        CREATE TABLE IF NOT EXISTS client_colors (
+            clientApp TEXT PRIMARY KEY NOT NULL,
+            rgb TEXT NOT NULL
+        )
+    `);
+
+    const DEFAULT_CLIENT_COLORS = [
+        ['Claude Code (CLI)',     '239, 138, 98'],
+        ['Claude Code (VS Code)', '245, 158, 11'],
+        ['OpenCode',              '16, 185, 129'],
+        ['OpenClaw',              '20, 184, 166'],
+        ['Codex CLI',             '6, 182, 212'],
+        ['Cline',                 '56, 189, 248'],
+        ['Roo Code',              '59, 130, 246'],
+        ['Gemini CLI',            '99, 102, 241'],
+        ['Qwen Code',             '139, 92, 246'],
+        ['Cursor',                '168, 85, 247'],
+        ['Windsurf',              '217, 70, 239'],
+        ['Trae',                  '236, 72, 153'],
+        ['GitHub Copilot',        '244, 63, 94'],
+        ['Aider',                 '239, 68, 68'],
+        ['VS Code',               '251, 146, 60'],
+        ['JetBrains',             '250, 204, 21'],
+        ['终端工具',              '132, 204, 22'],
+        ['浏览器',                '34, 197, 94'],
+        ['LangChain',             '45, 212, 191'],
+        ['LlamaIndex',            '129, 140, 248'],
+        ['Dify',                  '192, 132, 252'],
+        ['Open WebUI',            '244, 114, 182'],
+        ['LobeChat',              '251, 113, 133'],
+        ['NextChat',              '148, 163, 184'],
+    ];
+    for (const [clientApp, rgb] of DEFAULT_CLIENT_COLORS) {
+        await db.run(
+            'INSERT OR IGNORE INTO client_colors (clientApp, rgb) VALUES (?, ?)',
+            [clientApp, rgb]
+        );
+    }
+
+    // Migration: add clientKeyIds column to notification_configs
+    const notifCols = await db.all('PRAGMA table_info(notification_configs)');
+    const notifColNames = notifCols.map(c => c.name);
+    if (!notifColNames.includes('clientKeyIds')) {
+        await db.exec('ALTER TABLE notification_configs ADD COLUMN clientKeyIds TEXT DEFAULT \'[]\'');
+        await db.run('UPDATE notification_configs SET clientKeyIds = \'[\' || clientKeyId || \']\' WHERE clientKeyId IS NOT NULL AND (clientKeyIds IS NULL OR clientKeyIds = \'[]\')');
+    }
 
     const adminUserCols = await db.all('PRAGMA table_info(admin_users)');
     const adminUserColNames = adminUserCols.map(c => c.name);

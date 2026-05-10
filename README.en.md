@@ -2,15 +2,17 @@
 
 <div align="center">
 
-# llmPylon
+# 🔥 llmPylon
 
-**Self-hosted LLM API proxy — multiple vendor subscriptions and agents on many devices, one entry point to manage models and apps**
+**One proxy. All your AI tools. No vendor lock-in.**
+
+*Self-hosted LLM API proxy — manage all your AI tools through one endpoint*
 
 [![License](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
+[![Docker Pulls](https://img.shields.io/docker/pulls/apache3/llmpylon)](https://hub.docker.com/r/apache3/llmpylon)
 ![Node.js 20+](https://img.shields.io/badge/node.js-%3E%3D20-339933?logo=nodedotjs&logoColor=white)
 ![Vue 3](https://img.shields.io/badge/Vue-3-4FC08D?logo=vuedotjs&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white)
-![SQLite](https://img.shields.io/badge/SQLite-local-003B57?logo=sqlite&logoColor=white)
 
 </div>
 
@@ -20,67 +22,26 @@
   <img src="docs/images/1.png" alt="llmPylon" width="780" />
 </p>
 
-## What does this software do?
+## Why llmPylon?
 
-If you **subscribe to more than one LLM vendor** and run **different AI agents / clients** on your phone, laptop, and desktop, you often run into:
+If you **subscribe to multiple LLM vendors** and use **different AI tools** (OpenCode, Claude Code, Cursor, etc.) across **multiple devices**, you've probably hit these walls:
 
-- Every tool needs its own Base URL, API key, and model name;
-- You want to **switch the default provider and model in one place**;
-- You want **per-app keys** and to **inspect each app’s traffic and logs**.
+| Pain Point | llmPylon's Fix |
+|------------|----------------|
+| Every tool needs its own API key config | Vendor keys stay **on the server only**; clients use short app keys |
+| Switching models means updating every client | **One-click** provider switch in the admin UI — all clients follow instantly |
+| Different vendors speak different protocols | **OpenAI ↔ Anthropic bidirectional auto-conversion** |
+| No visibility into which app uses which model | Real-time conversation logs + analytics with per-request tracing |
 
-**llmPylon** is a **unified proxy + admin UI** you run on **your own** server (or a home NAS / small box): **vendor keys live only on the server**; clients use **app-level keys** only. In the dashboard you switch the **active provider**, set **model rules**, and **bind models per app**—point all devices at the **same proxy URL** and change models or routes mostly from the browser.
+**llmPylon** is a **unified proxy + admin dashboard** you run on your own server. One Docker command to get started.
 
-> **Do not expose this directly to the public Internet.** Default admin credentials and client keys are extremely risky if they can be scanned. Use only on trusted networks or behind proper edge protection.
-
----
-
-<p align="center">
-  <img src="docs/images/2.png" alt="Provider configuration" width="720" />
-</p>
-
-<p align="center">
-  <img src="docs/images/3.png" alt="App management" width="720" />
-</p>
-
-<p align="center">
-  <img src="docs/images/4.png" alt="Conversation logs" width="720" />
-</p>
-
-<p align="center">
-  <img src="docs/images/5.png" alt="Conversation log detail" width="720" />
-</p>
+> ⚠️ **Do not expose this directly to the public Internet.** Use only on trusted networks or behind proper edge protection.
 
 ---
 
-**Note:** You must comply with each API vendor’s terms of use. Many “coding” plans restrict usage to programming tools and certain agents and **forbid** other programs from calling the API. This application **only forwards** HTTP API calls; whatever you connect **upstream must meet the vendor’s requirements**.
-
-## Features
-
-| | |
-| --- | --- |
-| **Multi-provider** | Configure multiple providers; switch the active one in one step |
-| **Protocol conversion** | OpenAI ↔ Anthropic bidirectional conversion (toggleable), streaming SSE and tool calling supported |
-| **Protocols** | Native OpenAI / Anthropic support; conversion mode rejects native requests from non-matching clients |
-| **Key custody** | Vendor keys stay on the server; clients use app keys only |
-| **Model management** | Grid/list dual views; sort by name, creation time, or custom drag; rename (case-sensitive); preferences auto-saved |
-| **Model rules** | Wildcard mapping (e.g. `gpt-4*` → real model id) |
-| **Per-app scope** | Bind provider and default model per app |
-| **`llmpylon` model name** | Resolved via app → provider → global defaults (**case-insensitive**) |
-| **Provider recycle bin** | Soft-delete with restore or permanent delete; model associations preserved |
-| **Copy provider** | One-click duplicate of a provider and its models; "copy" suffix auto-appended |
-| **Stats & logs** | Real-time WebSocket log push; detail view compares raw vs converted request/response; paginated browsing |
-| **User management** | Multi-admin accounts; create, edit, delete, and force password change |
-| **Runtime configuration** | Log/stats retention days, request timeout, upstream header filtering — all configurable from the UI |
-| **Config import/export** | Per-provider or global export/import (includes conversion flags, recycle bin) |
-| **Deployment** | **Docker recommended**; persist SQLite on a volume |
-
----
-
-## Quick start (Docker)
+## 🚀 Quick Start
 
 ```bash
-docker pull apache3/llmpylon
-
 docker run -d \
   --name llmpylon \
   -p 3000:3000 \
@@ -88,104 +49,146 @@ docker run -d \
   apache3/llmpylon
 ```
 
-Open `http://<host>:3000`, sign in with the default account, then **change the password immediately**:
+Open `http://<your-ip>:3000`, sign in, then **change the password immediately**:
 
 - Username: `llmpylon`
 - Password: `llmpylon`
 
-### Upgrading llmPylon (the app itself)
+### Client Setup
 
-You **do not** need a separate “update server”. Typical approaches:
+Point any AI tool at these settings:
 
-1. **Docker**: after pulling a newer image, recreate/restart the container with the **same volume** (`/data` unchanged keeps data and config).
-2. **From source**: in the repo run `git pull`, then `npm install` if needed, `cd client && npm run build`, and restart `npm run server`.
+| Setting | Value |
+|---------|-------|
+| Base URL | `http://your-ip:3000/proxy` |
+| API Key | Create an app in "App Management" and copy its key |
+| Model | `llmpylon` (case-insensitive) |
 
-Bump the root `package.json` `version` when you release; the UI and `GET /healthz` show that version.
+OpenAI-protocol clients use `/proxy/v1/chat/completions`, Anthropic-protocol clients use `/proxy/v1/messages`.
+
+```bash
+# Example cURL call
+curl -X POST http://localhost:3000/proxy/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_APP_KEY" \
+  -d '{"model":"llmpylon","messages":[{"role":"user","content":"Hello"}]}'
+```
 
 ---
 
-## Local development
+<p align="center">
+  <img src="docs/images/2.png" alt="Provider config" width="720" />
+  <br><em>Provider management — one-click active provider switching</em>
+</p>
 
-Requires **Node.js 20+** (same as the Docker image).
+<p align="center">
+  <img src="docs/images/3.png" alt="App management" width="720" />
+  <br><em>App management — unique key and color per app</em>
+</p>
+
+<p align="center">
+  <img src="docs/images/4.png" alt="Conversation logs" width="720" />
+  <br><em>Real-time conversation logs — trace every request</em>
+</p>
+
+<p align="center">
+  <img src="docs/images/5.png" alt="Log detail" width="720" />
+  <br><em>Log detail — compare raw vs converted request/response</em>
+</p>
+
+---
+
+## ✨ Features
+
+| | |
+|---|---|
+| ✅ **Multi-provider** | Configure multiple API providers; switch the active one with one click |
+| ✅ **Bidirectional conversion** | OpenAI ↔ Anthropic auto-conversion, with SSE streaming and tool calling |
+| ✅ **Key custody** | Vendor API keys stay server-side; clients use app-level keys only |
+| ✅ **Model rules** | Wildcard mapping (e.g., `gpt-4*` → actual model), with priority ordering |
+| ✅ **Per-app binding** | Each app can bind its own provider and model, unaffected by global switches |
+| ✅ **`llmpylon` magic model** | Auto-resolves via app binding → provider default → global default (case-insensitive) |
+| ✅ **Webhook notifications** | HTTP push on conversation completion; custom URL, headers, JSON body, cooldown |
+| ✅ **Real-time logs** | WebSocket live push; detail view comparing raw/converted request/response; pagination |
+| ✅ **Analytics dashboard** | Request trends, model distribution, activity heatmap, P50/P90/P99 percentiles, top slow/error requests |
+| ✅ **Recycle bin** | Soft-delete → restore → permanent delete for both providers and apps |
+| ✅ **Import/export** | Per-provider or global JSON config export/import, including recycle bin and conversion flags |
+| ✅ **Multi-admin** | Multiple admin accounts; create, edit, delete, and force password change |
+| ✅ **Runtime config** | Log retention, upstream timeout, header blocklist, stream retry — all in the UI |
+| ✅ **One-command Docker** | Volume-persisted SQLite, auto-migration on startup |
+
+---
+
+## 🔧 Upgrading
+
+**Docker (recommended):**
+
+```bash
+docker pull apache3/llmpylon
+docker stop llmpylon && docker rm llmpylon
+docker run -d --name llmpylon -p 3000:3000 -v llmpylon-data:/data apache3/llmpylon
+```
+
+**From source:**
+```bash
+git pull && npm install && cd client && npm run build && cd .. && npm run server
+```
+
+Database migration runs automatically on every startup — no data loss. The version is in root `package.json` and displayed in the admin UI and `/healthz`.
+
+---
+
+## 📡 API Reference
+
+| Path | Description |
+|---|---|
+| `POST /proxy/*` | LLM proxy entry (OpenAI / Anthropic) |
+| `GET /healthz` | Health check (includes version) |
+| `POST /api/auth/login` | Admin login |
+| `/api/providers/*` | Providers (conversion toggle, recycle bin, import/export) |
+| `/api/keys/*` | App keys (recycle bin, enable/disable, color) |
+| `/api/models/*` | Model management (drag reorder, per-provider filter) |
+| `/api/model-rules/*` | Model rules (wildcard mapping) |
+| `/api/notification-configs/*` | Webhook notification config |
+| `/api/notification-logs` | Notification push logs |
+| `/api/config/export` / `import` | Global config import/export |
+| `/api/stats` | Analytics (heatmap, percentiles, CSV export) |
+| `/api/logs` | Conversation logs (raw vs converted comparison) |
+| `/api/users/*` | Admin account management |
+
+---
+
+## 🛠 Local Development
+
+Requires Node.js 20+.
 
 ```bash
 npm install
 cd client && npm install && cd ..
-npm run dev
+npm run dev        # API :3000 + Vite :5173
+npm run server     # Production mode
 ```
 
-- API: `http://localhost:3000`
-- Vite dev UI: `http://localhost:5173`
-
-Production UI build:
-
-```bash
-cd client && npm run build && cd ..
-npm run server
-```
-
-See [.env.example](.env.example) for environment variables.
+See [.env.example](.env.example).
 
 ---
 
-## Example client request
-
-Point the client Base URL at the proxy prefix, e.g.:
-
-```bash
-curl -X POST http://localhost:3000/proxy/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_APP_KEY" \
-  -d '{"model":"llmpylon","messages":[{"role":"user","content":"Hi"}]}'
-```
-
----
-
-## Database & upgrades (Docker)
-
-- **Persistence**: mount a data directory (e.g. `/data` in the container) or the database is lost when the container is recreated.
-- **Schema**: migrations live in [`server/db.js`](server/db.js). **`setupDb()` runs on every startup** and applies `ALTER` / new tables to existing SQLite. After publishing a new image, **restart the container** to migrate.
-- `docker/init.sql` runs **once** when the database file is empty; the live schema is defined by `db.js` at runtime.
-
-The version string comes from root [`package.json`](package.json) (`version`) and is returned by [`GET /healthz`](server/index.js) (the admin UI shows `v…`).
-
----
-
-## API cheat sheet
-
-| Path | Description |
-| --- | --- |
-| `POST /proxy/*` | LLM proxy entry (OpenAI / Anthropic) |
-| `GET /healthz` | Health check (includes `version` / `name`) |
-| `POST /api/auth/login` | Admin login |
-| `/api/providers/*` | Providers (incl. conversion toggle, recycle bin, import/export) |
-| `/api/keys/*` | Apps (client keys) |
-| `/api/models/*` | Models (per-provider, rename support) |
-| `/api/model-rules/*` | Model rules (wildcard mapping) |
-| `/api/config/*` | Global config import/export (incl. recycle bin, conversion flags) |
-| `/api/stats` | Statistics |
-| `/api/logs` | Conversation logs (raw + converted request/response comparison) |
-
-For details, read the source and the in-app **Client help** page.
-
----
-
-## Environment variables
+## ⚙️ Environment Variables
 
 | Variable | Default | Description |
-| --- | --- | --- |
+|---|---|---|
 | `PORT` | `3000` | HTTP port |
-| `DB_PATH` | `database.sqlite` (relative to cwd) | SQLite path; often `/data/database.sqlite` in Docker |
-| `NODE_ENV` | — | Set to `production` in production if you like |
+| `DB_PATH` | `database.sqlite` | SQLite path; `/data/database.sqlite` in Docker |
+| `NODE_ENV` | — | Set to `production` in production |
 
 ---
 
-## Stack
+## 🧱 Stack
 
 Node.js · Express · SQLite · Socket.io · Vue 3 · Vite · Tailwind CSS · ECharts
 
 ---
 
-## License
+## 📄 License
 
-This repository is licensed under the [**GNU Affero General Public License v3.0 only**](LICENSE) (**AGPL-3.0-only**). The full text is in the `LICENSE` file at the repository root.
+**[GNU Affero General Public License v3.0 only](LICENSE)** (AGPL-3.0-only)

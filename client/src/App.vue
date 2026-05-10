@@ -28,6 +28,7 @@ import {
   Users,
   User,
   BookOpen,
+  Bell,
   X,
   Menu,
   ShieldCheck,
@@ -139,7 +140,7 @@ axios.interceptors.response.use(
   }
 );
 
-const VALID_TABS = ['providers', 'keys', 'models', 'modelRules', 'logs', 'stats', 'config', 'help'];
+const VALID_TABS = ['providers', 'keys', 'models', 'modelRules', 'logs', 'stats', 'config', 'notifications', 'help'];
 const TAB_STORAGE_KEY = 'llmpylon_active_tab';
 function readSavedTab() {
   try {
@@ -243,9 +244,24 @@ const appSettings = ref({
   logRetentionDays: 0,
   statsRetentionDays: 0,
   upstreamTimeoutSeconds: 360,
-  upstreamHeadersBlocklist: ['host', 'content-length', 'connection', 'accept-encoding']
+  upstreamHeadersBlocklist: ['host', 'content-length', 'connection', 'accept-encoding'],
+  notificationCooldownSeconds: 5,
+  notificationLogRetentionDays: 7
 });
+
 const appSettingsSaving = ref(false);
+const notificationConfigs = ref([]);
+const editingNotifConfig = ref(undefined);
+const notifConfigForm = ref({ clientKeyIds: [], enabled: true, webhookUrl: '', httpMethod: 'POST', headers: [], bodyTemplate: '', cooldownSeconds: 5 });
+const notifConfigSaving = ref(false);
+const notifLogs = ref([]);
+const notifLogsTotal = ref(0);
+const notifLogsPage = ref(1);
+const notifLogsPageSize = ref(20);
+const notifLogsFilter = ref({ clientKeyId: 'all', status: 'all' });
+const selectedNotifLog = ref(null);
+const showKeyRecycleBin = ref(false);
+const deletedKeys = ref([]);
 const nowMs = ref(Date.now());
 
 const providerViewMode = ref(localStorage.getItem('providerViewMode') || 'grid');
@@ -735,8 +751,14 @@ const loadAllData = async () => {
   await fetchModelsCatalog();
   await fetchModelRules();
   await fetchLogs();
+  fetchDeletedProviders().catch(() => {});
+  fetchDeletedKeys().catch(() => {});
   if (activeTab.value === 'stats') {
     await fetchStats();
+  }
+  if (activeTab.value === 'notifications') {
+    await fetchNotificationConfigs();
+    await fetchNotifLogs(1);
   }
 };
 
@@ -879,7 +901,9 @@ const fetchAppSettings = async () => {
       logRetentionDays: Math.max(0, Number(res.data.logRetentionDays) || 0),
       statsRetentionDays: Math.max(0, Number(res.data.statsRetentionDays) || 0),
       upstreamTimeoutSeconds: Math.max(5, Math.min(86400, Number(res.data.upstreamTimeoutSeconds) || 360)),
-      upstreamHeadersBlocklist: res.data.upstreamHeadersBlocklist || ['host', 'content-length', 'connection', 'accept-encoding']
+      upstreamHeadersBlocklist: res.data.upstreamHeadersBlocklist || ['host', 'content-length', 'connection', 'accept-encoding'],
+      notificationCooldownSeconds: Math.max(1, Math.min(300, Number(res.data.notificationCooldownSeconds) || 5)),
+      notificationLogRetentionDays: Math.max(0, Math.min(365, Number(res.data.notificationLogRetentionDays) || 7))
     };
   } catch (e) {
     console.error('fetchAppSettings', e);
@@ -893,18 +917,208 @@ const saveAppSettings = async () => {
       logRetentionDays: Math.max(0, Number(appSettings.value.logRetentionDays) || 0),
       statsRetentionDays: Math.max(0, Number(appSettings.value.statsRetentionDays) || 0),
       upstreamTimeoutSeconds: Math.max(5, Math.min(86400, Number(appSettings.value.upstreamTimeoutSeconds) || 360)),
-      upstreamHeadersBlocklist: appSettings.value.upstreamHeadersBlocklist
+      upstreamHeadersBlocklist: appSettings.value.upstreamHeadersBlocklist,
+      notificationCooldownSeconds: Math.max(1, Math.min(300, Number(appSettings.value.notificationCooldownSeconds) || 5)),
+      notificationLogRetentionDays: Math.max(0, Math.min(365, Number(appSettings.value.notificationLogRetentionDays) || 7))
     });
     appSettings.value.logRetentionDays = res.data.logRetentionDays;
     appSettings.value.statsRetentionDays = res.data.statsRetentionDays;
     appSettings.value.upstreamTimeoutSeconds = res.data.upstreamTimeoutSeconds;
     appSettings.value.upstreamHeadersBlocklist = res.data.upstreamHeadersBlocklist;
+    appSettings.value.notificationCooldownSeconds = res.data.notificationCooldownSeconds;
+    appSettings.value.notificationLogRetentionDays = res.data.notificationLogRetentionDays;
     alert('已保存');
   } catch (e) {
     alert('保存失败: ' + (e.response?.data?.error || e.message));
   } finally {
     appSettingsSaving.value = false;
   }
+};
+
+const fetchNotificationConfigs = async () => {
+  try {
+    const res = await axios.get(`${API_BASE}/notification-configs`);
+    notificationConfigs.value = res.data;
+  } catch (e) {
+    console.error('fetchNotificationConfigs', e);
+  }
+};
+
+const openNotifEditor = (config) => {
+  notifConfigSaving.value = false;
+  if (config) {
+    editingNotifConfig.value = config.id;
+    let headersObj = {};
+    if (typeof config.headers === 'string') {
+      try { headersObj = JSON.parse(config.headers); } catch {}
+    } else if (typeof config.headers === 'object' && config.headers !== null) {
+      headersObj = config.headers;
+    }
+    const headersArr = Object.entries(headersObj).map(([k, v]) => ({ key: k, value: String(v) }));
+    notifConfigForm.value = {
+      clientKeyIds: Array.isArray(config.clientKeyIds) ? [...config.clientKeyIds] : (config.clientKeyId ? [config.clientKeyId] : []),
+      enabled: !!config.enabled,
+      webhookUrl: config.webhookUrl || '',
+      httpMethod: config.httpMethod || 'POST',
+      headers: headersArr.length > 0 ? headersArr : [{ key: '', value: '' }],
+      bodyTemplate: config.bodyTemplate || '',
+      cooldownSeconds: config.cooldownSeconds || 5,
+      
+    };
+  } else {
+    editingNotifConfig.value = null;
+    notifConfigForm.value = { clientKeyIds: [], enabled: true, webhookUrl: '', httpMethod: 'POST', headers: [], bodyTemplate: '', cooldownSeconds: 5 };
+  }
+};
+
+const cancelNotifEditor = () => {
+  editingNotifConfig.value = undefined;
+  notifConfigForm.value = { clientKeyIds: [], enabled: true, webhookUrl: '', httpMethod: 'POST', headers: [], bodyTemplate: '', cooldownSeconds: 5 };
+};
+
+const addNotifHeader = () => {
+  notifConfigForm.value.headers.push({ key: '', value: '' });
+};
+
+const removeNotifHeader = (index) => {
+  notifConfigForm.value.headers.splice(index, 1);
+};
+
+const toggleNotifKey = (id) => {
+  const idx = notifConfigForm.value.clientKeyIds.indexOf(id);
+  if (idx >= 0) notifConfigForm.value.clientKeyIds.splice(idx, 1);
+  else notifConfigForm.value.clientKeyIds.push(id);
+};
+
+const cleanHeaderValue = (v) => {
+  let s = String(v).trim();
+  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
+    s = s.slice(1, -1).trim();
+  }
+  return s;
+};
+
+const saveNotifConfig = async () => {
+  if (notifConfigForm.value.bodyTemplate.trim()) {
+    try { JSON.parse(notifConfigForm.value.bodyTemplate); } catch {
+      alert('通知体模板 JSON 格式错误，请检查后重试');
+      return;
+    }
+  }
+  notifConfigSaving.value = true;
+  try {
+    let headersObj = {};
+    for (const h of notifConfigForm.value.headers) {
+      const k = cleanHeaderValue(h.key);
+      if (k) headersObj[k] = cleanHeaderValue(h.value);
+    }
+    
+    const payload = {
+      clientKeyIds: notifConfigForm.value.clientKeyIds,
+      enabled: notifConfigForm.value.enabled,
+      webhookUrl: notifConfigForm.value.webhookUrl,
+      httpMethod: notifConfigForm.value.httpMethod,
+      headers: headersObj,
+      bodyTemplate: notifConfigForm.value.bodyTemplate,
+      cooldownSeconds: Number(notifConfigForm.value.cooldownSeconds) || 5
+    };
+
+    if (editingNotifConfig.value) {
+      await axios.put(`${API_BASE}/notification-configs/${editingNotifConfig.value}`, payload);
+    } else {
+      await axios.post(`${API_BASE}/notification-configs`, payload);
+    }
+    await fetchNotificationConfigs();
+    cancelNotifEditor();
+  } catch (e) {
+    alert('保存失败: ' + (e.response?.data?.error || e.message));
+  } finally {
+    notifConfigSaving.value = false;
+  }
+};
+
+const deleteNotifConfig = async (id) => {
+  if (!confirm('确定删除此通知配置？')) return;
+  try {
+    await axios.delete(`${API_BASE}/notification-configs/${id}`);
+    await fetchNotificationConfigs();
+  } catch (e) {
+    alert('删除失败: ' + (e.response?.data?.error || e.message));
+  }
+};
+
+const fetchNotifLogs = async (page = 1) => {
+  try {
+    const params = { page, pageSize: notifLogsPageSize.value };
+    if (notifLogsFilter.value.clientKeyId !== 'all') params.clientKeyId = notifLogsFilter.value.clientKeyId;
+    if (notifLogsFilter.value.status !== 'all') params.status = notifLogsFilter.value.status;
+    const res = await axios.get(`${API_BASE}/notification-logs`, { params });
+    notifLogs.value = res.data.rows;
+    notifLogsTotal.value = res.data.total;
+    notifLogsPage.value = res.data.page;
+  } catch (e) {
+    console.error('fetchNotifLogs', e);
+  }
+};
+
+const clearNotifLogs = async () => {
+  if (!confirm('确定清空所有推送日志？此操作不可恢复。')) return;
+  try {
+    await axios.delete(`${API_BASE}/notification-logs`);
+    notifLogsPage.value = 1;
+    await fetchNotifLogs(1);
+  } catch (e) {
+    alert('清空失败: ' + (e.response?.data?.error || e.message));
+  }
+};
+
+const openNotifLogDetail = async (log) => {
+  try {
+    const res = await axios.get(`${API_BASE}/notification-logs/${log.id}`);
+    selectedNotifLog.value = res.data;
+  } catch (e) {
+    console.error('openNotifLogDetail', e);
+  }
+};
+
+const closeNotifLogDetail = () => {
+  selectedNotifLog.value = null;
+};
+
+const getKeyColor = (keyId) => {
+  const key = clientKeys.value.find(k => k.id === keyId);
+  return key?.colorRgb || '156, 163, 175';
+};
+
+const keyBadgeStyle = (keyId) => {
+  const rgb = getKeyColor(keyId);
+  return {
+    backgroundColor: `rgba(${rgb}, 0.12)`,
+    color: `rgb(${rgb})`,
+    borderColor: `rgba(${rgb}, 0.28)`,
+  };
+};
+
+const fetchDeletedKeys = async () => {
+  try {
+    const res = await axios.get(`${API_BASE}/keys/deleted`);
+    deletedKeys.value = res.data;
+  } catch (e) {
+    console.error('fetchDeletedKeys', e);
+  }
+};
+
+const restoreKey = async (id) => {
+  await axios.post(`${API_BASE}/keys/${id}/restore`);
+  fetchDeletedKeys();
+  fetchClientKeys();
+};
+
+const permanentDeleteKey = async (id) => {
+  if (!confirm('确定要彻底删除此应用吗？此操作不可恢复！')) return;
+  await axios.delete(`${API_BASE}/keys/${id}/permanent`);
+  fetchDeletedKeys();
+  fetchClientKeys();
 };
 
 const clearAllStats = async () => {
@@ -1310,9 +1524,10 @@ const updateClientApp = async () => {
 };
 
 const deleteClientApp = async (id) => {
-  if (!confirm('确定要删除这个应用吗？')) return;
+  if (!confirm('确定要删除这个应用吗？应用的请求日志会保留，通知配置中会移除此应用。')) return;
   await axios.delete(`${API_BASE}/keys/${id}`);
   fetchClientKeys();
+  if (showKeyRecycleBin.value) fetchDeletedKeys();
 };
 
 const normalizeClientAppPayload = (payload) => {
@@ -1616,6 +1831,12 @@ watch(activeTab, (tab) => {
       fetchAppSettings();
     }
   }
+  if (tab === 'notifications') {
+    if (isAuthenticated.value) {
+      fetchNotificationConfigs();
+      fetchNotifLogs(1);
+    }
+  }
   if (tab === 'users') {
     if (isAuthenticated.value) fetchAdminUsers();
   }
@@ -1785,6 +2006,13 @@ onUnmounted(() => {
           配置管理
         </button>
         <button
+          @click="activeTab = 'notifications'"
+          :class="['w-full flex items-center gap-3 px-4 py-2 rounded-lg transition-colors', activeTab === 'notifications' ? 'bg-blue-50 text-blue-600' : 'hover:bg-gray-100']"
+        >
+          <Bell class="w-5 h-5" />
+          通知管理
+        </button>
+        <button
           @click="activeTab = 'users'"
           :class="['w-full flex items-center gap-3 px-4 py-2 rounded-lg transition-colors', activeTab === 'users' ? 'bg-blue-50 text-blue-600' : 'hover:bg-gray-100']"
         >
@@ -1825,7 +2053,7 @@ onUnmounted(() => {
           >
             <Menu class="w-5 h-5" />
           </button>
-          <h2 class="text-base sm:text-lg font-semibold truncate">{{ activeTab === 'providers' ? '厂商配置' : (activeTab === 'keys' ? '应用管理' : (activeTab === 'models' ? '模型管理' : (activeTab === 'modelRules' ? '模型规则' : (activeTab === 'stats' ? '统计' : (activeTab === 'config' ? '配置管理' : (activeTab === 'users' ? '用户管理' : (activeTab === 'help' ? '客户端帮助' : '对话历史'))))))) }}</h2>
+          <h2 class="text-base sm:text-lg font-semibold truncate">{{ activeTab === 'providers' ? '厂商配置' : (activeTab === 'keys' ? '应用管理' : (activeTab === 'models' ? '模型管理' : (activeTab === 'modelRules' ? '模型规则' : (activeTab === 'stats' ? '统计' : (activeTab === 'config' ? '配置管理' : (activeTab === 'notifications' ? '通知管理' : (activeTab === 'users' ? '用户管理' : (activeTab === 'help' ? '客户端帮助' : '对话历史')))))))) }}</h2>
         </div>
         <div class="flex items-center gap-4">
           <div class="flex items-center gap-2 sm:gap-3">
@@ -1848,13 +2076,16 @@ onUnmounted(() => {
                   <span class="px-2 py-1 bg-purple-50 text-purple-700 rounded text-[10px] font-bold uppercase tracking-tight">Base URL</span>
                   <code class="text-xs font-mono text-gray-700 break-all">http://你的服务器IP:3000/proxy</code>
                 </div>
+                <div class="text-xs text-gray-400 ml-1">
+                  不同客户端需使用不同的请求路径：OpenAI 客户端使用 <code class="text-[10px] font-mono">/proxy/v1/chat/completions</code>，Anthropic 客户端使用 <code class="text-[10px] font-mono">/proxy/v1/messages</code>
+                </div>
                 <div class="flex items-center gap-2">
                   <span class="px-2 py-1 bg-purple-50 text-purple-700 rounded text-[10px] font-bold uppercase tracking-tight">API Key</span>
                   <code class="text-xs font-mono text-gray-700 break-all">在应用管理中创建应用，复制生成的 key</code>
                 </div>
                 <div class="flex items-center gap-2">
                   <span class="px-2 py-1 bg-purple-50 text-purple-700 rounded text-[10px] font-bold uppercase tracking-tight">Model</span>
-                  <code class="text-xs font-mono text-gray-700 break-all">建议设置为 {{ MAGIC_PROXY_MODEL }}（大小写不敏感）</code>
+                  <code class="text-xs font-mono text-gray-700 break-all">建议设置为 {{ MAGIC_PROXY_MODEL }}（大小写不敏感），自动解析为绑定的默认模型</code>
                 </div>
               </div>
             </div>
@@ -1865,11 +2096,11 @@ onUnmounted(() => {
             <div class="space-y-3 text-sm text-gray-700">
               <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
                 <p class="text-xs font-bold text-gray-500 mb-1">切换厂商和默认模型</p>
-                <p>在"厂商管理"中点击厂商卡片即可切换生效厂商；在"模型管理"中选择厂商后点击模型卡片设置该厂商的默认模型。客户端使用 {{ MAGIC_PROXY_MODEL }} 作为 model 时会自动路由。</p>
+                <p>在"厂商管理"中点击厂商卡片即可切换生效厂商；在"模型管理"中选择厂商后点击模型卡片设置该厂商的默认模型。客户端使用 {{ MAGIC_PROXY_MODEL }} 作为 model 时会根据优先级自动路由：App 绑定模型 &gt; 厂商默认模型 &gt; 全局默认模型。</p>
               </div>
               <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
                 <p class="text-xs font-bold text-gray-500 mb-1">创建应用并绑定模型</p>
-                <p>在"应用管理"中创建应用获得客户端 Key。可为每个应用单独绑定厂商和模型，绑定后不受全局切换影响。</p>
+                <p>在"应用管理"中创建应用获得客户端 Key。可为每个应用单独绑定厂商和模型，绑定后不受全局切换影响。每个应用自动分配独立颜色，在对话日志中一目了然。</p>
               </div>
               <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
                 <p class="text-xs font-bold text-gray-500 mb-1">模型规则强制映射</p>
@@ -1877,11 +2108,19 @@ onUnmounted(() => {
               </div>
               <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
                 <p class="text-xs font-bold text-gray-500 mb-1">开启协议转换</p>
-                <p>编辑厂商，打开"协议强制转换"开关。例如：OpenAI 厂商开启后，客户端需使用 Anthropic 协议的 endpoint（<code>/proxy/v1/messages</code>）。</p>
+                <p>编辑厂商，打开"协议强制转换"开关，支持 OpenAI ↔ Anthropic 双向转换。例如：OpenAI 厂商开启后，客户端使用 <code>/proxy/v1/messages</code> 访问；Anthropic 厂商开启后，客户端使用 <code>/proxy/v1/chat/completions</code> 访问。</p>
               </div>
               <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
-                <p class="text-xs font-bold text-gray-500 mb-1">删除/恢复厂商</p>
-                <p>删除厂商时移入回收站（可恢复），在厂商管理页点击"回收站"进入。彻底删除从这里操作。</p>
+                <p class="text-xs font-bold text-gray-500 mb-1">删除/恢复厂商和应用</p>
+                <p>删除时移入回收站（可恢复），在厂商管理或应用管理页点击"回收站"进入。可恢复或彻底删除。彻底删除前会清理关联配置和日志。</p>
+              </div>
+              <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
+                <p class="text-xs font-bold text-gray-500 mb-1">消息通知</p>
+                <p>在"通知管理"中为 App 配置 webhook。一轮对话完成后自动发送 HTTP 通知到指定 URL。支持自定义请求方法、Headers、JSON 模板、客户端类型过滤，还可设置对话结束等待时间避免频繁通知。</p>
+              </div>
+              <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
+                <p class="text-xs font-bold text-gray-500 mb-1">统计面板与配置管理</p>
+                <p>"统计"页提供请求趋势图、模型分布饼图、活动热力图、延迟 P50/P90/P99 百分位、Top 慢/错请求。"配置管理"页可设置日志/统计保留天数、上游 HTTP 超时、请求头过滤黑名单。</p>
               </div>
               <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
                 <p class="text-xs font-bold text-gray-500 mb-1">备份配置</p>
@@ -1903,7 +2142,7 @@ onUnmounted(() => {
               </div>
               <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
                 <p class="text-xs font-bold text-gray-500 mb-1">流中断</p>
-                <p>日志状态显示"流中断"时，可能是上游响应异常或网络波动。展开对话日志详情可查看原始上游响应和转换后响应。</p>
+                <p>日志状态显示"流中断"时，可能是上游响应异常或网络波动。代理内置流式重试机制（可配置重试次数和超时时间）。展开对话日志详情可查看原始上游响应和转换后响应。</p>
               </div>
             </div>
           </div>
@@ -2162,17 +2401,67 @@ onUnmounted(() => {
         <!-- Apps View (Renamed from Keys) -->
         <div v-if="activeTab === 'keys'" class="space-y-6">
           <div class="flex flex-col sm:flex-row gap-3 sm:justify-between sm:items-center">
-            <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">应用管理</h3>
-            <button 
-              @click="showAddApp = true; if (selectedLog) closeLogDetail()"
-              class="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
-            >
-              <Plus class="w-4 h-4" />
-              创建应用
-            </button>
+            <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">{{ showKeyRecycleBin ? '回收站' : '应用管理' }}</h3>
+            <div class="flex flex-wrap gap-2">
+              <template v-if="!showKeyRecycleBin">
+                <button 
+                  @click="showAddApp = true; if (selectedLog) closeLogDetail()"
+                  class="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
+                >
+                  <Plus class="w-4 h-4" />
+                  创建应用
+                </button>
+                <button
+                  @click="showKeyRecycleBin = true; fetchDeletedKeys()"
+                  class="flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 transition-colors text-sm border border-gray-200"
+                >
+                  <Trash2 class="w-4 h-4" />
+                  回收站
+                  <span v-if="deletedKeys.length" class="px-1.5 py-0.5 bg-red-100 text-red-600 rounded-full text-[10px] font-bold">{{ deletedKeys.length }}</span>
+                </button>
+              </template>
+              <button
+                v-else
+                @click="showKeyRecycleBin = false"
+                class="flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-sm border border-gray-200"
+              >
+                应用列表
+              </button>
+            </div>
           </div>
 
-          <div class="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
+          <div v-if="showKeyRecycleBin" class="space-y-4">
+            <div v-if="!deletedKeys.length" class="text-center py-12 text-gray-400 text-sm bg-white rounded-xl border border-gray-200 shadow-sm">
+              回收站为空
+            </div>
+            <div v-for="k in deletedKeys" :key="k.id" class="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
+              <div class="flex justify-between items-start mb-4">
+                <div>
+                  <div class="flex items-center gap-2">
+                    <span :style="keyBadgeStyle(k.id)" class="px-2 py-1 rounded text-[10px] font-bold uppercase tracking-tight border">{{ k.name }}</span>
+                    <span class="text-xs px-2 py-0.5 bg-red-50 text-red-600 rounded-full border border-red-100 font-medium">已删除</span>
+                  </div>
+                  <div class="font-mono text-[10px] text-gray-400 mt-1">{{ k.key }}</div>
+                  <p class="text-[10px] text-gray-400 mt-1">删除时间：{{ formatTime(k.deletedAt) }}</p>
+                </div>
+                <div class="flex gap-2">
+                  <button @click="restoreKey(k.id)" class="px-3 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-xs font-bold">恢复</button>
+                  <button @click="permanentDeleteKey(k.id)" class="px-3 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors text-xs font-bold">彻底删除</button>
+                </div>
+              </div>
+              <div class="flex flex-wrap gap-2">
+                <span v-if="k.providerId" class="px-2 py-1 bg-blue-50 text-blue-700 rounded text-[10px] font-bold uppercase tracking-tight border border-blue-200">
+                  绑定厂商: {{ providers.find(p => p.id === k.providerId)?.name || '未知' }}
+                </span>
+                <span v-else class="text-gray-400 text-xs italic">绑定厂商: 全局默认</span>
+                <span v-if="k.managedModelId" class="px-2 py-1 bg-green-50 text-green-700 rounded text-[10px] font-bold uppercase tracking-tight border border-green-200">
+                  绑定模型: {{ getModelCatalogEntry(k.managedModelId)?.name || '未知' }}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div v-else class="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
             <div class="overflow-x-auto">
             <table class="w-full min-w-[680px] text-left text-sm">
               <thead class="bg-gray-50 border-b border-gray-200">
@@ -2186,11 +2475,11 @@ onUnmounted(() => {
               <tbody class="divide-y divide-gray-200">
                 <tr v-for="k in clientKeys" :key="k.id" class="hover:bg-gray-50 transition-colors">
                   <td class="px-6 py-4">
-                    <div class="font-medium text-gray-900">{{ k.name }}</div>
+                    <span :style="keyBadgeStyle(k.id)" class="px-2 py-1 rounded text-[10px] font-bold uppercase tracking-tight border">{{ k.name }}</span>
                     <div class="font-mono text-[10px] text-gray-400 mt-0.5">{{ k.key }}</div>
                   </td>
                   <td class="px-6 py-4">
-                    <span v-if="k.providerId" class="px-2 py-1 bg-blue-50 text-blue-700 rounded text-[10px] font-bold border border-blue-100">
+                    <span v-if="k.providerId" class="px-2 py-1 bg-blue-50 text-blue-700 rounded text-[10px] font-bold uppercase tracking-tight border border-blue-200">
                       {{ providers.find(p => p.id === k.providerId)?.name || '未知厂商' }}
                     </span>
                     <span v-else class="text-gray-400 text-xs italic">全局默认</span>
@@ -2198,7 +2487,7 @@ onUnmounted(() => {
                   <td class="px-6 py-4">
                     <template v-if="k.managedModelId">
                       <div class="flex flex-wrap items-center gap-2">
-                        <span class="px-2 py-1 bg-green-50 text-green-700 rounded text-[10px] font-bold border border-green-100">
+                        <span class="px-2 py-1 bg-green-50 text-green-700 rounded text-[10px] font-bold uppercase tracking-tight border border-green-200">
                           {{ getModelCatalogEntry(k.managedModelId)?.name || '未知模型' }}
                         </span>
                       </div>
@@ -3075,6 +3364,27 @@ onUnmounted(() => {
             </div>
           </div>
 
+          <!-- 通知推送日志保留 -->
+          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+            <div class="flex items-center justify-between gap-4">
+              <div class="flex-1">
+                <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">通知推送日志保留</h3>
+                <p class="text-xs text-gray-400 mt-1">按天自动删除过期的通知推送日志；0 表示不自动删除。默认 7 天，范围 0～365 天。</p>
+              </div>
+              <div class="flex items-center gap-3">
+                <input
+                  v-model.number="appSettings.notificationLogRetentionDays"
+                  type="number"
+                  min="0"
+                  max="365"
+                  step="1"
+                  class="w-24 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                />
+                <span class="text-sm text-gray-500">天</span>
+              </div>
+            </div>
+          </div>
+
           <!-- 保存按钮 -->
           <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
             <div class="flex justify-end">
@@ -3091,6 +3401,208 @@ onUnmounted(() => {
 
         </div>
 
+
+        <!-- Notifications View -->
+        <div v-if="activeTab === 'notifications'" class="space-y-6">
+          <!-- 对话结束等待时间 -->
+          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+            <div class="flex items-center justify-between gap-4">
+              <div class="flex-1">
+                <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">对话结束等待时间</h3>
+                <p class="text-xs text-gray-400 mt-1">模型回复结束（finish_reason=stop）后等待多少秒无新请求，视为一轮对话结束并发送 HTTP 通知。范围 1～300 秒。</p>
+              </div>
+              <div class="flex items-center gap-3">
+                <input
+                  v-model.number="appSettings.notificationCooldownSeconds"
+                  type="number"
+                  min="1"
+                  max="300"
+                  step="1"
+                  class="w-24 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                />
+                <span class="text-sm text-gray-500">秒</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 消息通知配置 -->
+          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+            <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider mb-4">消息通知配置</h3>
+            <p class="text-xs text-gray-400 mb-4">为 App Key 配置一轮对话结束后的 HTTP 通知目标。对话结束等待秒数继承上面的全局设置，也可单独覆盖。</p>
+            <div v-if="notificationConfigs.length > 0" class="space-y-3 mb-4">
+              <div v-for="cfg in notificationConfigs" :key="cfg.id" class="flex items-center justify-between gap-3 p-4 bg-white rounded-xl border border-gray-200 shadow-sm hover:shadow-md transition-shadow">
+                <div class="flex-1 min-w-0">
+                  <div class="flex items-center gap-2">
+                    <span class="font-bold text-sm text-gray-800">{{ cfg.clientKeyNames || cfg.clientKeyName || ('App #' + cfg.clientKeyId) }}</span>
+                    <span :class="cfg.enabled ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-400'" class="px-2 py-0.5 rounded text-[10px] font-bold">{{ cfg.enabled ? '启用' : '停用' }}</span>
+                  </div>
+                  <div class="text-xs text-gray-500 mt-0.5 truncate">{{ cfg.webhookUrl || '未配置 URL' }}</div>
+                  <div class="text-[10px] text-gray-400 mt-0.5">
+                    方法: {{ cfg.httpMethod }} | 对话结束等待: {{ cfg.cooldownSeconds }}秒
+                    <span v-if="cfg.filterClientApps && cfg.filterClientApps.length"> | 客户端: {{ cfg.filterClientApps.join(', ') }}</span>
+                  </div>
+                </div>
+                <div class="flex gap-1 shrink-0">
+                  <button @click="openNotifEditor(cfg)" class="p-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"><Pencil class="w-4 h-4" /></button>
+                  <button @click="deleteNotifConfig(cfg.id)" class="p-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors"><Trash2 class="w-4 h-4" /></button>
+                </div>
+              </div>
+            </div>
+            <div v-else class="text-xs text-gray-400 mb-4">暂无通知配置，点击下方按钮添加。</div>
+            <div v-if="editingNotifConfig !== undefined" class="space-y-4 p-6 bg-white rounded-xl border border-gray-200 shadow-sm">
+              <h4 class="text-sm font-bold text-gray-800">{{ editingNotifConfig ? '编辑通知配置' : '添加通知配置' }}</h4>
+              <div class="flex items-center justify-between">
+                <label class="block text-xs font-bold text-gray-400 uppercase mb-0">启用</label>
+                <label class="relative inline-flex items-center cursor-pointer">
+                  <input type="checkbox" v-model="notifConfigForm.enabled" class="sr-only peer" />
+                  <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                </label>
+              </div>
+              <div class="flex flex-col gap-1">
+                <label class="block text-xs font-bold text-gray-400 uppercase mb-1">App Key（多选）</label>
+                <div class="flex flex-wrap gap-1.5">
+                  <button
+                    v-for="key in clientKeys" :key="key.id"
+                    @click="toggleNotifKey(key.id)"
+                    type="button"
+                    :style="notifConfigForm.clientKeyIds.includes(key.id) ? { backgroundColor: `rgb(${getKeyColor(key.id)})`, color: '#fff', borderColor: `rgb(${getKeyColor(key.id)})` } : keyBadgeStyle(key.id)"
+                    class="px-2 py-1 rounded text-[10px] font-semibold font-mono tracking-tight border transition-colors"
+                  >{{ key.name }}</button>
+                  <span v-if="clientKeys.length === 0" class="text-xs text-gray-400">暂无 App Key</span>
+                </div>
+              </div>
+              <div class="flex items-center gap-3">
+                <div class="flex flex-col gap-1">
+                  <label class="block text-xs font-bold text-gray-400 uppercase mb-1">对话结束等待（秒）</label>
+                  <input v-model.number="notifConfigForm.cooldownSeconds" type="number" min="1" max="300" class="w-24 px-4 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+                </div>
+              </div>
+              <div class="flex flex-col gap-1">
+                <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Webhook URL</label>
+                <input v-model="notifConfigForm.webhookUrl" type="text" placeholder="https://example.com/webhook" class="w-full px-4 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+              </div>
+              <div class="flex flex-col gap-1">
+                <label class="block text-xs font-bold text-gray-400 uppercase mb-1">HTTP 方法</label>
+                <select v-model="notifConfigForm.httpMethod" class="w-full px-4 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none bg-white">
+                  <option>POST</option>
+                  <option>PUT</option>
+                </select>
+              </div>
+              <div class="flex flex-col gap-1">
+                <label class="block text-xs font-bold text-gray-400 uppercase mb-1">自定义 Headers</label>
+                <div class="space-y-1.5">
+                  <div v-for="(h, i) in notifConfigForm.headers" :key="i" class="flex gap-1.5 items-start">
+                    <input v-model="h.key" type="text" placeholder="Header 名" class="flex-1 px-3 py-2 border border-gray-200 rounded-lg text-xs focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none font-mono" />
+                    <input v-model="h.value" type="text" placeholder="Header 值" class="flex-1 px-3 py-2 border border-gray-200 rounded-lg text-xs focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none font-mono" />
+                    <button @click="removeNotifHeader(i)" class="shrink-0 p-1.5 text-red-600 hover:bg-red-50 rounded-lg transition-colors"><X class="w-3.5 h-3.5" /></button>
+                  </div>
+                </div>
+                <button @click="addNotifHeader" class="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 mt-1 self-start">
+                  <Plus class="w-3 h-3" /> 添加 Header
+                </button>
+              </div>
+              <div class="flex flex-col gap-1">
+                <label class="block text-xs font-bold text-gray-400 uppercase mb-1">通知体模板 (JSON, 支持 {{变量}})</label>
+                <textarea v-model="notifConfigForm.bodyTemplate" rows="4" placeholder='留空使用默认模板，支持变量如 {{model}} {{totalTokens}} {{clientApp}} {{status}}' class="w-full px-4 py-2 border border-gray-200 rounded-lg text-xs font-mono focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"></textarea>
+              </div>
+              <div class="flex gap-3 pt-2">
+                <button @click="cancelNotifEditor" class="flex-1 px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors text-sm">取消</button>
+                <button @click="saveNotifConfig" :disabled="notifConfigSaving" class="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-bold text-sm disabled:opacity-50">
+                  {{ notifConfigSaving ? '保存中…' : '保存' }}
+                </button>
+              </div>
+            </div>
+            <button v-else @click="openNotifEditor(null)" class="flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-sm border border-gray-200">
+              <Plus class="w-4 h-4" />
+              添加通知配置
+            </button>
+          </div>
+
+          <!-- 推送日志 -->
+          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+            <div class="flex items-center justify-between mb-4">
+              <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">推送日志</h3>
+              <div class="flex gap-2">
+                <button @click="fetchNotifLogs(notifLogsPage)" class="flex items-center gap-1 px-3 py-1.5 bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 text-xs border border-gray-200">
+                  <Clock class="w-3 h-3" /> 刷新
+                </button>
+                <button @click="clearNotifLogs" class="flex items-center gap-2 px-3 py-1.5 bg-red-50 text-red-600 rounded-lg hover:bg-red-100 transition-colors text-xs font-bold border border-red-200">
+                  <Trash2 class="w-3 h-3" /> 清空日志
+                </button>
+              </div>
+            </div>
+            <div class="flex gap-2 mb-4">
+              <select v-model="notifLogsFilter.clientKeyId" @change="fetchNotifLogs(1)" class="px-3 py-1.5 border border-gray-200 rounded-lg text-xs focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none bg-white">
+                <option value="all">全部 App</option>
+                <option v-for="key in clientKeys" :key="key.id" :value="key.id">{{ key.name }}</option>
+              </select>
+              <select v-model="notifLogsFilter.status" @change="fetchNotifLogs(1)" class="px-3 py-1.5 border border-gray-200 rounded-lg text-xs focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none bg-white">
+                <option value="all">全部状态</option>
+                <option value="success">成功</option>
+                <option value="error">失败</option>
+              </select>
+            </div>
+            <div v-if="notifLogs.length > 0" class="overflow-x-auto">
+              <table class="w-full text-left text-xs">
+                <thead class="bg-gray-50 border-b border-gray-200 text-gray-500">
+                  <tr>
+                    <th class="px-3 py-2 font-medium">时间</th>
+                    <th class="px-3 py-2 font-medium">App</th>
+                    <th class="px-3 py-2 font-medium">状态</th>
+                    <th class="px-3 py-2 font-medium">URL</th>
+                    <th class="px-3 py-2 font-medium text-right">响应码</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-100">
+                  <tr v-for="l in notifLogs" :key="l.id" @click="openNotifLogDetail(l)" class="hover:bg-gray-50 cursor-pointer transition-colors">
+                    <td class="px-3 py-2 font-mono text-[10px] text-gray-500 whitespace-nowrap">{{ formatTime(l.createdAt) }}</td>
+                    <td class="px-3 py-2 font-medium">{{ l.clientKeyName || ('App #' + l.clientKeyId) }}</td>
+                    <td class="px-3 py-2">
+                      <span :class="l.status === 'success' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'" class="px-2 py-0.5 rounded text-[10px] font-bold">{{ l.status === 'success' ? '成功' : '失败' }}</span>
+                    </td>
+                    <td class="px-3 py-2 text-gray-500 truncate max-w-[300px]">{{ l.webhookUrl }}</td>
+                    <td class="px-3 py-2 text-right font-mono text-[10px]" :class="l.responseStatusCode && l.responseStatusCode < 400 ? 'text-green-600' : 'text-red-600'">{{ l.responseStatusCode || '-' }}</td>
+                  </tr>
+                </tbody>
+              </table>
+              <div class="flex items-center justify-between mt-4 pt-3 border-t border-gray-100">
+                <span class="text-xs text-gray-400">共 {{ notifLogsTotal }} 条</span>
+                <div class="flex gap-1">
+                  <button :disabled="notifLogsPage <= 1" @click="fetchNotifLogs(notifLogsPage - 1)" class="px-2 py-1 text-xs border border-gray-200 rounded hover:bg-gray-50 disabled:opacity-30">上一页</button>
+                  <span class="px-2 py-1 text-xs text-gray-500">{{ notifLogsPage }}</span>
+                  <button :disabled="notifLogsPage * notifLogsPageSize >= notifLogsTotal" @click="fetchNotifLogs(notifLogsPage + 1)" class="px-2 py-1 text-xs border border-gray-200 rounded hover:bg-gray-50 disabled:opacity-30">下一页</button>
+                </div>
+              </div>
+            </div>
+            <div v-else class="text-xs text-gray-400">暂无推送日志。</div>
+            <div v-if="selectedNotifLog" class="mt-4 p-4 bg-gray-50 rounded-lg border border-gray-200 space-y-3">
+              <div class="flex items-center justify-between">
+                <h4 class="text-sm font-bold text-gray-700">推送详情</h4>
+                <button @click="closeNotifLogDetail" class="text-gray-400 hover:text-gray-600"><X class="w-4 h-4" /></button>
+              </div>
+              <div class="grid grid-cols-2 gap-2 text-xs">
+                <div><span class="text-gray-500">方法:</span> <span class="font-mono">{{ selectedNotifLog.httpMethod }}</span></div>
+                <div><span class="text-gray-500">状态:</span> <span :class="selectedNotifLog.status === 'success' ? 'text-green-600 font-bold' : 'text-red-600 font-bold'">{{ selectedNotifLog.status }}</span></div>
+                <div class="col-span-2"><span class="text-gray-500">URL:</span> <span class="font-mono text-[10px] break-all">{{ selectedNotifLog.webhookUrl }}</span></div>
+                <div v-if="selectedNotifLog.responseStatusCode" class="col-span-2"><span class="text-gray-500">响应码:</span> <span class="font-mono">{{ selectedNotifLog.responseStatusCode }}</span></div>
+                <div v-if="selectedNotifLog.errorMessage" class="col-span-2"><span class="text-gray-500">错误:</span> <span class="text-red-600">{{ selectedNotifLog.errorMessage }}</span></div>
+              </div>
+              <div v-if="selectedNotifLog.requestHeaders" class="space-y-1">
+                <span class="text-xs text-gray-500 font-medium">请求 Headers</span>
+                <pre class="bg-gray-900 text-gray-100 p-3 rounded-lg overflow-auto text-[10px] leading-relaxed max-h-[200px]">{{ formatJson(selectedNotifLog.requestHeaders) }}</pre>
+              </div>
+              <div v-if="selectedNotifLog.requestBodyPreview" class="space-y-1">
+                <span class="text-xs text-gray-500 font-medium">请求 Body</span>
+                <pre class="bg-gray-900 text-gray-100 p-3 rounded-lg overflow-auto text-[10px] leading-relaxed max-h-[200px]">{{ formatJson(selectedNotifLog.requestBodyPreview) }}</pre>
+              </div>
+              <div v-if="selectedNotifLog.responseBodyPreview" class="space-y-1">
+                <span class="text-xs text-gray-500 font-medium">响应 Body</span>
+                <pre class="bg-gray-900 text-gray-100 p-3 rounded-lg overflow-auto text-[10px] leading-relaxed max-h-[200px]">{{ formatJson(selectedNotifLog.responseBodyPreview) }}</pre>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <!-- Logs View -->
         <div v-if="activeTab === 'logs'" class="space-y-4">
           <div class="flex flex-col lg:flex-row gap-3 lg:justify-between lg:items-center mb-4">
@@ -3099,7 +3611,7 @@ onUnmounted(() => {
               <div class="flex flex-wrap gap-2">
                 <button 
                   @click="selectedClientKey = 'all'; logsPage = 1; fetchLogs()"
-                  :class="['px-3 py-1 rounded-full text-xs font-bold transition-all border', 
+                  :class="['px-3 py-1 rounded text-xs font-bold transition-all border', 
                     selectedClientKey === 'all' ? 'bg-gray-900 text-white border-gray-900' : 'bg-white text-gray-600 border-gray-200 hover:border-gray-400']"
                 >
                   全部客户端
@@ -3108,8 +3620,8 @@ onUnmounted(() => {
                   v-for="key in clientKeys" 
                   :key="key.id"
                   @click="selectedClientKey = key.id; logsPage = 1; fetchLogs()"
-                  :class="['px-3 py-1 rounded-full text-xs font-bold transition-all border', 
-                    selectedClientKey === key.id ? 'bg-purple-600 text-white border-purple-600 shadow-sm' : 'bg-purple-50 text-purple-600 border-purple-100 hover:border-purple-300']"
+                  :style="selectedClientKey === key.id ? { backgroundColor: `rgb(${getKeyColor(key.id)})`, color: '#fff', borderColor: `rgb(${getKeyColor(key.id)})` } : keyBadgeStyle(key.id)"
+                  class="px-3 py-1 rounded text-xs font-bold transition-all border shadow-sm"
                 >
                   {{ key.name }}
                 </button>
@@ -3148,7 +3660,7 @@ onUnmounted(() => {
                 <tr v-for="log in logs" :key="log.id" class="hover:bg-gray-50 transition-colors">
                   <td class="px-6 py-4 text-gray-500 font-mono text-xs">{{ formatTime(log.requestAt || log.createdAt) }}</td>
                   <td class="px-6 py-4">
-                    <span class="px-2 py-1 bg-purple-50 text-purple-700 rounded text-[10px] font-bold uppercase tracking-tight">{{ log.clientKeyName || '未知' }}</span>
+                    <span :style="keyBadgeStyle(log.clientKeyId)" class="px-2 py-1 rounded text-[10px] font-bold uppercase tracking-tight border">{{ log.clientKeyName || '未知' }}</span>
                     <span v-if="log.clientApp" class="ml-1 text-[8px] text-gray-400 italic">{{ log.clientApp }}</span>
                   </td>
                   <td class="px-6 py-4 font-medium">{{ log.providerName }}</td>
@@ -3188,7 +3700,7 @@ onUnmounted(() => {
                       v-else 
                       class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-red-50 text-red-700 border border-red-200"
                     >
-                      {{ log.responseBody && log.responseBody.includes('协议错误') ? '协议错误' : '错误' }}
+                      {{ log.responseBody && log.responseBody.includes('Missing API Key') ? '缺少 API Key' : log.responseBody && log.responseBody.includes('Invalid API Key') ? '无效 API Key' : log.responseBody && log.responseBody.includes('disabled') ? 'Key 已禁用' : log.responseBody && log.responseBody.includes('协议错误') ? '协议错误' : '错误' }}
                     </span>
                     <p v-if="Number(log.isStream) === 1" class="mt-1 text-[9px] text-gray-500 font-mono">
                       流式<span v-if="Number(log.streamBroken) === 1" class="text-red-600"> · 流中断</span>
@@ -3761,7 +4273,7 @@ onUnmounted(() => {
             <div class="lg:col-span-2 flex flex-col sm:flex-row gap-4 mb-2">
             <div class="flex-1 p-3 bg-gray-50 rounded-lg border border-gray-100">
               <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">客户端密钥</p>
-              <p class="text-sm font-medium text-purple-700">{{ selectedLog.clientKeyName || '未知' }}</p>
+              <span :style="keyBadgeStyle(selectedLog.clientKeyId)" class="px-2 py-1 rounded text-[10px] font-bold uppercase tracking-tight border inline-block">{{ selectedLog.clientKeyName || '未知' }}</span>
               <p v-if="selectedLog.clientApp" class="text-[10px] text-gray-400 mt-0.5">{{ selectedLog.clientApp }}</p>
             </div>
             <div class="flex-1 p-3 bg-gray-50 rounded-lg border border-gray-100">

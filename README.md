@@ -2,87 +2,46 @@
 
 <div align="center">
 
-# llmPylon
+# 🔥 llmPylon
 
-**自托管 LLM API 代理 —— 多厂商订阅、多设备 Agent，一套入口统一管理模型与应用**
+**一个代理，所有 AI 工具，无需厂商绑定**
+
+*Self-hosted LLM API proxy — manage all your AI tools through one endpoint*
 
 [![License](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
+[![Docker Pulls](https://img.shields.io/docker/pulls/apache3/llmpylon)](https://hub.docker.com/r/apache3/llmpylon)
 ![Node.js 20+](https://img.shields.io/badge/node.js-%3E%3D20-339933?logo=nodedotjs&logoColor=white)
 ![Vue 3](https://img.shields.io/badge/Vue-3-4FC08D?logo=vuedotjs&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white)
-![SQLite](https://img.shields.io/badge/SQLite-local-003B57?logo=sqlite&logoColor=white)
 
 </div>
 
 ---
 
 <p align="center">
-  <!-- 将下方 src 改为你的配图，例如 docs/images/hero.png -->
   <img src="docs/images/1.png" alt="llmPylon" width="780" />
 </p>
 
-## 这款软件是干什么的？
+## 为什么选择 llmPylon？
 
-如果你**同时订了多家大模型厂商**，又在**手机、笔记本、台式机**上装了不同的 AI Agent / 客户端，经常会遇到：
+如果你**同时订阅了多家大模型厂商**，又在**多台设备**上使用不同的 AI 工具（OpenCode、Claude Code、Cursor……），你大概率遇到过这些麻烦：
 
-- 每个工具都要单独填 Base URL、换 API Key、改模型名；
-- 一键修改默认厂商和模型
-- 为每个应用分配秘钥，查看应用模型日志
+| 痛点 | llmPylon 怎么解决 |
+|------|------------------|
+| 每个工具都要填一遍 API Key | 厂商 Key **只保存在服务端**，客户端只用简短的应用 Key |
+| 换模型要逐个客户端改配置 | 后台**一键切换**生效厂商，所有客户端立即生效 |
+| 各厂商协议不兼容 | **OpenAI ↔ Anthropic 双向协议自动转换** |
+| 不知道哪个应用在用什么模型 | 实时对话日志 + 统计分析，每个请求来源一目了然 |
 
-**llmPylon** 就是放在你自己服务器（或家里 NAS / 小主机）上的一个 **统一代理 + 管理后台**：各家 **厂商 Key 只保存在服务端**，各端客户端只拿 **应用级 Key**；在后台切换**当前生效厂商**、配置**模型规则**和**按应用绑定模型**，多设备指向 **同一套代理地址** 即可，换模型、换线路主要在网页里完成。
+**llmPylon** 就是一个放在你自己服务器上的**统一代理 + 管理后台**。一行 Docker 命令即可启动。
 
-
-> **不要把它直接暴露到公网。** 默认管理员与客户端 Key 若可被扫描，风险极高。请仅在受信任网络或做好接入层防护后使用。
-
----
-
-<p align="center">
-  <img src="docs/images/2.png" alt="厂商配置配图" width="720" />
-</p>
-
-<p align="center">
-  <img src="docs/images/3.png" alt="应用管理" width="720" />
-</p>
-
-<p align="center">
-  <img src="docs/images/4.png" alt="对话日志" width="720" />
-</p>
-
-<p align="center">
-  <img src="docs/images/5.png" alt="对话日志详情" width="720" />
-</p>
+> ⚠️ **不要直接暴露到公网。** 请仅在受信任网络或做好接入层防护后使用。
 
 ---
 
-**注意** 务必遵守api厂商的使用限制，很多coding plan限制除编程工具等agent的使用，禁止其他程序调用api，本应用只做api的转发，后端接入程序需要符合厂商的要求。
-
-## ✨ 特性摘要
-
-| | |
-| --- | --- |
-| **多厂商** | 配置多个提供商，一键切换当前生效厂商 |
-| **协议强制转换** | OpenAI ↔ Anthropic 双向协议转换（可开关），支持流式转换和工具调用 |
-| **协议支持** | 原生支持 OpenAI / Anthropic 两种协议，转换模式下单端只接受非原生协议请求 |
-| **密钥托管** | 厂商 Key 留在服务端；客户端只用应用 Key |
-| **模型管理** | 网格/列表双视图；按名称、创建时间或自定义拖拽排序；支持重命名（大小写敏感）；偏好自动记忆 |
-| **模型规则** | 通配符映射（如 `gpt-4*` → 实际模型名） |
-| **应用维度** | 每个应用可绑定厂商与默认模型 |
-| **`llmpylon` 模型名** | 按优先级解析为应用 → 厂商 → 全局默认模型（**大小写不敏感**） |
-| **厂商回收站** | 软删除厂商可恢复或彻底删除，保留模型关联 |
-| **复制厂商** | 一键复制厂商及其模型配置，默认自动追加"副本"后缀 |
-| **统计与日志** | WebSocket 实时推送对话日志；详情页可比对原始与转换后的请求/响应；分页浏览 |
-| **用户管理** | 多管理员账号，支持创建、编辑、删除与强制改密 |
-| **运行时配置** | 日志/统计保留天数、请求超时、上游 Header 过滤，均在界面中设置 |
-| **配置导入导出** | 单厂商导出或全局配置导入导出（含转换开关、回收站内容） |
-| **部署** | **推荐 Docker**，数据卷持久化 SQLite |
-
----
-
-## 快速开始（Docker）
+## 🚀 快速开始
 
 ```bash
-docker pull apache3/llmpylon
-
 docker run -d \
   --name llmpylon \
   -p 3000:3000 \
@@ -90,51 +49,25 @@ docker run -d \
   apache3/llmpylon
 ```
 
-浏览器访问 `http://<主机>:3000`，使用默认账号登录后 **立即修改密码**：
+浏览器打开 `http://<你的IP>:3000`，默认账号登录后**立即修改密码**：
 
 - 用户名：`llmpylon`
 - 密码：`llmpylon`
 
-### 升级 llmPylon（软件本体）
+### 客户端配置
 
-**不需要**单独的「版本更新服务器」。常见做法：
+在任何 AI 工具中填入：
 
-1. **Docker**：拉取新镜像后，用**相同的数据卷**重建/重启容器（`/data` 不变则数据与配置仍在）。
-2. **源码**：在仓库目录 `git pull`，按需 `npm install`、`cd client && npm run build`，再重启 `npm run server`。
+| 设置项 | 值 |
+|--------|-----|
+| Base URL | `http://你的IP:3000/proxy` |
+| API Key | 在「应用管理」中创建应用后复制 |
+| Model | `llmpylon`（大小写不敏感） |
 
-发版时递增根目录 `package.json` 的 `version`；界面与 `GET /healthz` 会显示该版本。
-
----
-
-## 本地开发
-
-需要 **Node.js 20+**（与 Docker 镜像一致）。
+OpenAI 协议客户端使用 `/proxy/v1/chat/completions`，Anthropic 协议客户端使用 `/proxy/v1/messages`。
 
 ```bash
-npm install
-cd client && npm install && cd ..
-npm run dev
-```
-
-- 后端：`http://localhost:3000`
-- 前端开发：`http://localhost:5173`（Vite）
-
-生产构建：
-
-```bash
-cd client && npm run build && cd ..
-npm run server
-```
-
-环境变量示例见 [.env.example](.env.example)。
-
----
-
-## 客户端调用示例
-
-将 Base URL 指向代理前缀，例如：
-
-```bash
+# 示例：cURL 调用
 curl -X POST http://localhost:3000/proxy/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer YOUR_APP_KEY" \
@@ -143,53 +76,120 @@ curl -X POST http://localhost:3000/proxy/v1/chat/completions \
 
 ---
 
-## 数据库与升级（Docker 场景）
+<p align="center">
+  <img src="docs/images/2.png" alt="厂商配置" width="720" />
+  <br><em>厂商管理 — 一键切换活跃厂商</em>
+</p>
 
-- **持久化**：务必挂载数据目录（示例中的 `/data`），否则容器重建会丢库。
-- **结构升级**：表结构与迁移在 [`server/db.js`](server/db.js) 中；**服务每次启动**都会执行 `setupDb()`，对已有 SQLite 自动 `ALTER` / 补表。发布新镜像后 **重启容器** 即可完成迁移。
-- `docker/init.sql` 仅在 **空库文件** 时由入口脚本执行一次；完整 schema 以运行时 `db.js` 为准。
+<p align="center">
+  <img src="docs/images/3.png" alt="应用管理" width="720" />
+  <br><em>应用管理 — 每个应用独立密钥与颜色</em>
+</p>
 
-版本号来自根目录 [`package.json`](package.json) 的 `version`，由 [`GET /healthz`](server/index.js) 返回（管理界面显示 `v…`）。
+<p align="center">
+  <img src="docs/images/4.png" alt="对话日志" width="720" />
+  <br><em>实时对话日志 — 追踪每个请求的路径与状态</em>
+</p>
+
+<p align="center">
+  <img src="docs/images/5.png" alt="对话日志详情" width="720" />
+  <br><em>日志详情 — 对比原始与转换后的请求/响应</em>
+</p>
 
 ---
 
+## ✨ 功能一览
 
-## API 速查
+| | |
+|---|---|
+| ✅ **多厂商代理** | 配置多个 API 提供商，一键切换当前生效厂商 |
+| ✅ **双向协议转换** | OpenAI ↔ Anthropic 双向自动转换，支持流式 SSE 与工具调用 |
+| ✅ **密钥托管** | 厂商 API Key 只保存在服务端；客户端仅使用应用级 Key |
+| ✅ **模型规则** | 通配符映射（如 `gpt-4*` → 实际模型），支持优先级排序 |
+| ✅ **应用维度绑定** | 每个应用可独立绑定厂商与默认模型，不受全局切换影响 |
+| ✅ **`llmpylon` 魔力模型名** | 自动解析为 应用绑定 → 厂商默认 → 全局默认（**大小写不敏感**） |
+| ✅ **消息通知** | 对话完成时自动 HTTP 推送；自定义 URL、Headers、JSON 模板、冷却时间 |
+| ✅ **实时对话日志** | WebSocket 实时推送；详情页对比原始/转换后请求响应；分页与筛选 |
+| ✅ **统计面板** | 请求趋势图、模型分布、活动热力图、P50/P90/P99 延迟百分位、Top 慢/错请求 |
+| ✅ **回收站** | 厂商与应用均支持软删除 → 恢复 → 彻底删除，数据不丢失 |
+| ✅ **导入导出** | 单厂商或全局配置 JSON 导入导出，含回收站和转换开关 |
+| ✅ **多管理员** | 多用户账号管理，支持创建、编辑、删除与强制修改密码 |
+| ✅ **运行时配置** | 日志保留天数、上游超时、请求头黑名单、流式重试参数，全在界面配置 |
+| ✅ **Docker 一键部署** | 数据卷持久化，启动时自动迁移数据库 |
+
+---
+
+## 🔧 升级
+
+**Docker（推荐）：**
+
+```bash
+docker pull apache3/llmpylon
+# 停止旧容器，用相同数据卷重建
+docker stop llmpylon && docker rm llmpylon
+docker run -d --name llmpylon -p 3000:3000 -v llmpylon-data:/data apache3/llmpylon
+```
+
+**源码：**
+```bash
+git pull && npm install && cd client && npm run build && cd .. && npm run server
+```
+
+每次启动自动执行数据库迁移，数据不丢失。版本号在根 `package.json`，后台和 `/healthz` 均会显示。
+
+---
+
+## 📡 API 速查
 
 | 路径 | 说明 |
-| --- | --- |
-| `POST /proxy/*` | LLM 代理入口（支持 OpenAI / Anthropic 协议） |
-| `GET /healthz` | 健康检查（含 `version` / `name`） |
+|---|---|
+| `POST /proxy/*` | LLM 代理入口（OpenAI / Anthropic） |
+| `GET /healthz` | 健康检查（含版本号） |
 | `POST /api/auth/login` | 管理员登录 |
-| `/api/providers/*` | 厂商（含协议转换开关、回收站、导入导出） |
-| `/api/keys/*` | 应用（客户端 Key） |
-| `/api/models/*` | 模型（可按厂商选择、重命名） |
+| `/api/providers/*` | 厂商（含转换开关、回收站、导入导出） |
+| `/api/keys/*` | 应用密钥（含回收站、启用/禁用、颜色） |
+| `/api/models/*` | 模型管理（拖拽排序、按厂商筛选） |
 | `/api/model-rules/*` | 模型规则（通配符映射） |
-| `/api/config/*` | 全局配置导入导出（含回收站、转换开关） |
-| `/api/stats` | 统计 |
-| `/api/logs` | 对话日志（含转换前后请求/响应对比） |
-
-完整说明可结合源码与后台「客户端帮助」页。
+| `/api/notification-configs/*` | 通知 Webhook 配置 |
+| `/api/notification-logs` | 通知推送日志 |
+| `/api/config/export` / `import` | 全局配置导入导出 |
+| `/api/stats` | 统计分析（含热力图、百分位、CSV 导出） |
+| `/api/logs` | 对话日志（含转换前后对比） |
+| `/api/users/*` | 管理员账号管理 |
 
 ---
 
-## 环境变量
+## 🛠 本地开发
+
+需要 Node.js 20+。
+
+```bash
+npm install
+cd client && npm install && cd ..
+npm run dev        # 后端 :3000 + Vite :5173
+npm run server     # 生产模式
+```
+
+详见 [.env.example](.env.example)。
+
+---
+
+## ⚙️ 环境变量
 
 | 变量 | 默认 | 说明 |
-| --- | --- | --- |
+|---|---|---|
 | `PORT` | `3000` | HTTP 端口 |
-| `DB_PATH` | `database.sqlite`（相对 cwd） | SQLite 路径；Docker 内常为 `/data/database.sqlite` |
+| `DB_PATH` | `database.sqlite` | SQLite 路径；Docker 内为 `/data/database.sqlite` |
 | `NODE_ENV` | — | 生产可设为 `production` |
 
 ---
 
-## 技术栈
+## 🧱 技术栈
 
 Node.js · Express · SQLite · Socket.io · Vue 3 · Vite · Tailwind CSS · ECharts
 
 ---
 
+## 📄 许可证
 
-## 许可证
-
-本仓库以 **[GNU Affero General Public License v3.0 only](LICENSE)**（**AGPL-3.0-only**）授权。完整条文见根目录 `LICENSE`。
+**[GNU Affero General Public License v3.0 only](LICENSE)**（AGPL-3.0-only）
