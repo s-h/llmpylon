@@ -256,7 +256,8 @@ const APP_SETTINGS_KEYS = {
     STREAM_RETRY_ENABLED: 'stream_retry_enabled',
     STREAM_MAX_RETRIES: 'stream_max_retries',
     NOTIFICATION_COOLDOWN_SECONDS: 'notification_cooldown_seconds',
-    NOTIFICATION_LOG_RETENTION_DAYS: 'notification_log_retention_days'
+    NOTIFICATION_LOG_RETENTION_DAYS: 'notification_log_retention_days',
+    NOTIFICATION_TOOL_USE_TIMEOUT_SECONDS: 'notification_tool_use_timeout_seconds'
 };
 
 const UPSTREAM_TIMEOUT_MIN_SEC = 5;
@@ -1653,7 +1654,8 @@ app.get('/api/settings', async (req, res) => {
     const streamRetryConfig = await getStreamRetryConfig();
     const notificationCooldownSeconds = await getAppSettingInt(APP_SETTINGS_KEYS.NOTIFICATION_COOLDOWN_SECONDS, 5);
     const notificationLogRetentionDays = await getAppSettingInt(APP_SETTINGS_KEYS.NOTIFICATION_LOG_RETENTION_DAYS, 7);
-    res.json({ logRetentionDays, statsRetentionDays, upstreamTimeoutSeconds, upstreamHeadersBlocklist, streamChunkTimeoutSeconds, streamRetryEnabled: streamRetryConfig.enabled, streamMaxRetries: streamRetryConfig.maxRetries, notificationCooldownSeconds, notificationLogRetentionDays });
+    const notificationToolUseTimeoutSeconds = await getAppSettingInt(APP_SETTINGS_KEYS.NOTIFICATION_TOOL_USE_TIMEOUT_SECONDS, 10);
+    res.json({ logRetentionDays, statsRetentionDays, upstreamTimeoutSeconds, upstreamHeadersBlocklist, streamChunkTimeoutSeconds, streamRetryEnabled: streamRetryConfig.enabled, streamMaxRetries: streamRetryConfig.maxRetries, notificationCooldownSeconds, notificationLogRetentionDays, notificationToolUseTimeoutSeconds });
 });
 
 app.put('/api/settings', async (req, res) => {
@@ -1700,8 +1702,13 @@ app.put('/api/settings', async (req, res) => {
     notificationLogRetentionDays = Math.min(365, notificationLogRetentionDays);
     await setAppSetting(APP_SETTINGS_KEYS.NOTIFICATION_LOG_RETENTION_DAYS, notificationLogRetentionDays);
 
+    let notificationToolUseTimeoutSeconds = parseInt(body.notificationToolUseTimeoutSeconds, 10);
+    if (!Number.isFinite(notificationToolUseTimeoutSeconds) || notificationToolUseTimeoutSeconds < 1) notificationToolUseTimeoutSeconds = 10;
+    notificationToolUseTimeoutSeconds = Math.min(600, notificationToolUseTimeoutSeconds);
+    await setAppSetting(APP_SETTINGS_KEYS.NOTIFICATION_TOOL_USE_TIMEOUT_SECONDS, notificationToolUseTimeoutSeconds);
+
     await runRetentionPurge();
-    res.json({ logRetentionDays, statsRetentionDays, upstreamTimeoutSeconds, upstreamHeadersBlocklist, streamChunkTimeoutSeconds, streamRetryEnabled: streamRetryEnabled === 1, streamMaxRetries, notificationCooldownSeconds, notificationLogRetentionDays });
+    res.json({ logRetentionDays, statsRetentionDays, upstreamTimeoutSeconds, upstreamHeadersBlocklist, streamChunkTimeoutSeconds, streamRetryEnabled: streamRetryEnabled === 1, streamMaxRetries, notificationCooldownSeconds, notificationLogRetentionDays, notificationToolUseTimeoutSeconds });
 });
 
 app.post('/api/stats/clear', async (req, res) => {
@@ -2411,6 +2418,8 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
         );
         return res.status(403).json({ error: 'API Key is disabled' });
     }
+
+    getNotifier()?.handleRequestStarted(clientKeyData.id);
 
     const upstreamTimeoutMs = (await getUpstreamTimeoutSeconds()) * 1000;
 
@@ -3524,15 +3533,19 @@ app.post('/api/notification-configs', async (req, res) => {
     }
 
     const result = await db.run(
-        `INSERT INTO notification_configs (enabled, webhookUrl, httpMethod, headers, bodyTemplate, cooldownSeconds, filterClientApps, filterStatuses, clientKeyIds)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO notification_configs (clientKeyId, name, notificationType, enabled, webhookUrl, httpMethod, headers, bodyTemplate, cooldownSeconds, toolUseTimeoutSeconds, filterClientApps, filterStatuses, clientKeyIds)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
+            clientKeyIds[0],
+            String(body.name || ''),
+            String(body.notificationType || 'completion'),
             body.enabled ? 1 : 0,
             String(body.webhookUrl || ''),
             String(body.httpMethod || 'POST'),
             JSON.stringify(body.headers || {}),
             String(body.bodyTemplate || ''),
             parseInt(body.cooldownSeconds, 10) || 5,
+            parseInt(body.toolUseTimeoutSeconds, 10) || 10,
             JSON.stringify(body.filterClientApps || []),
             JSON.stringify(body.filterStatuses || []),
             JSON.stringify(clientKeyIds)
@@ -3548,14 +3561,17 @@ app.put('/api/notification-configs/:id', async (req, res) => {
 
     const body = req.body || {};
     await db.run(
-        `UPDATE notification_configs SET enabled = ?, webhookUrl = ?, httpMethod = ?, headers = ?, bodyTemplate = ?, cooldownSeconds = ?, filterClientApps = ?, filterStatuses = ?, clientKeyIds = ? WHERE id = ?`,
+        `UPDATE notification_configs SET name = ?, notificationType = ?, enabled = ?, webhookUrl = ?, httpMethod = ?, headers = ?, bodyTemplate = ?, cooldownSeconds = ?, toolUseTimeoutSeconds = ?, filterClientApps = ?, filterStatuses = ?, clientKeyIds = ? WHERE id = ?`,
         [
+            body.name !== undefined ? String(body.name) : existing.name,
+            body.notificationType !== undefined ? String(body.notificationType) : existing.notificationType,
             body.enabled !== undefined ? (body.enabled ? 1 : 0) : existing.enabled,
             body.webhookUrl !== undefined ? String(body.webhookUrl) : existing.webhookUrl,
             body.httpMethod !== undefined ? String(body.httpMethod) : existing.httpMethod,
             body.headers !== undefined ? JSON.stringify(body.headers) : existing.headers,
             body.bodyTemplate !== undefined ? String(body.bodyTemplate) : existing.bodyTemplate,
             body.cooldownSeconds !== undefined ? (parseInt(body.cooldownSeconds, 10) || 5) : existing.cooldownSeconds,
+            body.toolUseTimeoutSeconds !== undefined ? (parseInt(body.toolUseTimeoutSeconds, 10) || 10) : (existing.toolUseTimeoutSeconds || 10),
             body.filterClientApps !== undefined ? JSON.stringify(body.filterClientApps) : existing.filterClientApps,
             body.filterStatuses !== undefined ? JSON.stringify(body.filterStatuses) : existing.filterStatuses,
             body.clientKeyIds !== undefined ? JSON.stringify(body.clientKeyIds) : existing.clientKeyIds,

@@ -246,7 +246,8 @@ const appSettings = ref({
   upstreamTimeoutSeconds: 360,
   upstreamHeadersBlocklist: ['host', 'content-length', 'connection', 'accept-encoding'],
   notificationCooldownSeconds: 5,
-  notificationLogRetentionDays: 7
+  notificationLogRetentionDays: 7,
+  notificationToolUseTimeoutSeconds: 10
 });
 
 const appSettingsSaving = ref(false);
@@ -903,7 +904,8 @@ const fetchAppSettings = async () => {
       upstreamTimeoutSeconds: Math.max(5, Math.min(86400, Number(res.data.upstreamTimeoutSeconds) || 360)),
       upstreamHeadersBlocklist: res.data.upstreamHeadersBlocklist || ['host', 'content-length', 'connection', 'accept-encoding'],
       notificationCooldownSeconds: Math.max(1, Math.min(300, Number(res.data.notificationCooldownSeconds) || 5)),
-      notificationLogRetentionDays: Math.max(0, Math.min(365, Number(res.data.notificationLogRetentionDays) || 7))
+      notificationLogRetentionDays: Math.max(0, Math.min(365, Number(res.data.notificationLogRetentionDays) || 7)),
+      notificationToolUseTimeoutSeconds: Math.max(1, Math.min(600, Number(res.data.notificationToolUseTimeoutSeconds) || 10))
     };
   } catch (e) {
     console.error('fetchAppSettings', e);
@@ -919,7 +921,8 @@ const saveAppSettings = async () => {
       upstreamTimeoutSeconds: Math.max(5, Math.min(86400, Number(appSettings.value.upstreamTimeoutSeconds) || 360)),
       upstreamHeadersBlocklist: appSettings.value.upstreamHeadersBlocklist,
       notificationCooldownSeconds: Math.max(1, Math.min(300, Number(appSettings.value.notificationCooldownSeconds) || 5)),
-      notificationLogRetentionDays: Math.max(0, Math.min(365, Number(appSettings.value.notificationLogRetentionDays) || 7))
+      notificationLogRetentionDays: Math.max(0, Math.min(365, Number(appSettings.value.notificationLogRetentionDays) || 7)),
+      notificationToolUseTimeoutSeconds: Math.max(1, Math.min(600, Number(appSettings.value.notificationToolUseTimeoutSeconds) || 10))
     });
     appSettings.value.logRetentionDays = res.data.logRetentionDays;
     appSettings.value.statsRetentionDays = res.data.statsRetentionDays;
@@ -927,6 +930,7 @@ const saveAppSettings = async () => {
     appSettings.value.upstreamHeadersBlocklist = res.data.upstreamHeadersBlocklist;
     appSettings.value.notificationCooldownSeconds = res.data.notificationCooldownSeconds;
     appSettings.value.notificationLogRetentionDays = res.data.notificationLogRetentionDays;
+    appSettings.value.notificationToolUseTimeoutSeconds = res.data.notificationToolUseTimeoutSeconds;
     alert('已保存');
   } catch (e) {
     alert('保存失败: ' + (e.response?.data?.error || e.message));
@@ -957,17 +961,19 @@ const openNotifEditor = (config) => {
     const headersArr = Object.entries(headersObj).map(([k, v]) => ({ key: k, value: String(v) }));
     notifConfigForm.value = {
       clientKeyIds: Array.isArray(config.clientKeyIds) ? [...config.clientKeyIds] : (config.clientKeyId ? [config.clientKeyId] : []),
+      name: config.name || '',
       enabled: !!config.enabled,
       webhookUrl: config.webhookUrl || '',
       httpMethod: config.httpMethod || 'POST',
       headers: headersArr.length > 0 ? headersArr : [{ key: '', value: '' }],
       bodyTemplate: config.bodyTemplate || '',
       cooldownSeconds: config.cooldownSeconds || 5,
-      
+      notificationType: config.notificationType || 'completion',
+      toolUseTimeoutSeconds: config.toolUseTimeoutSeconds || 10
     };
   } else {
     editingNotifConfig.value = null;
-    notifConfigForm.value = { clientKeyIds: [], enabled: true, webhookUrl: '', httpMethod: 'POST', headers: [], bodyTemplate: '', cooldownSeconds: 5 };
+    notifConfigForm.value = { clientKeyIds: [], name: '', notificationType: 'completion', enabled: true, webhookUrl: '', httpMethod: 'POST', headers: [], bodyTemplate: '', cooldownSeconds: 5, toolUseTimeoutSeconds: 10 };
   }
 };
 
@@ -999,6 +1005,10 @@ const cleanHeaderValue = (v) => {
 };
 
 const saveNotifConfig = async () => {
+  if (!notifConfigForm.value.name.trim()) {
+    alert('请输入规则名称');
+    return;
+  }
   if (notifConfigForm.value.bodyTemplate.trim()) {
     try { JSON.parse(notifConfigForm.value.bodyTemplate); } catch {
       alert('通知体模板 JSON 格式错误，请检查后重试');
@@ -1015,6 +1025,8 @@ const saveNotifConfig = async () => {
     
     const payload = {
       clientKeyIds: notifConfigForm.value.clientKeyIds,
+      name: notifConfigForm.value.name,
+      notificationType: notifConfigForm.value.notificationType,
       enabled: notifConfigForm.value.enabled,
       webhookUrl: notifConfigForm.value.webhookUrl,
       httpMethod: notifConfigForm.value.httpMethod,
@@ -3404,41 +3416,20 @@ onUnmounted(() => {
 
         <!-- Notifications View -->
         <div v-if="activeTab === 'notifications'" class="space-y-6">
-          <!-- 对话结束等待时间 -->
-          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
-            <div class="flex items-center justify-between gap-4">
-              <div class="flex-1">
-                <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">对话结束等待时间</h3>
-                <p class="text-xs text-gray-400 mt-1">模型回复结束（finish_reason=stop）后等待多少秒无新请求，视为一轮对话结束并发送 HTTP 通知。范围 1～300 秒。</p>
-              </div>
-              <div class="flex items-center gap-3">
-                <input
-                  v-model.number="appSettings.notificationCooldownSeconds"
-                  type="number"
-                  min="1"
-                  max="300"
-                  step="1"
-                  class="w-24 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
-                />
-                <span class="text-sm text-gray-500">秒</span>
-              </div>
-            </div>
-          </div>
-
           <!-- 消息通知配置 -->
           <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
             <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider mb-4">消息通知配置</h3>
-            <p class="text-xs text-gray-400 mb-4">为 App Key 配置一轮对话结束后的 HTTP 通知目标。对话结束等待秒数继承上面的全局设置，也可单独覆盖。</p>
+            <p class="text-xs text-gray-400 mb-4">为 App Key 配置通知规则，超时时间根据通知类型自动适配。</p>
             <div v-if="notificationConfigs.length > 0" class="space-y-3 mb-4">
               <div v-for="cfg in notificationConfigs" :key="cfg.id" class="flex items-center justify-between gap-3 p-4 bg-white rounded-xl border border-gray-200 shadow-sm hover:shadow-md transition-shadow">
                 <div class="flex-1 min-w-0">
                   <div class="flex items-center gap-2">
-                    <span class="font-bold text-sm text-gray-800">{{ cfg.clientKeyNames || cfg.clientKeyName || ('App #' + cfg.clientKeyId) }}</span>
+                    <span class="font-bold text-sm text-gray-800">{{ cfg.name || cfg.clientKeyNames || cfg.clientKeyName || ('App #' + cfg.clientKeyId) }}</span>
                     <span :class="cfg.enabled ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-400'" class="px-2 py-0.5 rounded text-[10px] font-bold">{{ cfg.enabled ? '启用' : '停用' }}</span>
                   </div>
                   <div class="text-xs text-gray-500 mt-0.5 truncate">{{ cfg.webhookUrl || '未配置 URL' }}</div>
                   <div class="text-[10px] text-gray-400 mt-0.5">
-                    方法: {{ cfg.httpMethod }} | 对话结束等待: {{ cfg.cooldownSeconds }}秒
+                    {{ cfg.notificationType === 'tool_use_confirmation' ? '等待确认' : '对话完成' }} · 方法: {{ cfg.httpMethod }} | 等待: {{ (cfg.notificationType === 'tool_use_confirmation' ? cfg.toolUseTimeoutSeconds : cfg.cooldownSeconds) || '?' }}秒
                     <span v-if="cfg.filterClientApps && cfg.filterClientApps.length"> | 客户端: {{ cfg.filterClientApps.join(', ') }}</span>
                   </div>
                 </div>
@@ -3451,12 +3442,38 @@ onUnmounted(() => {
             <div v-else class="text-xs text-gray-400 mb-4">暂无通知配置，点击下方按钮添加。</div>
             <div v-if="editingNotifConfig !== undefined" class="space-y-4 p-6 bg-white rounded-xl border border-gray-200 shadow-sm">
               <h4 class="text-sm font-bold text-gray-800">{{ editingNotifConfig ? '编辑通知配置' : '添加通知配置' }}</h4>
+              <div class="flex flex-col gap-1">
+                <label class="block text-xs font-bold text-gray-400 uppercase mb-1">规则名称 *</label>
+                <input v-model="notifConfigForm.name" type="text" placeholder="例如: ClaudeCode 通知" required class="w-full px-4 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+              </div>
               <div class="flex items-center justify-between">
                 <label class="block text-xs font-bold text-gray-400 uppercase mb-0">启用</label>
                 <label class="relative inline-flex items-center cursor-pointer">
                   <input type="checkbox" v-model="notifConfigForm.enabled" class="sr-only peer" />
                   <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
                 </label>
+              </div>
+              <div class="flex flex-col gap-1">
+                <label class="block text-xs font-bold text-gray-400 uppercase mb-1">通知类型</label>
+                <div class="flex gap-3">
+                  <label class="flex items-center gap-2 text-sm cursor-pointer">
+                    <input type="radio" v-model="notifConfigForm.notificationType" value="completion" class="text-blue-600" />
+                    <span>对话完成</span>
+                  </label>
+                  <label class="flex items-center gap-2 text-sm cursor-pointer">
+                    <input type="radio" v-model="notifConfigForm.notificationType" value="tool_use_confirmation" class="text-blue-600" />
+                    <span>等待确认</span>
+                  </label>
+                </div>
+              </div>
+              <div class="flex items-center gap-3">
+                <div class="flex flex-col gap-1">
+                  <label class="block text-xs font-bold text-gray-400 uppercase mb-1">
+                    {{ notifConfigForm.notificationType === 'tool_use_confirmation' ? '等待确认超时（秒）' : '对话结束等待（秒）' }}
+                  </label>
+                  <input v-if="notifConfigForm.notificationType === 'tool_use_confirmation'" v-model.number="notifConfigForm.toolUseTimeoutSeconds" type="number" min="1" max="600" required class="w-24 px-4 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+                  <input v-else v-model.number="notifConfigForm.cooldownSeconds" type="number" min="1" max="300" required class="w-24 px-4 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+                </div>
               </div>
               <div class="flex flex-col gap-1">
                 <label class="block text-xs font-bold text-gray-400 uppercase mb-1">App Key（多选）</label>
@@ -3469,12 +3486,6 @@ onUnmounted(() => {
                     class="px-2 py-1 rounded text-[10px] font-semibold font-mono tracking-tight border transition-colors"
                   >{{ key.name }}</button>
                   <span v-if="clientKeys.length === 0" class="text-xs text-gray-400">暂无 App Key</span>
-                </div>
-              </div>
-              <div class="flex items-center gap-3">
-                <div class="flex flex-col gap-1">
-                  <label class="block text-xs font-bold text-gray-400 uppercase mb-1">对话结束等待（秒）</label>
-                  <input v-model.number="notifConfigForm.cooldownSeconds" type="number" min="1" max="300" class="w-24 px-4 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
                 </div>
               </div>
               <div class="flex flex-col gap-1">
@@ -3503,7 +3514,7 @@ onUnmounted(() => {
               </div>
               <div class="flex flex-col gap-1">
                 <label class="block text-xs font-bold text-gray-400 uppercase mb-1">通知体模板 (JSON, 支持 {{变量}})</label>
-                <textarea v-model="notifConfigForm.bodyTemplate" rows="4" placeholder='留空使用默认模板，支持变量如 {{model}} {{totalTokens}} {{clientApp}} {{status}}' class="w-full px-4 py-2 border border-gray-200 rounded-lg text-xs font-mono focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"></textarea>
+                <textarea v-model="notifConfigForm.bodyTemplate" rows="4" placeholder='留空使用默认模板，支持变量如 {{model}} {{totalTokens}} {{clientApp}} {{clientName}} {{status}}' class="w-full px-4 py-2 border border-gray-200 rounded-lg text-xs font-mono focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"></textarea>
               </div>
               <div class="flex gap-3 pt-2">
                 <button @click="cancelNotifEditor" class="flex-1 px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors text-sm">取消</button>
@@ -3548,6 +3559,8 @@ onUnmounted(() => {
                   <tr>
                     <th class="px-3 py-2 font-medium">时间</th>
                     <th class="px-3 py-2 font-medium">App</th>
+                    <th class="px-3 py-2 font-medium">规则名称</th>
+                    <th class="px-3 py-2 font-medium">通知类型</th>
                     <th class="px-3 py-2 font-medium">状态</th>
                     <th class="px-3 py-2 font-medium">URL</th>
                     <th class="px-3 py-2 font-medium text-right">响应码</th>
@@ -3557,6 +3570,8 @@ onUnmounted(() => {
                   <tr v-for="l in notifLogs" :key="l.id" @click="openNotifLogDetail(l)" class="hover:bg-gray-50 cursor-pointer transition-colors">
                     <td class="px-3 py-2 font-mono text-[10px] text-gray-500 whitespace-nowrap">{{ formatTime(l.createdAt) }}</td>
                     <td class="px-3 py-2 font-medium">{{ l.clientKeyName || ('App #' + l.clientKeyId) }}</td>
+                    <td class="px-3 py-2 font-medium text-gray-700 text-[11px] max-w-[120px] truncate">{{ l.ruleName || '-' }}</td>
+                    <td class="px-3 py-2"><span :class="l.notificationType === 'tool_use_confirmation' ? 'bg-amber-50 text-amber-700' : 'bg-blue-50 text-blue-700'" class="px-2 py-0.5 rounded text-[10px] font-bold">{{ l.notificationType === 'tool_use_confirmation' ? '等待确认' : '对话完成' }}</span></td>
                     <td class="px-3 py-2">
                       <span :class="l.status === 'success' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'" class="px-2 py-0.5 rounded text-[10px] font-bold">{{ l.status === 'success' ? '成功' : '失败' }}</span>
                     </td>

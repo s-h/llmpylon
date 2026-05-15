@@ -333,24 +333,66 @@ async function setupDb() {
     await db.run(
         "INSERT OR IGNORE INTO app_settings (key, value) VALUES ('notification_log_retention_days', '7')"
     );
+    await db.run(
+        "INSERT OR IGNORE INTO app_settings (key, value) VALUES ('notification_tool_use_timeout_seconds', '10')"
+    );
 
     await db.exec(`
         CREATE TABLE IF NOT EXISTS notification_configs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            clientKeyId INTEGER UNIQUE NOT NULL,
+            clientKeyId INTEGER NOT NULL,
+            name TEXT DEFAULT '',
+            notificationType TEXT DEFAULT 'completion',
             enabled INTEGER DEFAULT 0,
             webhookUrl TEXT DEFAULT '',
             httpMethod TEXT DEFAULT 'POST',
             headers TEXT DEFAULT '{}',
             bodyTemplate TEXT DEFAULT '',
             cooldownSeconds INTEGER DEFAULT 5,
+            toolUseTimeoutSeconds INTEGER DEFAULT 10,
             filterClientApps TEXT DEFAULT '[]',
             filterStatuses TEXT DEFAULT '[]',
             clientKeyIds TEXT DEFAULT '[]',
             createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(clientKeyId, notificationType),
             FOREIGN KEY (clientKeyId) REFERENCES client_keys(id)
         )
     `);
+
+    // Migration: upgrade notification_configs to new schema with notificationType + toolUseTimeoutSeconds
+    const notifCfgCols = await db.all('PRAGMA table_info(notification_configs)');
+    const notifCfgColNames = notifCfgCols.map(c => c.name);
+    if (!notifCfgColNames.includes('notificationType') || !notifCfgColNames.includes('toolUseTimeoutSeconds')) {
+        await db.exec(`CREATE TABLE IF NOT EXISTS notification_configs_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            clientKeyId INTEGER NOT NULL,
+            name TEXT DEFAULT '',
+            notificationType TEXT DEFAULT 'completion',
+            enabled INTEGER DEFAULT 0,
+            webhookUrl TEXT DEFAULT '',
+            httpMethod TEXT DEFAULT 'POST',
+            headers TEXT DEFAULT '{}',
+            bodyTemplate TEXT DEFAULT '',
+            cooldownSeconds INTEGER DEFAULT 5,
+            toolUseTimeoutSeconds INTEGER DEFAULT 10,
+            filterClientApps TEXT DEFAULT '[]',
+            filterStatuses TEXT DEFAULT '[]',
+            clientKeyIds TEXT DEFAULT '[]',
+            createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(clientKeyId, notificationType),
+            FOREIGN KEY (clientKeyId) REFERENCES client_keys(id)
+        )`);
+        const oldRows = await db.all('SELECT * FROM notification_configs ORDER BY id');
+        for (const r of oldRows) {
+            await db.run(
+                `INSERT OR IGNORE INTO notification_configs_new (id, clientKeyId, name, notificationType, enabled, webhookUrl, httpMethod, headers, bodyTemplate, cooldownSeconds, filterClientApps, filterStatuses, clientKeyIds, createdAt)
+                 VALUES (?, ?, '', 'completion', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [r.id, r.clientKeyId, r.enabled, r.webhookUrl, r.httpMethod, r.headers, r.bodyTemplate, r.cooldownSeconds || 5, r.filterClientApps, r.filterStatuses, r.clientKeyIds || '[]', r.createdAt]
+            );
+        }
+        await db.exec('DROP TABLE notification_configs');
+        await db.exec('ALTER TABLE notification_configs_new RENAME TO notification_configs');
+    }
 
     await db.exec(`
         CREATE TABLE IF NOT EXISTS notification_logs (
@@ -365,10 +407,27 @@ async function setupDb() {
             responseBodyPreview TEXT,
             errorMessage TEXT,
             roundSummary TEXT,
+            ruleName TEXT,
+            notificationType TEXT,
             createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (clientKeyId) REFERENCES client_keys(id)
         )
     `);
+
+    // Migration: add name to notification_configs
+    if (!notifCfgColNames.includes('name')) {
+        await db.exec("ALTER TABLE notification_configs ADD COLUMN name TEXT DEFAULT ''");
+    }
+
+    // Migration: add ruleName and notificationType to notification_logs
+    const notifLogCols = await db.all('PRAGMA table_info(notification_logs)');
+    const notifLogColNames = notifLogCols.map(c => c.name);
+    if (!notifLogColNames.includes('ruleName')) {
+        await db.exec('ALTER TABLE notification_logs ADD COLUMN ruleName TEXT');
+    }
+    if (!notifLogColNames.includes('notificationType')) {
+        await db.exec('ALTER TABLE notification_logs ADD COLUMN notificationType TEXT');
+    }
 
     await db.exec(`
         CREATE TABLE IF NOT EXISTS client_colors (

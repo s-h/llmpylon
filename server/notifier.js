@@ -11,6 +11,13 @@ class Notifier {
         this._process(logId).catch(e => console.error('[Notifier]', e.message));
     }
 
+    handleRequestStarted(clientKeyId) {
+        if (this.timers.has(clientKeyId)) {
+            clearTimeout(this.timers.get(clientKeyId));
+            this.timers.delete(clientKeyId);
+        }
+    }
+
     async _process(logId) {
         const log = await this.db.get(
             `SELECT l.*, ck.name as clientKeyName
@@ -20,9 +27,6 @@ class Notifier {
             [logId]
         );
         if (!log) return;
-
-        const config = await this._findConfig(log.clientKeyId);
-        if (!config || !config.enabled) return;
 
         const key = log.clientKeyId;
 
@@ -35,24 +39,43 @@ class Notifier {
                 model: log.model,
                 actualModel: log.actualModel,
                 logs: [],
-                startTime: log.requestAt
+                startTime: log.requestAt,
+                configId: null,
+                notificationType: null
             });
         }
         const round = this.rounds.get(key);
         round.logs.push(log);
 
+        // Cancel all pending timers for this key — new request invalidates old timer
         if (this.timers.has(key)) {
             clearTimeout(this.timers.get(key));
             this.timers.delete(key);
         }
 
         const finishReason = this._extractFinishReason(log.responseBody, log.status);
-        const cooldownMs = (config.cooldownSeconds || 5) * 1000;
+
+        let config = null;
+        let timeoutMs = null;
 
         if (finishReason === 'stop' || finishReason === 'end_turn' || log.status === 'error') {
+            config = await this._findConfig(key, 'completion');
+            if (config && config.enabled) {
+                timeoutMs = (config.cooldownSeconds || 5) * 1000;
+            }
+        } else if (finishReason === 'tool_use' || finishReason === 'tool_calls') {
+            config = await this._findConfig(key, 'tool_use_confirmation');
+            if (config && config.enabled) {
+                timeoutMs = (config.toolUseTimeoutSeconds || 10) * 1000;
+            }
+        }
+
+        if (config && timeoutMs) {
+            round.configId = config.id;
+            round.notificationType = config.notificationType;
             this.timers.set(key, setTimeout(() => {
                 this._finalizeRound(key).catch(e => console.error('[Notifier] finalize:', e.message));
-            }, cooldownMs));
+            }, timeoutMs));
         }
     }
 
@@ -63,7 +86,9 @@ class Notifier {
         this.rounds.delete(clientKeyId);
         this.timers.delete(clientKeyId);
 
-        const config = await this._findConfig(clientKeyId);
+        if (!round.configId) return;
+
+        const config = await this._getConfigById(round.configId);
         if (!config || !config.enabled) return;
 
         const logs = round.logs;
@@ -74,6 +99,7 @@ class Notifier {
             model: round.model,
             actualModel: round.actualModel,
             providerId: round.providerId,
+            notificationType: round.notificationType,
             status: logs.every(l => l.status === 'completed') ? 'completed'
                 : logs.every(l => l.status === 'error') ? 'error'
                 : 'partial',
@@ -116,8 +142,8 @@ class Notifier {
         let logId = null;
         try {
             const result = await this.db.run(
-                `INSERT INTO notification_logs (clientKeyId, status, webhookUrl, httpMethod, requestHeaders, requestBodyPreview, roundSummary)
-                 VALUES (?, 'pending', ?, ?, ?, ?, ?)`,
+                `INSERT INTO notification_logs (clientKeyId, status, webhookUrl, httpMethod, requestHeaders, requestBodyPreview, roundSummary, ruleName, notificationType)
+                 VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?)`,
                 [
                     data.clientKeyId,
                     config.webhookUrl,
@@ -125,6 +151,7 @@ class Notifier {
                     JSON.stringify(headers),
                     reqBodyPreview,
                     JSON.stringify({
+                        notificationType: data.notificationType,
                         clientApp: data.clientApp,
                         model: data.actualModel || data.model,
                         status: data.status,
@@ -133,7 +160,9 @@ class Notifier {
                         totalLatencyMs: data.totalLatencyMs,
                         startTime: data.startTime,
                         endTime: data.endTime
-                    })
+                    }),
+                    config.name || '',
+                    data.notificationType || ''
                 ]
             );
             logId = result.lastID;
@@ -181,8 +210,10 @@ class Notifier {
         }
         return {
             app: data.clientKeyName,
+            clientName: data.clientKeyName,
             clientApp: data.clientApp,
             model: data.actualModel || data.model,
+            notificationType: data.notificationType,
             status: data.status,
             requestCount: data.requestCount,
             tokens: {
@@ -235,13 +266,13 @@ class Notifier {
         return 'unknown';
     }
 
-    async _findConfig(clientKeyId) {
+    async _findConfig(clientKeyId, notificationType) {
         const rows = await this.db.all(
             'SELECT * FROM notification_configs WHERE enabled = 1'
         );
         for (const row of rows) {
             const ids = this._safeJsonParse(row.clientKeyIds, []);
-            if (ids.includes(clientKeyId)) {
+            if (ids.includes(clientKeyId) && row.notificationType === notificationType) {
                 return {
                     ...row,
                     headers: this._safeJsonParse(row.headers, {}),
@@ -252,6 +283,18 @@ class Notifier {
             }
         }
         return null;
+    }
+
+    async _getConfigById(id) {
+        const row = await this.db.get('SELECT * FROM notification_configs WHERE id = ?', [id]);
+        if (!row) return null;
+        return {
+            ...row,
+            headers: this._safeJsonParse(row.headers, {}),
+            filterClientApps: this._safeJsonParse(row.filterClientApps, []),
+            filterStatuses: this._safeJsonParse(row.filterStatuses, []),
+            enabled: row.enabled === 1
+        };
     }
 
     _safeJsonParse(str, defaultVal) {
