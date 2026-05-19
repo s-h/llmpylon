@@ -2394,28 +2394,31 @@ app.post(['/proxy', /^\/proxy\/.*/], async (req, res) => {
     const authHeader = req.headers['authorization']?.split(' ')[1] || req.headers['x-api-key'];
     if (!authHeader) {
         const responseAt = new Date().toISOString();
-        await db.run(
+        const r = await db.run(
             `INSERT INTO conversation_logs (model, status, responseBody, requestAt, responseAt, clientStatus, clientUserAgent, clientIp, httpMethod, requestPath, clientApp) VALUES (?, 'error', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             ['unknown', '{"error":"Missing API Key"}', requestAt, responseAt, 401, clientUserAgent, clientIp, req.method, req.url, clientApp]
         );
+        getNotifier()?.handleRequestCompleted(r.lastID);
         return res.status(401).json({ error: 'Missing API Key' });
     }
 
     const clientKeyData = await db.get('SELECT * FROM client_keys WHERE key = ?', [authHeader]);
     if (!clientKeyData) {
         const responseAt = new Date().toISOString();
-        await db.run(
+        const r = await db.run(
             `INSERT INTO conversation_logs (model, status, responseBody, requestAt, responseAt, clientStatus, clientUserAgent, clientIp, httpMethod, requestPath, clientApp) VALUES (?, 'error', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             ['unknown', '{"error":"Invalid API Key"}', requestAt, responseAt, 403, clientUserAgent, clientIp, req.method, req.url, clientApp]
         );
+        getNotifier()?.handleRequestCompleted(r.lastID);
         return res.status(403).json({ error: 'Invalid API Key' });
     }
     if (!clientKeyData.enabled) {
         const responseAt = new Date().toISOString();
-        await db.run(
-            `INSERT INTO conversation_logs (model, status, responseBody, requestAt, responseAt, clientStatus, clientUserAgent, clientIp, httpMethod, requestPath, clientApp) VALUES (?, 'error', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            ['unknown', '{"error":"API Key is disabled"}', requestAt, responseAt, 403, clientUserAgent, clientIp, req.method, req.url, clientApp]
+        const r = await db.run(
+            `INSERT INTO conversation_logs (model, status, responseBody, requestAt, responseAt, clientStatus, clientUserAgent, clientIp, httpMethod, requestPath, clientApp, clientKeyId) VALUES (?, 'error', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            ['unknown', '{"error":"API Key is disabled"}', requestAt, responseAt, 403, clientUserAgent, clientIp, req.method, req.url, clientApp, clientKeyData.id]
         );
+        getNotifier()?.handleRequestCompleted(r.lastID);
         return res.status(403).json({ error: 'API Key is disabled' });
     }
 
@@ -3533,8 +3536,8 @@ app.post('/api/notification-configs', async (req, res) => {
     }
 
     const result = await db.run(
-        `INSERT INTO notification_configs (clientKeyId, name, notificationType, enabled, webhookUrl, httpMethod, headers, bodyTemplate, cooldownSeconds, toolUseTimeoutSeconds, filterClientApps, filterStatuses, clientKeyIds)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO notification_configs (clientKeyId, name, notificationType, enabled, webhookUrl, httpMethod, headers, bodyTemplate, cooldownSeconds, toolUseTimeoutSeconds, errorSuppressSeconds, filterClientApps, filterStatuses, clientKeyIds)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
             clientKeyIds[0],
             String(body.name || ''),
@@ -3546,6 +3549,7 @@ app.post('/api/notification-configs', async (req, res) => {
             String(body.bodyTemplate || ''),
             parseInt(body.cooldownSeconds, 10) || 5,
             parseInt(body.toolUseTimeoutSeconds, 10) || 10,
+            parseInt(body.errorSuppressSeconds, 10) || 60,
             JSON.stringify(body.filterClientApps || []),
             JSON.stringify(body.filterStatuses || []),
             JSON.stringify(clientKeyIds)
@@ -3561,7 +3565,7 @@ app.put('/api/notification-configs/:id', async (req, res) => {
 
     const body = req.body || {};
     await db.run(
-        `UPDATE notification_configs SET name = ?, notificationType = ?, enabled = ?, webhookUrl = ?, httpMethod = ?, headers = ?, bodyTemplate = ?, cooldownSeconds = ?, toolUseTimeoutSeconds = ?, filterClientApps = ?, filterStatuses = ?, clientKeyIds = ? WHERE id = ?`,
+        `UPDATE notification_configs SET name = ?, notificationType = ?, enabled = ?, webhookUrl = ?, httpMethod = ?, headers = ?, bodyTemplate = ?, cooldownSeconds = ?, toolUseTimeoutSeconds = ?, errorSuppressSeconds = ?, filterClientApps = ?, filterStatuses = ?, clientKeyIds = ? WHERE id = ?`,
         [
             body.name !== undefined ? String(body.name) : existing.name,
             body.notificationType !== undefined ? String(body.notificationType) : existing.notificationType,
@@ -3572,6 +3576,7 @@ app.put('/api/notification-configs/:id', async (req, res) => {
             body.bodyTemplate !== undefined ? String(body.bodyTemplate) : existing.bodyTemplate,
             body.cooldownSeconds !== undefined ? (parseInt(body.cooldownSeconds, 10) || 5) : existing.cooldownSeconds,
             body.toolUseTimeoutSeconds !== undefined ? (parseInt(body.toolUseTimeoutSeconds, 10) || 10) : (existing.toolUseTimeoutSeconds || 10),
+            body.errorSuppressSeconds !== undefined ? (parseInt(body.errorSuppressSeconds, 10) || 60) : (existing.errorSuppressSeconds || 60),
             body.filterClientApps !== undefined ? JSON.stringify(body.filterClientApps) : existing.filterClientApps,
             body.filterStatuses !== undefined ? JSON.stringify(body.filterStatuses) : existing.filterStatuses,
             body.clientKeyIds !== undefined ? JSON.stringify(body.clientKeyIds) : existing.clientKeyIds,

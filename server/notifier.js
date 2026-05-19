@@ -4,6 +4,7 @@ class Notifier {
     constructor(db) {
         this.db = db;
         this.rounds = new Map();
+        this.errorBatches = new Map();
         this.timers = new Map();
     }
 
@@ -13,8 +14,9 @@ class Notifier {
 
     handleRequestStarted(clientKeyId) {
         if (this.timers.has(clientKeyId)) {
-            clearTimeout(this.timers.get(clientKeyId));
-            this.timers.delete(clientKeyId);
+            const t = this.timers.get(clientKeyId);
+            if (t.round) { clearTimeout(t.round); t.round = null; }
+            if (t.error) { clearTimeout(t.error); t.error = null; }
         }
     }
 
@@ -30,6 +32,39 @@ class Notifier {
 
         const key = log.clientKeyId;
 
+        // Error branch — independent of conversation round tracking
+        if (log.status === 'error') {
+            const config = await this._findConfig(key, 'error');
+            if (!config || !config.enabled) return;
+
+            if (!this.errorBatches.has(key)) {
+                this.errorBatches.set(key, {
+                    clientKeyId: key,
+                    clientKeyName: log.clientKeyName || '',
+                    clientApp: log.clientApp || 'unknown',
+                    errors: [],
+                    startTime: log.requestAt,
+                    lastErrorAt: log.requestAt,
+                    configId: config.id
+                });
+            }
+            const batch = this.errorBatches.get(key);
+            batch.errors.push(log);
+            batch.lastErrorAt = log.requestAt;
+            batch.configId = config.id;
+
+            if (!this.timers.has(key)) {
+                this.timers.set(key, { round: null, error: null });
+            }
+            const t = this.timers.get(key);
+            if (t.error) { clearTimeout(t.error); }
+            t.error = setTimeout(() => {
+                this._finalizeErrorBatch(key).catch(e => console.error('[Notifier] finalize error:', e.message));
+            }, (config.errorSuppressSeconds || 60) * 1000);
+            return;
+        }
+
+        // Normal request — conversation round tracking
         if (!this.rounds.has(key)) {
             this.rounds.set(key, {
                 clientKeyId: key,
@@ -47,18 +82,19 @@ class Notifier {
         const round = this.rounds.get(key);
         round.logs.push(log);
 
-        // Cancel all pending timers for this key — new request invalidates old timer
-        if (this.timers.has(key)) {
-            clearTimeout(this.timers.get(key));
-            this.timers.delete(key);
+        // Cancel existing round timer (new request invalidates old round timer)
+        if (!this.timers.has(key)) {
+            this.timers.set(key, { round: null, error: null });
         }
+        const t = this.timers.get(key);
+        if (t.round) { clearTimeout(t.round); t.round = null; }
 
         const finishReason = this._extractFinishReason(log.responseBody, log.status);
 
         let config = null;
         let timeoutMs = null;
 
-        if (finishReason === 'stop' || finishReason === 'end_turn' || log.status === 'error') {
+        if (finishReason === 'stop' || finishReason === 'end_turn') {
             config = await this._findConfig(key, 'completion');
             if (config && config.enabled) {
                 timeoutMs = (config.cooldownSeconds || 5) * 1000;
@@ -73,9 +109,9 @@ class Notifier {
         if (config && timeoutMs) {
             round.configId = config.id;
             round.notificationType = config.notificationType;
-            this.timers.set(key, setTimeout(() => {
+            t.round = setTimeout(() => {
                 this._finalizeRound(key).catch(e => console.error('[Notifier] finalize:', e.message));
-            }, timeoutMs));
+            }, timeoutMs);
         }
     }
 
@@ -84,7 +120,10 @@ class Notifier {
         if (!round || round.logs.length === 0) return;
 
         this.rounds.delete(clientKeyId);
-        this.timers.delete(clientKeyId);
+        if (this.timers.has(clientKeyId)) {
+            const t = this.timers.get(clientKeyId);
+            if (t.round) { clearTimeout(t.round); t.round = null; }
+        }
 
         if (!round.configId) return;
 
@@ -95,6 +134,7 @@ class Notifier {
         const summary = {
             clientKeyId: round.clientKeyId,
             clientKeyName: round.clientKeyName,
+            clientName: round.clientKeyName,
             clientApp: round.clientApp,
             model: round.model,
             actualModel: round.actualModel,
@@ -128,6 +168,53 @@ class Notifier {
         await this._sendNotification(config, summary);
     }
 
+    async _finalizeErrorBatch(clientKeyId) {
+        const batch = this.errorBatches.get(clientKeyId);
+        if (!batch || batch.errors.length === 0) return;
+
+        this.errorBatches.delete(clientKeyId);
+        if (this.timers.has(clientKeyId)) {
+            const t = this.timers.get(clientKeyId);
+            if (t.error) { clearTimeout(t.error); t.error = null; }
+        }
+
+        const config = await this._getConfigById(batch.configId);
+        if (!config || !config.enabled) return;
+
+        const distinctMsgs = [...new Set(batch.errors.map(e => {
+            try { return JSON.parse(e.responseBody).error; } catch { return e.responseBody || 'unknown'; }
+        }))];
+
+        const summary = {
+            clientKeyId: batch.clientKeyId,
+            clientKeyName: batch.clientKeyName,
+            clientName: batch.clientKeyName,
+            clientApp: batch.clientApp,
+            notificationType: 'error',
+            status: 'error',
+            errorCount: batch.errors.length,
+            errorMessages: distinctMsgs.join(', '),
+            firstErrorAt: batch.startTime,
+            lastErrorAt: batch.lastErrorAt,
+            startTime: batch.startTime,
+            endTime: batch.lastErrorAt,
+            requestCount: batch.errors.length,
+            totalTokensIn: 0,
+            totalTokensOut: 0,
+            totalTokens: 0,
+            totalLatencyMs: 0,
+            errors: batch.errors.map(e => ({
+                id: e.id,
+                status: e.status,
+                error: e.responseBody,
+                clientStatus: e.clientStatus,
+                requestAt: e.requestAt
+            }))
+        };
+
+        await this._sendNotification(config, summary);
+    }
+
     async _sendNotification(config, data) {
         const rendered = this._renderTemplate(config.bodyTemplate, data);
         const headers = {
@@ -155,9 +242,11 @@ class Notifier {
                         clientApp: data.clientApp,
                         model: data.actualModel || data.model,
                         status: data.status,
-                        requestCount: data.requestCount,
-                        totalTokens: data.totalTokens,
-                        totalLatencyMs: data.totalLatencyMs,
+                        requestCount: data.requestCount || 0,
+                        totalTokens: data.totalTokens || 0,
+                        totalLatencyMs: data.totalLatencyMs || 0,
+                        errorCount: data.errorCount,
+                        errorMessages: data.errorMessages,
                         startTime: data.startTime,
                         endTime: data.endTime
                     }),
@@ -216,6 +305,8 @@ class Notifier {
             notificationType: data.notificationType,
             status: data.status,
             requestCount: data.requestCount,
+            errorCount: data.errorCount,
+            errorMessages: data.errorMessages,
             tokens: {
                 in: data.totalTokensIn,
                 out: data.totalTokensOut,
@@ -223,7 +314,8 @@ class Notifier {
             },
             latencyMs: data.totalLatencyMs,
             time: { start: data.startTime, end: data.endTime },
-            requests: data.requests
+            requests: data.requests,
+            errors: data.errors
         };
     }
 

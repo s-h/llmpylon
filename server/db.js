@@ -350,6 +350,7 @@ async function setupDb() {
             bodyTemplate TEXT DEFAULT '',
             cooldownSeconds INTEGER DEFAULT 5,
             toolUseTimeoutSeconds INTEGER DEFAULT 10,
+            errorSuppressSeconds INTEGER DEFAULT 60,
             filterClientApps TEXT DEFAULT '[]',
             filterStatuses TEXT DEFAULT '[]',
             clientKeyIds TEXT DEFAULT '[]',
@@ -362,8 +363,14 @@ async function setupDb() {
     // Migration: upgrade notification_configs to new schema with notificationType + toolUseTimeoutSeconds
     const notifCfgCols = await db.all('PRAGMA table_info(notification_configs)');
     const notifCfgColNames = notifCfgCols.map(c => c.name);
+
+    // Migration: add errorSuppressSeconds to notification_configs
+    if (!notifCfgColNames.includes('errorSuppressSeconds')) {
+        await db.exec('ALTER TABLE notification_configs ADD COLUMN errorSuppressSeconds INTEGER DEFAULT 60');
+    }
+
     if (!notifCfgColNames.includes('notificationType') || !notifCfgColNames.includes('toolUseTimeoutSeconds')) {
-        await db.exec(`CREATE TABLE IF NOT EXISTS notification_configs_new (
+        await db.exec(`CREATE TABLE IF NOT EXISTS             notification_configs_new (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             clientKeyId INTEGER NOT NULL,
             name TEXT DEFAULT '',
@@ -375,6 +382,7 @@ async function setupDb() {
             bodyTemplate TEXT DEFAULT '',
             cooldownSeconds INTEGER DEFAULT 5,
             toolUseTimeoutSeconds INTEGER DEFAULT 10,
+            errorSuppressSeconds INTEGER DEFAULT 60,
             filterClientApps TEXT DEFAULT '[]',
             filterStatuses TEXT DEFAULT '[]',
             clientKeyIds TEXT DEFAULT '[]',

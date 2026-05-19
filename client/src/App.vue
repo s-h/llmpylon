@@ -46,7 +46,9 @@ import {
   Gauge,
   Radio,
   WifiOff,
-  HardDrive
+  HardDrive,
+  Eye,
+  EyeOff
 } from 'lucide-vue-next';
 
 use([CanvasRenderer, CalendarComponent, GridComponent, LegendComponent, TooltipComponent, VisualMapComponent, HeatmapChart, LineChart, PieChart]);
@@ -169,6 +171,9 @@ const editingModel = ref(null);
 const editingModelName = ref('');
 const editingApp = ref(null);
 const showAddProvider = ref(false);
+const showProviderApiKey = ref(false);
+const showCopyApiKey = ref(false);
+const showApiKeyInCard = ref({});
 const showAddApp = ref(false);
 const showAddModel = ref(false);
 const modelRules = ref([]);
@@ -973,7 +978,7 @@ const openNotifEditor = (config) => {
     };
   } else {
     editingNotifConfig.value = null;
-    notifConfigForm.value = { clientKeyIds: [], name: '', notificationType: 'completion', enabled: true, webhookUrl: '', httpMethod: 'POST', headers: [], bodyTemplate: '', cooldownSeconds: 5, toolUseTimeoutSeconds: 10 };
+    notifConfigForm.value = { clientKeyIds: [], name: '', notificationType: 'completion', enabled: true, webhookUrl: '', httpMethod: 'POST', headers: [], bodyTemplate: '', cooldownSeconds: 5, toolUseTimeoutSeconds: 10, errorSuppressSeconds: 60 };
   }
 };
 
@@ -1427,6 +1432,7 @@ const doGlobalImport = async () => {
 
 const openEditModal = (provider) => {
   editingProvider.value = { ...provider, protocolConvert: provider.protocolConvert === 1 || provider.protocolConvert === true };
+  showProviderApiKey.value = false;
 };
 
 const openCopyProviderDialog = (p) => {
@@ -1441,6 +1447,7 @@ const openCopyProviderDialog = (p) => {
   const def = (p.models || []).find((m) => m.id === p.defaultModelId);
   copyDefaultModelName.value = def ? def.name : (copyModelNamesForSelect.value[0] || '');
   newCopyModelRow.value = '';
+  showCopyApiKey.value = false;
   showCopyProviderDialog.value = true;
 };
 
@@ -2181,7 +2188,7 @@ onUnmounted(() => {
                   导入
                 </button>
                 <button
-                  @click="showAddProvider = true; if (selectedLog) closeLogDetail()"
+                  @click="showAddProvider = true; showProviderApiKey = false; if (selectedLog) closeLogDetail()"
                 class="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
               >
                 <Plus class="w-4 h-4" />
@@ -2294,7 +2301,19 @@ onUnmounted(() => {
               </div>
               <div class="text-sm text-gray-500 break-all mt-4">
                 <span class="block font-medium text-gray-400 text-xs mb-1 uppercase">托管 Key</span>
-                <span class="font-mono text-xs blur-sm hover:blur-none transition-all cursor-help">{{ p.apiKey || '未设置' }}</span>
+                <div class="flex items-center gap-1">
+                  <span v-if="showApiKeyInCard[p.id]" class="font-mono text-xs break-all">{{ p.apiKey || '未设置' }}</span>
+                  <span v-else class="font-mono text-xs text-gray-400">••••••••••••</span>
+                  <button
+                    v-if="p.apiKey"
+                    @click.stop="showApiKeyInCard[p.id] = !showApiKeyInCard[p.id]"
+                    class="flex-shrink-0 p-0.5 rounded hover:bg-gray-100 transition-colors"
+                    :title="showApiKeyInCard[p.id] ? '隐藏' : '显示'"
+                  >
+                    <EyeOff v-if="showApiKeyInCard[p.id]" class="w-3 h-3 text-gray-400" />
+                    <Eye v-else class="w-3 h-3 text-gray-400" />
+                  </button>
+                </div>
               </div>
               <div class="text-sm text-gray-500 break-all mt-4">
                 <div class="flex justify-between items-center">
@@ -3429,7 +3448,7 @@ onUnmounted(() => {
                   </div>
                   <div class="text-xs text-gray-500 mt-0.5 truncate">{{ cfg.webhookUrl || '未配置 URL' }}</div>
                   <div class="text-[10px] text-gray-400 mt-0.5">
-                    {{ cfg.notificationType === 'tool_use_confirmation' ? '等待确认' : '对话完成' }} · 方法: {{ cfg.httpMethod }} | 等待: {{ (cfg.notificationType === 'tool_use_confirmation' ? cfg.toolUseTimeoutSeconds : cfg.cooldownSeconds) || '?' }}秒
+                    {{ cfg.notificationType === 'error' ? '错误通知' : cfg.notificationType === 'tool_use_confirmation' ? '等待确认' : '对话完成' }} · 方法: {{ cfg.httpMethod }} | 等待: {{ (cfg.notificationType === 'error' ? cfg.errorSuppressSeconds : cfg.notificationType === 'tool_use_confirmation' ? cfg.toolUseTimeoutSeconds : cfg.cooldownSeconds) || '?' }}秒
                     <span v-if="cfg.filterClientApps && cfg.filterClientApps.length"> | 客户端: {{ cfg.filterClientApps.join(', ') }}</span>
                   </div>
                 </div>
@@ -3464,14 +3483,20 @@ onUnmounted(() => {
                     <input type="radio" v-model="notifConfigForm.notificationType" value="tool_use_confirmation" class="text-blue-600" />
                     <span>等待确认</span>
                   </label>
+                  <label class="flex items-center gap-2 text-sm cursor-pointer">
+                    <input type="radio" v-model="notifConfigForm.notificationType" value="error" class="text-blue-600" />
+                    <span>错误通知</span>
+                  </label>
                 </div>
               </div>
               <div class="flex items-center gap-3">
                 <div class="flex flex-col gap-1">
                   <label class="block text-xs font-bold text-gray-400 uppercase mb-1">
-                    {{ notifConfigForm.notificationType === 'tool_use_confirmation' ? '等待确认超时（秒）' : '对话结束等待（秒）' }}
+                    {{ notifConfigForm.notificationType === 'error' ? '错误抑制时间（秒）' : notifConfigForm.notificationType === 'tool_use_confirmation' ? '等待确认超时（秒）' : '对话结束等待（秒）' }}
+                    <span class="text-red-500">*</span>
                   </label>
-                  <input v-if="notifConfigForm.notificationType === 'tool_use_confirmation'" v-model.number="notifConfigForm.toolUseTimeoutSeconds" type="number" min="1" max="600" required class="w-24 px-4 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+                  <input v-if="notifConfigForm.notificationType === 'error'" v-model.number="notifConfigForm.errorSuppressSeconds" type="number" min="10" max="600" required class="w-24 px-4 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+                  <input v-else-if="notifConfigForm.notificationType === 'tool_use_confirmation'" v-model.number="notifConfigForm.toolUseTimeoutSeconds" type="number" min="1" max="600" required class="w-24 px-4 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
                   <input v-else v-model.number="notifConfigForm.cooldownSeconds" type="number" min="1" max="300" required class="w-24 px-4 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
                 </div>
               </div>
@@ -3571,7 +3596,7 @@ onUnmounted(() => {
                     <td class="px-3 py-2 font-mono text-[10px] text-gray-500 whitespace-nowrap">{{ formatTime(l.createdAt) }}</td>
                     <td class="px-3 py-2 font-medium">{{ l.clientKeyName || ('App #' + l.clientKeyId) }}</td>
                     <td class="px-3 py-2 font-medium text-gray-700 text-[11px] max-w-[120px] truncate">{{ l.ruleName || '-' }}</td>
-                    <td class="px-3 py-2"><span :class="l.notificationType === 'tool_use_confirmation' ? 'bg-amber-50 text-amber-700' : 'bg-blue-50 text-blue-700'" class="px-2 py-0.5 rounded text-[10px] font-bold">{{ l.notificationType === 'tool_use_confirmation' ? '等待确认' : '对话完成' }}</span></td>
+                    <td class="px-3 py-2"><span :class="l.notificationType === 'error' ? 'bg-red-50 text-red-700' : l.notificationType === 'tool_use_confirmation' ? 'bg-amber-50 text-amber-700' : 'bg-blue-50 text-blue-700'" class="px-2 py-0.5 rounded text-[10px] font-bold">{{ l.notificationType === 'error' ? '错误通知' : l.notificationType === 'tool_use_confirmation' ? '等待确认' : '对话完成' }}</span></td>
                     <td class="px-3 py-2">
                       <span :class="l.status === 'success' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'" class="px-2 py-0.5 rounded text-[10px] font-bold">{{ l.status === 'success' ? '成功' : '失败' }}</span>
                     </td>
@@ -3994,7 +4019,17 @@ onUnmounted(() => {
           </div>
           <div>
             <label class="block text-xs font-bold text-gray-400 uppercase mb-1">托管 API Key</label>
-            <input v-model="copyProviderForm.apiKey" type="password" placeholder="默认已填入源厂商 Key，可修改" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+            <div class="relative">
+              <input v-model="copyProviderForm.apiKey" :type="showCopyApiKey ? 'text' : 'password'" placeholder="默认已填入源厂商 Key，可修改" class="w-full px-4 py-2 pr-10 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+              <button
+                @click="showCopyApiKey = !showCopyApiKey"
+                class="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded hover:bg-gray-100 transition-colors"
+                :title="showCopyApiKey ? '隐藏' : '显示'"
+              >
+                <EyeOff v-if="showCopyApiKey" class="w-4 h-4 text-gray-400" />
+                <Eye v-else class="w-4 h-4 text-gray-400" />
+              </button>
+            </div>
           </div>
           <div class="flex items-center justify-between py-2">
             <div>
@@ -4072,7 +4107,17 @@ onUnmounted(() => {
           </div>
           <div>
             <label class="block text-xs font-bold text-gray-400 uppercase mb-1">托管 API Key</label>
-            <input v-model="(editingProvider || newProvider).apiKey" type="password" placeholder="sk-..." class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+            <div class="relative">
+              <input v-model="(editingProvider || newProvider).apiKey" :type="showProviderApiKey ? 'text' : 'password'" placeholder="sk-..." class="w-full px-4 py-2 pr-10 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+              <button
+                @click="showProviderApiKey = !showProviderApiKey"
+                class="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded hover:bg-gray-100 transition-colors"
+                :title="showProviderApiKey ? '隐藏' : '显示'"
+              >
+                <EyeOff v-if="showProviderApiKey" class="w-4 h-4 text-gray-400" />
+                <Eye v-else class="w-4 h-4 text-gray-400" />
+              </button>
+            </div>
           </div>
           <div class="flex items-center justify-between py-2">
             <div>
