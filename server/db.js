@@ -307,10 +307,16 @@ async function setupDb() {
         )
     `);
     await db.run(
-        "INSERT OR IGNORE INTO app_settings (key, value) VALUES ('log_retention_days', '0')"
+        "INSERT OR IGNORE INTO app_settings (key, value) VALUES ('log_retention_days', '60')"
     );
     await db.run(
-        "INSERT OR IGNORE INTO app_settings (key, value) VALUES ('stats_retention_days', '0')"
+        "UPDATE app_settings SET value = '60' WHERE key = 'log_retention_days' AND value = '0'"
+    );
+    await db.run(
+        "INSERT OR IGNORE INTO app_settings (key, value) VALUES ('stats_retention_days', '180')"
+    );
+    await db.run(
+        "UPDATE app_settings SET value = '180' WHERE key = 'stats_retention_days' AND (value = '0' OR value = '31')"
     );
     await db.run(
         "INSERT OR IGNORE INTO app_settings (key, value) VALUES ('upstream_timeout_seconds', '360')"
@@ -335,6 +341,15 @@ async function setupDb() {
     );
     await db.run(
         "INSERT OR IGNORE INTO app_settings (key, value) VALUES ('notification_tool_use_timeout_seconds', '10')"
+    );
+    await db.run(
+        "INSERT OR IGNORE INTO app_settings (key, value) VALUES ('notification_mute', '{\"enabled\":false,\"start\":\"00:00\",\"end\":\"00:00\"}')"
+    );
+    await db.run(
+        "INSERT OR IGNORE INTO app_settings (key, value) VALUES ('admin_timezone', 'Asia/Shanghai')"
+    );
+    await db.run(
+        "UPDATE app_settings SET value = 'Asia/Shanghai' WHERE key = 'admin_timezone' AND (value IS NULL OR value = '' OR value = '0')"
     );
 
     await db.exec(`
@@ -495,6 +510,29 @@ async function setupDb() {
     }
 
     const existingAdminCount = await db.get('SELECT COUNT(*) as cnt FROM admin_users');
+
+    await db.exec(`
+        CREATE TABLE IF NOT EXISTS provider_usage_cache (
+            providerId INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            vendor TEXT,
+            balance TEXT,
+            requests INTEGER DEFAULT 0,
+            tokensIn INTEGER DEFAULT 0,
+            tokensOut INTEGER DEFAULT 0,
+            modelsJson TEXT DEFAULT '[]',
+            vendorDataJson TEXT DEFAULT '{}',
+            updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (providerId, date)
+        )
+    `);
+
+    const pucColNames = await db.all("PRAGMA table_info('provider_usage_cache')");
+    const pucColNamesSet = new Set(pucColNames.map(r => r.name));
+    if (!pucColNamesSet.has('vendorDataJson')) {
+        await db.exec('ALTER TABLE provider_usage_cache ADD COLUMN vendorDataJson TEXT DEFAULT \'{}\'');
+    }
+
     if (!existingAdminCount || !existingAdminCount.cnt) {
         const password = 'llmpylon';
         const salt = crypto.randomBytes(16).toString('hex');

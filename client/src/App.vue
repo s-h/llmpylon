@@ -51,7 +51,8 @@ import {
   EyeOff
 } from 'lucide-vue-next';
 
-use([CanvasRenderer, CalendarComponent, GridComponent, LegendComponent, TooltipComponent, VisualMapComponent, HeatmapChart, LineChart, PieChart]);
+use([CanvasRenderer, CalendarComponent, GridComponent, LegendComponent, TooltipComponent, VisualMapComponent, HeatmapChart, LineChart, PieChart, BarChart]);
+import { BarChart } from 'echarts/charts';
 
 const hostname = window.location.hostname;
 const API_BASE = `http://${hostname}:3000/api`;
@@ -246,16 +247,36 @@ const importResults = ref([]);
 const showGlobalImportDialog = ref(false);
 const globalImportData = ref(null);
 const appSettings = ref({
-  logRetentionDays: 0,
-  statsRetentionDays: 0,
+  logRetentionDays: 60,
+  statsRetentionDays: 180,
   upstreamTimeoutSeconds: 360,
   upstreamHeadersBlocklist: ['host', 'content-length', 'connection', 'accept-encoding'],
   notificationCooldownSeconds: 5,
   notificationLogRetentionDays: 7,
-  notificationToolUseTimeoutSeconds: 10
+  notificationToolUseTimeoutSeconds: 10,
+  notificationMuteEnabled: false,
+  notificationMuteStart: '00:00',
+  notificationMuteEnd: '00:00',
+  timezone: 'Asia/Shanghai'
 });
 
 const appSettingsSaving = ref(false);
+const muteEditing = ref(false);
+const muteSavedToast = ref(false);
+
+const nowInMute = computed(() => {
+  if (!appSettings.value.notificationMuteEnabled) return false;
+  const now = new Date();
+  const mins = now.getHours() * 60 + now.getMinutes();
+  const [sh, sm] = String(appSettings.value.notificationMuteStart || '00:00').split(':').map(Number);
+  const [eh, em] = String(appSettings.value.notificationMuteEnd || '00:00').split(':').map(Number);
+  const s = sh * 60 + sm;
+  const e = eh * 60 + em;
+  if (s === e) return false;
+  if (s <= e) return mins >= s && mins < e;
+  return mins >= s || mins < e;
+});
+const notifLogsTotalPages = computed(() => Math.max(1, Math.ceil(notifLogsTotal.value / notifLogsPageSize.value)));
 const notificationConfigs = ref([]);
 const editingNotifConfig = ref(undefined);
 const notifConfigForm = ref({ clientKeyIds: [], enabled: true, webhookUrl: '', httpMethod: 'POST', headers: [], bodyTemplate: '', cooldownSeconds: 5 });
@@ -266,6 +287,8 @@ const notifLogsPage = ref(1);
 const notifLogsPageSize = ref(20);
 const notifLogsFilter = ref({ clientKeyId: 'all', status: 'all' });
 const selectedNotifLog = ref(null);
+const notifLogDetailLoading = ref(false);
+const notifLogDetailError = ref('');
 const showKeyRecycleBin = ref(false);
 const deletedKeys = ref([]);
 const nowMs = ref(Date.now());
@@ -285,6 +308,22 @@ function persistViewMode() {
   localStorage.setItem('modelSortBy', modelSortBy.value);
   localStorage.setItem('modelSortOrder', modelSortOrder.value);
 }
+
+const providerUsageData = ref({});
+const providerUsageLoading = ref(false);
+const showAllModels = ref({});
+
+const fetchProviderUsage = async () => {
+  providerUsageLoading.value = true;
+  try {
+    const res = await axios.get(`${API_BASE}/providers/usage`);
+    providerUsageData.value = res.data;
+  } catch (e) {
+    console.error('fetchProviderUsage', e);
+  } finally {
+    providerUsageLoading.value = false;
+  }
+};
 
 // Provider drag state
 const providerDragIndex = ref(null);
@@ -756,6 +795,7 @@ const loadAllData = async () => {
   }
   await fetchModelsCatalog();
   await fetchModelRules();
+  await fetchAppSettings();
   await fetchLogs();
   fetchDeletedProviders().catch(() => {});
   fetchDeletedKeys().catch(() => {});
@@ -765,6 +805,9 @@ const loadAllData = async () => {
   if (activeTab.value === 'notifications') {
     await fetchNotificationConfigs();
     await fetchNotifLogs(1);
+  }
+  if (providerViewMode.value === 'usage') {
+    await fetchProviderUsage();
   }
 };
 
@@ -904,13 +947,17 @@ const fetchAppSettings = async () => {
   try {
     const res = await axios.get(`${API_BASE}/settings`);
     appSettings.value = {
-      logRetentionDays: Math.max(0, Number(res.data.logRetentionDays) || 0),
-      statsRetentionDays: Math.max(0, Number(res.data.statsRetentionDays) || 0),
+      logRetentionDays: Math.max(0, Number(res.data.logRetentionDays) || 60),
+      statsRetentionDays: res.data.statsRetentionDays === 0 || res.data.statsRetentionDays === '0' ? 0 : Math.max(31, Number(res.data.statsRetentionDays) || 180),
       upstreamTimeoutSeconds: Math.max(5, Math.min(86400, Number(res.data.upstreamTimeoutSeconds) || 360)),
       upstreamHeadersBlocklist: res.data.upstreamHeadersBlocklist || ['host', 'content-length', 'connection', 'accept-encoding'],
       notificationCooldownSeconds: Math.max(1, Math.min(300, Number(res.data.notificationCooldownSeconds) || 5)),
       notificationLogRetentionDays: Math.max(0, Math.min(365, Number(res.data.notificationLogRetentionDays) || 7)),
-      notificationToolUseTimeoutSeconds: Math.max(1, Math.min(600, Number(res.data.notificationToolUseTimeoutSeconds) || 10))
+      notificationToolUseTimeoutSeconds: Math.max(1, Math.min(600, Number(res.data.notificationToolUseTimeoutSeconds) || 10)),
+      notificationMuteEnabled: !!(res.data.notificationMute?.enabled),
+      notificationMuteStart: res.data.notificationMute?.start || '00:00',
+      notificationMuteEnd: res.data.notificationMute?.end || '00:00',
+      timezone: res.data.adminTimezone || 'Asia/Shanghai'
     };
   } catch (e) {
     console.error('fetchAppSettings', e);
@@ -918,6 +965,11 @@ const fetchAppSettings = async () => {
 };
 
 const saveAppSettings = async () => {
+  const sd = Number(appSettings.value.statsRetentionDays);
+  if (sd !== 0 && sd < 31) {
+    alert('统计数据保留天数必须 ≥ 31 天，或设为 0（永不清除）');
+    return;
+  }
   appSettingsSaving.value = true;
   try {
     const res = await axios.put(`${API_BASE}/settings`, {
@@ -927,7 +979,13 @@ const saveAppSettings = async () => {
       upstreamHeadersBlocklist: appSettings.value.upstreamHeadersBlocklist,
       notificationCooldownSeconds: Math.max(1, Math.min(300, Number(appSettings.value.notificationCooldownSeconds) || 5)),
       notificationLogRetentionDays: Math.max(0, Math.min(365, Number(appSettings.value.notificationLogRetentionDays) || 7)),
-      notificationToolUseTimeoutSeconds: Math.max(1, Math.min(600, Number(appSettings.value.notificationToolUseTimeoutSeconds) || 10))
+      notificationToolUseTimeoutSeconds: Math.max(1, Math.min(600, Number(appSettings.value.notificationToolUseTimeoutSeconds) || 10)),
+      notificationMute: {
+        enabled: !!appSettings.value.notificationMuteEnabled,
+        start: appSettings.value.notificationMuteStart || '00:00',
+        end: appSettings.value.notificationMuteEnd || '00:00'
+      },
+      timezone: appSettings.value.timezone
     });
     appSettings.value.logRetentionDays = res.data.logRetentionDays;
     appSettings.value.statsRetentionDays = res.data.statsRetentionDays;
@@ -936,12 +994,44 @@ const saveAppSettings = async () => {
     appSettings.value.notificationCooldownSeconds = res.data.notificationCooldownSeconds;
     appSettings.value.notificationLogRetentionDays = res.data.notificationLogRetentionDays;
     appSettings.value.notificationToolUseTimeoutSeconds = res.data.notificationToolUseTimeoutSeconds;
+    appSettings.value.notificationMuteEnabled = !!(res.data.notificationMute?.enabled);
+    appSettings.value.notificationMuteStart = res.data.notificationMute?.start || '00:00';
+    appSettings.value.notificationMuteEnd = res.data.notificationMute?.end || '00:00';
+    appSettings.value.timezone = res.data.adminTimezone || 'Asia/Shanghai';
     alert('已保存');
   } catch (e) {
     alert('保存失败: ' + (e.response?.data?.error || e.message));
   } finally {
     appSettingsSaving.value = false;
   }
+};
+
+const saveMuteSettings = async () => {
+  appSettingsSaving.value = true;
+  try {
+    const res = await axios.put(`${API_BASE}/settings`, {
+      notificationMute: {
+        enabled: !!appSettings.value.notificationMuteEnabled,
+        start: appSettings.value.notificationMuteStart || '00:00',
+        end: appSettings.value.notificationMuteEnd || '00:00'
+      }
+    });
+    appSettings.value.notificationMuteEnabled = !!(res.data.notificationMute?.enabled);
+    appSettings.value.notificationMuteStart = res.data.notificationMute?.start || '00:00';
+    appSettings.value.notificationMuteEnd = res.data.notificationMute?.end || '00:00';
+    muteEditing.value = false;
+    muteSavedToast.value = true;
+    setTimeout(() => { muteSavedToast.value = false; }, 3000);
+  } catch (e) {
+    alert('保存失败: ' + (e.response?.data?.error || e.message));
+  } finally {
+    appSettingsSaving.value = false;
+  }
+};
+
+const cancelMuteSettings = async () => {
+  muteEditing.value = false;
+  await fetchAppSettings();
 };
 
 const fetchNotificationConfigs = async () => {
@@ -1037,7 +1127,9 @@ const saveNotifConfig = async () => {
       httpMethod: notifConfigForm.value.httpMethod,
       headers: headersObj,
       bodyTemplate: notifConfigForm.value.bodyTemplate,
-      cooldownSeconds: Number(notifConfigForm.value.cooldownSeconds) || 5
+      cooldownSeconds: Number(notifConfigForm.value.cooldownSeconds) || 5,
+      toolUseTimeoutSeconds: Number(notifConfigForm.value.toolUseTimeoutSeconds) || 10,
+      errorSuppressSeconds: Number(notifConfigForm.value.errorSuppressSeconds) || 60
     };
 
     if (editingNotifConfig.value) {
@@ -1061,6 +1153,16 @@ const deleteNotifConfig = async (id) => {
     await fetchNotificationConfigs();
   } catch (e) {
     alert('删除失败: ' + (e.response?.data?.error || e.message));
+  }
+};
+
+const toggleNotifEnabled = async (cfg) => {
+  cfg.enabled = !cfg.enabled;
+  try {
+    await axios.put(`${API_BASE}/notification-configs/${cfg.id}`, { enabled: cfg.enabled });
+  } catch (e) {
+    cfg.enabled = !cfg.enabled;
+    alert('操作失败: ' + (e.response?.data?.error || e.message));
   }
 };
 
@@ -1090,16 +1192,23 @@ const clearNotifLogs = async () => {
 };
 
 const openNotifLogDetail = async (log) => {
+  notifLogDetailLoading.value = true;
+  notifLogDetailError.value = '';
   try {
     const res = await axios.get(`${API_BASE}/notification-logs/${log.id}`);
     selectedNotifLog.value = res.data;
   } catch (e) {
-    console.error('openNotifLogDetail', e);
+    notifLogDetailError.value = e.response?.data?.error || e.message || '加载失败';
+    selectedNotifLog.value = null;
+  } finally {
+    notifLogDetailLoading.value = false;
   }
 };
 
 const closeNotifLogDetail = () => {
   selectedNotifLog.value = null;
+  notifLogDetailError.value = '';
+  notifLogDetailLoading.value = false;
 };
 
 const getKeyColor = (keyId) => {
@@ -1748,13 +1857,25 @@ const parseDate = (dateStr) => {
 const formatTime = (dateStr) => {
   const date = parseDate(dateStr);
   if (!date) return '-';
-  
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
-  const time = date.toLocaleTimeString(undefined, { hour12: false });
-  const ms = String(date.getMilliseconds()).padStart(3, '0');
-  return `${y}-${m}-${d} ${time}.${ms}`;
+  const tz = appSettings.value?.timezone || 'Asia/Shanghai';
+  let parts;
+  try {
+    parts = new Intl.DateTimeFormat('en', {
+      timeZone: tz,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+      hour12: false
+    }).formatToParts(date);
+  } catch {
+    parts = new Intl.DateTimeFormat('en', {
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+      hour12: false
+    }).formatToParts(date);
+  }
+  const get = (t) => parts.find(p => p.type === t)?.value || '00';
+  const ms = String(date.getUTCMilliseconds()).padStart(3, '0');
+  return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}:${get('second')}.${ms}`;
 };
 
 const calculateDuration = (start, end) => {
@@ -1801,6 +1922,77 @@ const formatJson = (str) => {
       return str;
     }
   }
+};
+
+const formatTokens = (n) => {
+  if (!n) return '0';
+  if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+  if (n >= 1000) return (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'K';
+  return String(n);
+};
+
+const vendorLabel = (v) => {
+  const labels = { deepseek: 'DeepSeek', moonshot: 'Moonshot', venice: 'Venice', openai: 'OpenAI', anthropic: 'Anthropic', elevenlabs: 'ElevenLabs', kimik2: 'Kimi K2', groq: 'Groq', deepgram: 'Deepgram' };
+  return labels[v] || v || '';
+};
+
+const vendorColor = (v) => {
+  const colors = { deepseek: 'bg-blue-100 text-blue-700', moonshot: 'bg-purple-100 text-purple-700', venice: 'bg-cyan-100 text-cyan-700', openai: 'bg-green-100 text-green-700', anthropic: 'bg-orange-100 text-orange-700', elevenlabs: 'bg-pink-100 text-pink-700', kimik2: 'bg-indigo-100 text-indigo-700', groq: 'bg-amber-100 text-amber-700', deepgram: 'bg-teal-100 text-teal-700' };
+  return colors[v] || 'bg-gray-100 text-gray-700';
+};
+
+const timeAgo = (dateStr) => {
+  if (!dateStr) return '';
+  const date = parseDate(dateStr);
+  if (!date) return '';
+  const diff = Date.now() - date.getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return '刚刚更新';
+  if (mins < 60) return mins + ' 分钟前更新';
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return hrs + ' 小时前更新';
+  return Math.floor(hrs / 24) + ' 天前更新';
+};
+
+const VENDOR_CHART_COLORS = {
+  deepseek: ['#3b82f6', '#22c55e'], moonshot: ['#a855f7', '#d946ef'], venice: ['#06b6d4', '#22d3ee'],
+  openai: ['#22c55e', '#86efac'], anthropic: ['#f59e0b', '#fbbf24'], elevenlabs: ['#ec4899', '#f472b6'],
+  kimik2: ['#6366f1', '#818cf8'], groq: ['#f59e0b', '#d97706'], deepgram: ['#14b8a6', '#2dd4bf']
+};
+
+const usageChartOption = (data) => {
+  const days = data?.daily || [];
+  const vendor = data?.vendor;
+  const inputColor = VENDOR_CHART_COLORS[vendor]?.[0] || '#3b82f6';
+  const outputColor = VENDOR_CHART_COLORS[vendor]?.[1] || '#22c55e';
+  return {
+    tooltip: {
+      trigger: 'axis',
+      formatter: (params) => {
+        const date = params[0]?.axisValue || '';
+        const totalTokens = params.reduce((s, p) => s + p.value, 0);
+        let s = `<strong>${date}</strong><br/>`;
+        for (const p of params) {
+          s += `${p.marker} ${p.seriesName}: ${formatTokens(p.value)} tokens<br/>`;
+        }
+        s += `总计: ${formatTokens(totalTokens)} tokens`;
+        return s;
+      }
+    },
+    grid: { left: 36, right: 6, top: 8, bottom: 20 },
+    xAxis: {
+      type: 'category',
+      data: days.map(d => d.date.slice(5)),
+      axisLabel: { fontSize: 9, color: '#999' },
+      axisLine: { show: false },
+      axisTick: { show: false }
+    },
+    yAxis: { type: 'value', show: false },
+    series: [
+      { name: '输入', type: 'bar', data: days.map(d => d.tokensIn), stack: 'total', itemStyle: { color: inputColor, borderRadius: [0, 0, 0, 0] }, barMaxWidth: 14 },
+      { name: '输出', type: 'bar', data: days.map(d => d.tokensOut), stack: 'total', itemStyle: { color: outputColor, borderRadius: [0, 0, 0, 0] }, barMaxWidth: 14 }
+    ]
+  };
 };
 
 onMounted(async () => {
@@ -1852,6 +2044,7 @@ watch(activeTab, (tab) => {
   }
   if (tab === 'notifications') {
     if (isAuthenticated.value) {
+      fetchAppSettings();
       fetchNotificationConfigs();
       fetchNotifLogs(1);
     }
@@ -2224,11 +2417,14 @@ onUnmounted(() => {
               <ArrowUpDown class="w-4 h-4" :class="providerSortOrder === 'desc' ? 'rotate-180' : ''" />
             </button>
             <div class="flex ml-auto gap-1 bg-gray-100 rounded-lg p-0.5">
-              <button @click="providerViewMode = 'grid'; persistViewMode()" class="p-1.5 rounded-md transition-colors" :class="providerViewMode === 'grid' ? 'bg-white shadow text-blue-600' : 'text-gray-400 hover:text-gray-600'">
+              <button @click="providerViewMode = 'grid'; persistViewMode()" class="p-1.5 rounded-md transition-colors" :class="providerViewMode === 'grid' ? 'bg-white shadow text-blue-600' : 'text-gray-400 hover:text-gray-600'" title="网格视图">
                 <LayoutGrid class="w-4 h-4" />
               </button>
-              <button @click="providerViewMode = 'list'; persistViewMode()" class="p-1.5 rounded-md transition-colors" :class="providerViewMode === 'list' ? 'bg-white shadow text-blue-600' : 'text-gray-400 hover:text-gray-600'">
+              <button @click="providerViewMode = 'list'; persistViewMode()" class="p-1.5 rounded-md transition-colors" :class="providerViewMode === 'list' ? 'bg-white shadow text-blue-600' : 'text-gray-400 hover:text-gray-600'" title="列表视图">
                 <List class="w-4 h-4" />
+              </button>
+              <button @click="providerViewMode = 'usage'; persistViewMode(); fetchProviderUsage()" class="p-1.5 rounded-md transition-colors" :class="providerViewMode === 'usage' ? 'bg-white shadow text-blue-600' : 'text-gray-400 hover:text-gray-600'" title="用量视图">
+                <BarChart3 class="w-4 h-4" />
               </button>
             </div>
           </div>
@@ -2379,6 +2575,78 @@ onUnmounted(() => {
             </div>
             <div v-if="!providers.length" class="text-center py-12 text-gray-400 text-sm">
               暂无厂商
+            </div>
+          </div>
+
+          <!-- Usage view -->
+          <div v-if="!showRecycleBin && providerViewMode === 'usage'" class="space-y-4">
+            <div v-if="providerUsageLoading" class="flex justify-center py-12">
+              <Loader2 class="w-8 h-8 animate-spin text-blue-500" />
+            </div>
+            <div v-else-if="!providers.length" class="text-center py-12 bg-white rounded-xl border border-gray-200 shadow-sm text-gray-400 text-sm">
+              暂无厂商
+            </div>
+            <div v-else class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+              <div v-for="p in providers" :key="p.id"
+                   :class="['bg-white rounded-xl border border-gray-200 shadow-sm p-5 space-y-3', showAllModels[p.id] ? 'max-h-none overflow-visible' : 'h-80 overflow-hidden']">
+                <div class="flex items-start justify-between gap-2">
+                  <div class="min-w-0">
+                    <h4 class="font-bold text-base truncate">{{ p.name }}</h4>
+                    <div class="flex items-center gap-2 mt-1 flex-wrap">
+                      <span v-if="providerUsageData[p.id]?.vendor" :class="vendorColor(providerUsageData[p.id]?.vendor) + ' shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium'">{{ vendorLabel(providerUsageData[p.id]?.vendor) }}</span>
+                    </div>
+                  </div>
+                  <span v-if="providerUsageData[p.id]?.updatedAt" class="text-[10px] text-gray-400 shrink-0">{{ timeAgo(providerUsageData[p.id].updatedAt) }}</span>
+                </div>
+
+                <div v-if="providerUsageData[p.id]?.daily?.length" class="space-y-0.5 text-xs text-gray-500">
+                  <div class="flex items-center gap-2"><span class="text-gray-400 w-10 shrink-0">请求</span>{{ providerUsageData[p.id].summary.requests }} 次</div>
+                  <div class="flex items-center gap-2"><span class="text-gray-400 w-10 shrink-0">输入</span>{{ formatTokens(providerUsageData[p.id].summary.tokensIn) }} tokens</div>
+                  <div class="flex items-center gap-2"><span class="text-gray-400 w-10 shrink-0">输出</span>{{ formatTokens(providerUsageData[p.id].summary.tokensOut) }} tokens</div>
+                </div>
+                <div v-else class="text-xs text-gray-400 py-4 text-center">暂无用量数据</div>
+
+                <!-- Vendor-specific data -->
+                <div v-if="providerUsageData[p.id]?.vendorData" class="space-y-1.5">
+                  <div v-if="providerUsageData[p.id].vendorData.balance" class="flex items-center gap-2 text-xs">
+                    <span class="text-gray-400 w-10 shrink-0">余额</span><span class="font-bold text-green-600">${{ providerUsageData[p.id].vendorData.balance }}</span>
+                  </div>
+                  <div v-if="providerUsageData[p.id].vendorData.monthlyCost" class="flex items-center gap-2 text-xs">
+                    <span class="text-gray-400 w-10 shrink-0">月消费</span><span class="font-bold text-orange-600">${{ providerUsageData[p.id].vendorData.monthlyCost }}</span>
+                  </div>
+                  <div v-if="providerUsageData[p.id].vendorData.quotaLabel" class="flex items-center gap-2 text-xs">
+                    <span class="text-gray-400 w-10 shrink-0">{{ providerUsageData[p.id].vendorData.quotaLabel }}</span>
+                    <div class="flex-1 h-2 bg-gray-100 rounded-full overflow-hidden">
+                      <div class="h-full rounded-full bg-blue-500" :style="{ width: Math.min(100, providerUsageData[p.id].vendorData.used / providerUsageData[p.id].vendorData.limit * 100) + '%' }"></div>
+                    </div>
+                    <span class="text-gray-500 shrink-0">{{ formatTokens(providerUsageData[p.id].vendorData.used) }}/{{ formatTokens(providerUsageData[p.id].vendorData.limit) }}</span>
+                  </div>
+                </div>
+
+                <div v-if="providerUsageData[p.id]?.daily?.length" style="height:110px">
+                  <v-chart :option="usageChartOption(providerUsageData[p.id])" autoresize style="height:110px" />
+                </div>
+
+                <div v-if="providerUsageData[p.id]?.summary?.models?.length" class="space-y-1 pt-2 border-t border-gray-100">
+                  <div v-for="(m, i) in providerUsageData[p.id].summary.models"
+                       :key="m.name"
+                       v-show="showAllModels[p.id] || i < 3"
+                       class="flex justify-between gap-2 text-[10px] text-gray-500">
+                    <span class="font-mono truncate min-w-0">{{ m.name }}</span>
+                    <span class="shrink-0 whitespace-nowrap">{{ formatTokens(m.tokensIn) }} in / {{ formatTokens(m.tokensOut) }} out</span>
+                  </div>
+                  <button v-if="!showAllModels[p.id] && providerUsageData[p.id].summary.models.length > 3"
+                          @click="showAllModels[p.id] = true"
+                          class="text-[10px] text-blue-600 font-medium hover:underline mt-0.5">
+                    + {{ providerUsageData[p.id].summary.models.length - 3 }} 个更多 ▸
+                  </button>
+                  <button v-else-if="showAllModels[p.id]"
+                          @click="showAllModels[p.id] = false"
+                          class="text-[10px] text-blue-600 font-medium hover:underline mt-0.5">
+                    ▸ 收起
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -2884,15 +3152,15 @@ onUnmounted(() => {
         </div>
 
         <!-- Stats View -->
-        <div v-if="activeTab === 'stats'" class="space-y-8">
-          <div class="relative overflow-hidden rounded-2xl border border-slate-200/90 bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 p-6 text-white shadow-xl shadow-slate-900/15 sm:p-8">
+        <div v-if="activeTab === 'stats'" class="space-y-6">
+          <div class="relative overflow-hidden rounded-xl border border-gray-200 bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900 p-6 text-white shadow-xl shadow-gray-900/15 sm:p-8">
             <div class="pointer-events-none absolute -right-24 -top-24 h-64 w-64 rounded-full bg-cyan-500/15 blur-3xl" />
             <div class="pointer-events-none absolute -bottom-20 -left-16 h-56 w-56 rounded-full bg-indigo-500/10 blur-3xl" />
             <div class="relative flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
               <div class="max-w-xl">
-                <p class="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">Analytics</p>
+                <p class="text-[11px] font-semibold uppercase tracking-[0.22em] text-gray-400">Analytics</p>
                 <h3 class="mt-1.5 text-2xl font-bold tracking-tight sm:text-3xl">使用统计</h3>
-                <p class="mt-2 text-sm leading-relaxed text-slate-400">请求量、错误与 Token 消耗趋势；可按时间范围筛选，厂商筛选影响下方图表（热力图除外）。</p>
+                <p class="mt-2 text-sm leading-relaxed text-gray-400">请求量、错误与 Token 消耗趋势；可按时间范围筛选，厂商筛选影响下方图表（热力图除外）。</p>
               </div>
               <button
                 type="button"
@@ -2928,8 +3196,8 @@ onUnmounted(() => {
                   :class="[
                     'rounded-lg px-3 py-2 text-xs font-semibold transition',
                     statsRange === '7d'
-                      ? 'bg-white text-slate-900 shadow-sm'
-                      : 'text-slate-300 hover:bg-white/10 hover:text-white'
+                      ? 'bg-white text-gray-900 shadow-sm'
+                      : 'text-gray-300 hover:bg-white/10 hover:text-white'
                   ]"
                 >
                   7 天
@@ -2940,8 +3208,8 @@ onUnmounted(() => {
                   :class="[
                     'rounded-lg px-3 py-2 text-xs font-semibold transition',
                     statsRange === '30d'
-                      ? 'bg-white text-slate-900 shadow-sm'
-                      : 'text-slate-300 hover:bg-white/10 hover:text-white'
+                      ? 'bg-white text-gray-900 shadow-sm'
+                      : 'text-gray-300 hover:bg-white/10 hover:text-white'
                   ]"
                 >
                   30 天
@@ -2952,8 +3220,8 @@ onUnmounted(() => {
                   :class="[
                     'rounded-lg px-3 py-2 text-xs font-semibold transition',
                     statsRange === '90d'
-                      ? 'bg-white text-slate-900 shadow-sm'
-                      : 'text-slate-300 hover:bg-white/10 hover:text-white'
+                      ? 'bg-white text-gray-900 shadow-sm'
+                      : 'text-gray-300 hover:bg-white/10 hover:text-white'
                   ]"
                 >
                   90 天
@@ -2964,316 +3232,316 @@ onUnmounted(() => {
                   :class="[
                     'rounded-lg px-3 py-2 text-xs font-semibold transition',
                     statsRange === 'all'
-                      ? 'bg-white text-slate-900 shadow-sm'
-                      : 'text-slate-300 hover:bg-white/10 hover:text-white'
+                      ? 'bg-white text-gray-900 shadow-sm'
+                      : 'text-gray-300 hover:bg-white/10 hover:text-white'
                   ]"
                 >
                   全部
                 </button>
               </div>
               <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
-                <label class="flex items-center gap-2 text-xs font-medium text-slate-300">
+                <label class="flex items-center gap-2 text-xs font-medium text-gray-300">
                   <span class="whitespace-nowrap">厂商</span>
                   <select
                     v-model="statsProviderId"
-                    class="min-w-[8rem] rounded-lg border border-white/15 bg-slate-900/40 px-3 py-2 text-xs font-semibold text-white outline-none ring-0 focus:border-cyan-400/50"
+                    class="min-w-[8rem] rounded-lg border border-white/15 bg-gray-900/40 px-3 py-2 text-xs font-semibold text-white outline-none ring-0 focus:border-cyan-400/50"
                   >
-                    <option value="all" class="text-slate-900">全部</option>
-                    <option v-for="p in providers" :key="p.id" :value="p.id" class="text-slate-900">{{ p.name }}</option>
+                    <option value="all" class="text-gray-900">全部</option>
+                    <option v-for="p in providers" :key="p.id" :value="p.id" class="text-gray-900">{{ p.name }}</option>
                   </select>
                 </label>
-                <span class="text-[11px] text-slate-500">热力图不受厂商筛选影响</span>
+                <span class="text-[11px] text-gray-500">热力图不受厂商筛选影响</span>
               </div>
               <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-4">
-                <label class="flex items-center gap-2 text-xs font-medium text-slate-300">
+                <label class="flex items-center gap-2 text-xs font-medium text-gray-300">
                   <span class="whitespace-nowrap">类型</span>
                   <select
                     v-model="statsIsStream"
-                    class="min-w-[7rem] rounded-lg border border-white/15 bg-slate-900/40 px-3 py-2 text-xs font-semibold text-white outline-none ring-0 focus:border-cyan-400/50"
+                    class="min-w-[7rem] rounded-lg border border-white/15 bg-gray-900/40 px-3 py-2 text-xs font-semibold text-white outline-none ring-0 focus:border-cyan-400/50"
                   >
-                    <option value="all" class="text-slate-900">全部</option>
-                    <option value="1" class="text-slate-900">流式</option>
-                    <option value="0" class="text-slate-900">非流式</option>
+                    <option value="all" class="text-gray-900">全部</option>
+                    <option value="1" class="text-gray-900">流式</option>
+                    <option value="0" class="text-gray-900">非流式</option>
                   </select>
                 </label>
-                <label class="flex items-center gap-2 text-xs font-medium text-slate-300">
+                <label class="flex items-center gap-2 text-xs font-medium text-gray-300">
                   <span class="whitespace-nowrap">协议</span>
                   <select
                     v-model="statsClientProtocol"
-                    class="min-w-[7rem] rounded-lg border border-white/15 bg-slate-900/40 px-3 py-2 text-xs font-semibold text-white outline-none ring-0 focus:border-cyan-400/50"
+                    class="min-w-[7rem] rounded-lg border border-white/15 bg-gray-900/40 px-3 py-2 text-xs font-semibold text-white outline-none ring-0 focus:border-cyan-400/50"
                   >
-                    <option value="all" class="text-slate-900">全部</option>
-                    <option value="openai" class="text-slate-900">OpenAI</option>
-                    <option value="anthropic" class="text-slate-900">Anthropic</option>
+                    <option value="all" class="text-gray-900">全部</option>
+                    <option value="openai" class="text-gray-900">OpenAI</option>
+                    <option value="anthropic" class="text-gray-900">Anthropic</option>
                   </select>
                 </label>
               </div>
             </div>
           </div>
 
-          <div v-if="statsLoading" class="flex min-h-[220px] flex-col items-center justify-center gap-4 rounded-2xl border border-slate-200/90 bg-slate-50/80 p-12 text-slate-600">
+          <div v-if="statsLoading" class="flex min-h-[220px] flex-col items-center justify-center gap-4 rounded-xl border border-gray-200 bg-gray-50/80 p-12 text-gray-600">
             <Loader2 class="h-8 w-8 animate-spin text-cyan-600" />
             <p class="text-sm font-medium">正在加载统计数据…</p>
           </div>
 
           <div v-else class="space-y-8">
             <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-6">
-              <div class="group relative overflow-hidden rounded-2xl border border-slate-200/90 bg-white p-5 shadow-sm transition hover:border-slate-300 hover:shadow-md">
+              <div class="group relative overflow-hidden rounded-xl border border-gray-200 bg-white p-5 shadow-sm transition hover:border-gray-300 hover:shadow-md">
                 <div class="flex items-start justify-between gap-3">
                   <div class="rounded-xl bg-blue-50 p-2.5 text-blue-600">
                     <Activity class="h-5 w-5" />
                   </div>
                 </div>
-                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-slate-500">请求数</p>
-                <p class="mt-1 text-3xl font-bold tabular-nums tracking-tight text-slate-900">{{ statsSummary ? formatNumber(statsSummary.requestCount) : '—' }}</p>
+                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-gray-500">请求数</p>
+                <p class="mt-1 text-3xl font-bold tabular-nums tracking-tight text-gray-900">{{ statsSummary ? formatNumber(statsSummary.requestCount) : '—' }}</p>
               </div>
-              <div class="group relative overflow-hidden rounded-2xl border border-slate-200/90 bg-white p-5 shadow-sm transition hover:border-slate-300 hover:shadow-md">
+              <div class="group relative overflow-hidden rounded-xl border border-gray-200 bg-white p-5 shadow-sm transition hover:border-gray-300 hover:shadow-md">
                 <div class="flex items-start justify-between gap-3">
                   <div class="rounded-xl bg-rose-50 p-2.5 text-rose-600">
                     <AlertTriangle class="h-5 w-5" />
                   </div>
                 </div>
-                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-slate-500">错误数</p>
+                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-gray-500">错误数</p>
                 <p class="mt-1 text-3xl font-bold tabular-nums tracking-tight text-rose-600">{{ statsSummary ? formatNumber(statsSummary.errorCount) : '—' }}</p>
               </div>
-              <div class="group relative overflow-hidden rounded-2xl border border-slate-200/90 bg-white p-5 shadow-sm transition hover:border-slate-300 hover:shadow-md">
+              <div class="group relative overflow-hidden rounded-xl border border-gray-200 bg-white p-5 shadow-sm transition hover:border-gray-300 hover:shadow-md">
                 <div class="flex items-start justify-between gap-3">
                   <div class="rounded-xl bg-amber-50 p-2.5 text-amber-600">
                     <Percent class="h-5 w-5" />
                   </div>
                 </div>
-                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-slate-500">错误率</p>
+                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-gray-500">错误率</p>
                 <p class="mt-1 text-3xl font-bold tabular-nums tracking-tight text-amber-600">{{ statsSummary ? (statsSummary.errorRate * 100).toFixed(2) + '%' : '—' }}</p>
               </div>
-              <div class="group relative overflow-hidden rounded-2xl border border-slate-200/90 bg-white p-5 shadow-sm transition hover:border-slate-300 hover:shadow-md">
+              <div class="group relative overflow-hidden rounded-xl border border-gray-200 bg-white p-5 shadow-sm transition hover:border-gray-300 hover:shadow-md">
                 <div class="flex items-start justify-between gap-3">
                   <div class="rounded-xl bg-cyan-50 p-2.5 text-cyan-600">
                     <Download class="h-5 w-5" />
                   </div>
                 </div>
-                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-slate-500">Tokens 入</p>
+                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-gray-500">Tokens 入</p>
                 <p class="mt-1 text-3xl font-bold tabular-nums tracking-tight text-cyan-700">{{ statsSummary ? formatNumber(statsSummary.tokensInTotal) : '—' }}</p>
               </div>
-              <div class="group relative overflow-hidden rounded-2xl border border-slate-200/90 bg-white p-5 shadow-sm transition hover:border-slate-300 hover:shadow-md">
+              <div class="group relative overflow-hidden rounded-xl border border-gray-200 bg-white p-5 shadow-sm transition hover:border-gray-300 hover:shadow-md">
                 <div class="flex items-start justify-between gap-3">
                   <div class="rounded-xl bg-teal-50 p-2.5 text-teal-600">
                     <Upload class="h-5 w-5" />
                   </div>
                 </div>
-                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-slate-500">Tokens 出</p>
+                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-gray-500">Tokens 出</p>
                 <p class="mt-1 text-3xl font-bold tabular-nums tracking-tight text-teal-700">{{ statsSummary ? formatNumber(statsSummary.tokensOutTotal) : '—' }}</p>
               </div>
-              <div class="group relative overflow-hidden rounded-2xl border border-slate-200/90 bg-white p-5 shadow-sm transition hover:border-slate-300 hover:shadow-md sm:col-span-2 xl:col-span-1">
+              <div class="group relative overflow-hidden rounded-xl border border-gray-200 bg-white p-5 shadow-sm transition hover:border-gray-300 hover:shadow-md sm:col-span-2 xl:col-span-1">
                 <div class="flex items-start justify-between gap-3">
                   <div class="rounded-xl bg-emerald-50 p-2.5 text-emerald-600">
                     <Timer class="h-5 w-5" />
                   </div>
                 </div>
-                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-slate-500">平均耗时</p>
+                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-gray-500">平均耗时</p>
                 <p class="mt-1 text-3xl font-bold tabular-nums tracking-tight text-emerald-700">{{ statsSummary ? formatMs(statsSummary.avgLatencyMs) : '—' }}</p>
               </div>
             </div>
 
             <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-              <div class="group relative overflow-hidden rounded-2xl border border-slate-200/90 bg-white p-5 shadow-sm transition hover:border-slate-300 hover:shadow-md">
+              <div class="group relative overflow-hidden rounded-xl border border-gray-200 bg-white p-5 shadow-sm transition hover:border-gray-300 hover:shadow-md">
                 <div class="flex items-start justify-between gap-3">
                   <div class="rounded-xl bg-violet-50 p-2.5 text-violet-600">
                     <Radio class="h-5 w-5" />
                   </div>
                 </div>
-                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-slate-500">流式请求</p>
+                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-gray-500">流式请求</p>
                 <p class="mt-1 text-3xl font-bold tabular-nums tracking-tight text-violet-700">{{ statsSummary ? formatNumber(statsSummary.streamCount) : '—' }}</p>
               </div>
-              <div class="group relative overflow-hidden rounded-2xl border border-slate-200/90 bg-white p-5 shadow-sm transition hover:border-slate-300 hover:shadow-md">
+              <div class="group relative overflow-hidden rounded-xl border border-gray-200 bg-white p-5 shadow-sm transition hover:border-gray-300 hover:shadow-md">
                 <div class="flex items-start justify-between gap-3">
                   <div class="rounded-xl bg-purple-50 p-2.5 text-purple-600">
                     <Gauge class="h-5 w-5" />
                   </div>
                 </div>
-                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-slate-500">TTFB 平均</p>
+                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-gray-500">TTFB 平均</p>
                 <p class="mt-1 text-3xl font-bold tabular-nums tracking-tight text-purple-700">{{ statsSummary ? formatMs(statsSummary.ttfbAvgMs) : '—' }}</p>
               </div>
-              <div class="group relative overflow-hidden rounded-2xl border border-slate-200/90 bg-white p-5 shadow-sm transition hover:border-slate-300 hover:shadow-md">
+              <div class="group relative overflow-hidden rounded-xl border border-gray-200 bg-white p-5 shadow-sm transition hover:border-gray-300 hover:shadow-md">
                 <div class="flex items-start justify-between gap-3">
                   <div class="rounded-xl bg-sky-50 p-2.5 text-sky-600">
                     <HardDrive class="h-5 w-5" />
                   </div>
                 </div>
-                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-slate-500">数据传输</p>
+                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-gray-500">数据传输</p>
                 <p class="mt-1 text-3xl font-bold tabular-nums tracking-tight text-sky-700">{{ statsSummary ? formatBytes(statsSummary.responseBytesTotal) : '—' }}</p>
               </div>
-              <div class="group relative overflow-hidden rounded-2xl border border-slate-200/90 bg-white p-5 shadow-sm transition hover:border-slate-300 hover:shadow-md">
+              <div class="group relative overflow-hidden rounded-xl border border-gray-200 bg-white p-5 shadow-sm transition hover:border-gray-300 hover:shadow-md">
                 <div class="flex items-start justify-between gap-3">
                   <div class="rounded-xl bg-orange-50 p-2.5 text-orange-600">
                     <WifiOff class="h-5 w-5" />
                   </div>
                 </div>
-                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-slate-500">流中断率</p>
+                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-gray-500">流中断率</p>
                 <p class="mt-1 text-3xl font-bold tabular-nums tracking-tight text-orange-700">{{ statsSummary ? (statsSummary.streamBrokenRate * 100).toFixed(2) + '%' : '—' }}</p>
               </div>
             </div>
 
-            <div v-if="statsSummary?.latencyPercentiles || statsSummary?.ttfbPercentiles" class="flex flex-wrap gap-4 rounded-2xl border border-slate-200/90 bg-white p-5 shadow-sm">
+            <div v-if="statsSummary?.latencyPercentiles || statsSummary?.ttfbPercentiles" class="flex flex-wrap gap-4 rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
               <template v-if="statsSummary?.latencyPercentiles">
-                <span class="text-xs font-semibold uppercase tracking-wide text-slate-400 self-center">延迟分位数</span>
+                <span class="text-xs font-semibold uppercase tracking-wide text-gray-400 self-center">延迟分位数</span>
                 <span class="inline-flex items-center rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700">P50 {{ formatMs(statsSummary.latencyPercentiles.p50) }}</span>
                 <span class="inline-flex items-center rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700">P90 {{ formatMs(statsSummary.latencyPercentiles.p90) }}</span>
                 <span class="inline-flex items-center rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700">P99 {{ formatMs(statsSummary.latencyPercentiles.p99) }}</span>
               </template>
               <template v-if="statsSummary?.ttfbPercentiles">
-                <span class="text-xs font-semibold uppercase tracking-wide text-slate-400 self-center ml-4">TTFB 分位数</span>
+                <span class="text-xs font-semibold uppercase tracking-wide text-gray-400 self-center ml-4">TTFB 分位数</span>
                 <span class="inline-flex items-center rounded-full bg-purple-50 px-3 py-1 text-xs font-medium text-purple-700">P50 {{ formatMs(statsSummary.ttfbPercentiles.p50) }}</span>
                 <span class="inline-flex items-center rounded-full bg-purple-50 px-3 py-1 text-xs font-medium text-purple-700">P90 {{ formatMs(statsSummary.ttfbPercentiles.p90) }}</span>
                 <span class="inline-flex items-center rounded-full bg-purple-50 px-3 py-1 text-xs font-medium text-purple-700">P99 {{ formatMs(statsSummary.ttfbPercentiles.p99) }}</span>
               </template>
             </div>
 
-            <div class="rounded-2xl border border-slate-200/90 bg-white p-6 shadow-sm">
+            <div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
               <div class="mb-5 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                 <div class="flex items-center gap-2">
-                  <span class="flex h-9 w-9 items-center justify-center rounded-xl bg-slate-900 text-white">
+                  <span class="flex h-9 w-9 items-center justify-center rounded-xl bg-gray-900 text-white">
                     <BarChart3 class="h-4 w-4" />
                   </span>
                   <div>
-                    <h3 class="text-sm font-semibold text-slate-900">活跃热力图</h3>
-                    <p class="text-xs text-slate-500">按天请求量分布（近一年）</p>
+                    <h3 class="text-sm font-semibold text-gray-900">活跃热力图</h3>
+                    <p class="text-xs text-gray-500">按天请求量分布（近一年）</p>
                   </div>
                 </div>
-                <span class="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-600">
+                <span class="inline-flex items-center rounded-full border border-gray-200 bg-gray-50 px-3 py-1 text-xs font-medium text-gray-600">
                   活跃天数 {{ statsSummary ? statsSummary.activeDays : '—' }}
                 </span>
               </div>
               <VChart :option="heatmapOption" autoresize class="h-52" />
-              <div class="mt-4 flex flex-wrap items-center justify-center gap-2 text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+              <div class="mt-4 flex flex-wrap items-center justify-center gap-2 text-[10px] font-semibold uppercase tracking-wide text-gray-400">
                 <span>少</span>
-                <span class="h-3 w-3 rounded-sm border border-slate-200/80" style="background:#ebedf0" title="0 次"></span>
-                <span class="h-3 w-3 rounded-sm border border-slate-200/80" style="background:#9be9a8" title="1–4 次"></span>
-                <span class="h-3 w-3 rounded-sm border border-slate-200/80" style="background:#40c463" title="5–9 次"></span>
-                <span class="h-3 w-3 rounded-sm border border-slate-200/80" style="background:#30a14e" title="10–19 次"></span>
-                <span class="h-3 w-3 rounded-sm border border-slate-200/80" style="background:#216e39" title="≥ 20 次"></span>
+                <span class="h-3 w-3 rounded-sm border border-gray-200 bg-gray-100" title="0 次"></span>
+                <span class="h-3 w-3 rounded-sm border border-gray-200" style="background:#9be9a8" title="1–4 次"></span>
+                <span class="h-3 w-3 rounded-sm border border-gray-200" style="background:#40c463" title="5–9 次"></span>
+                <span class="h-3 w-3 rounded-sm border border-gray-200" style="background:#30a14e" title="10–19 次"></span>
+                <span class="h-3 w-3 rounded-sm border border-gray-200" style="background:#216e39" title="≥ 20 次"></span>
                 <span>多</span>
               </div>
             </div>
 
-            <div class="grid grid-cols-1 gap-6 sm:grid-cols-2 xl:grid-cols-3">
-              <div class="rounded-2xl border border-slate-200/90 bg-white p-6 shadow-sm">
+            <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+              <div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
                 <div class="mb-4 flex items-center gap-2">
-                  <TrendingUp class="h-4 w-4 text-slate-400" />
-                  <h3 class="text-sm font-semibold text-slate-900">请求与错误趋势</h3>
+                  <TrendingUp class="h-4 w-4 text-gray-400" />
+                  <h3 class="text-sm font-semibold text-gray-900">请求与错误趋势</h3>
                 </div>
                 <VChart :option="requestsOption" autoresize class="h-64" />
               </div>
-              <div class="rounded-2xl border border-slate-200/90 bg-white p-6 shadow-sm">
+              <div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
                 <div class="mb-4 flex items-center gap-2">
                   <AlertTriangle class="h-4 w-4 text-rose-400" />
-                  <h3 class="text-sm font-semibold text-slate-900">错误率趋势</h3>
+                  <h3 class="text-sm font-semibold text-gray-900">错误率趋势</h3>
                 </div>
                 <VChart :option="errorRateOption" autoresize class="h-64" />
               </div>
-              <div class="rounded-2xl border border-slate-200/90 bg-white p-6 shadow-sm">
+              <div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
                 <div class="mb-4 flex items-center gap-2">
-                  <Zap class="h-4 w-4 text-slate-400" />
-                  <h3 class="text-sm font-semibold text-slate-900">Tokens 趋势</h3>
+                  <Zap class="h-4 w-4 text-gray-400" />
+                  <h3 class="text-sm font-semibold text-gray-900">Tokens 趋势</h3>
                 </div>
                 <VChart :option="tokensOption" autoresize class="h-64" />
               </div>
-              <div class="rounded-2xl border border-slate-200/90 bg-white p-6 shadow-sm">
+              <div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
                 <div class="mb-4 flex items-center gap-2">
-                  <Timer class="h-4 w-4 text-slate-400" />
-                  <h3 class="text-sm font-semibold text-slate-900">延迟与 TTFB</h3>
+                  <Timer class="h-4 w-4 text-gray-400" />
+                  <h3 class="text-sm font-semibold text-gray-900">延迟与 TTFB</h3>
                 </div>
                 <VChart :option="latencyTtfbOption" autoresize class="h-64" />
               </div>
-              <div class="rounded-2xl border border-slate-200/90 bg-white p-6 shadow-sm">
+              <div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
                 <div class="mb-4 flex items-center gap-2">
-                  <Cpu class="h-4 w-4 text-slate-400" />
-                  <h3 class="text-sm font-semibold text-slate-900">模型占比（按 Tokens）</h3>
+                  <Cpu class="h-4 w-4 text-gray-400" />
+                  <h3 class="text-sm font-semibold text-gray-900">模型占比（按 Tokens）</h3>
                 </div>
                 <VChart :option="modelPieOption" autoresize class="h-64" />
               </div>
-              <div class="rounded-2xl border border-slate-200/90 bg-white p-6 shadow-sm">
+              <div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
                 <div class="mb-4 flex items-center gap-2">
-                  <ArrowRightLeft class="h-4 w-4 text-slate-400" />
-                  <h3 class="text-sm font-semibold text-slate-900">协议分布（按 Tokens）</h3>
+                  <ArrowRightLeft class="h-4 w-4 text-gray-400" />
+                  <h3 class="text-sm font-semibold text-gray-900">协议分布（按 Tokens）</h3>
                 </div>
                 <VChart :option="protocolPieOption" autoresize class="h-64" />
               </div>
             </div>
 
-            <div class="grid grid-cols-1 gap-6 sm:grid-cols-2">
-              <div class="rounded-2xl border border-slate-200/90 bg-white p-6 shadow-sm">
+            <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
                 <div class="mb-4 flex items-center gap-2">
                   <AlertTriangle class="h-4 w-4 text-rose-400" />
-                  <h3 class="text-sm font-semibold text-slate-900">错误分类</h3>
+                  <h3 class="text-sm font-semibold text-gray-900">错误分类</h3>
                 </div>
                 <VChart :option="errorCategoryPieOption" autoresize class="h-64" />
               </div>
-              <div class="rounded-2xl border border-slate-200/90 bg-white p-6 shadow-sm">
+              <div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
                 <div class="mb-4 flex items-center gap-2">
-                  <Radio class="h-4 w-4 text-slate-400" />
-                  <h3 class="text-sm font-semibold text-slate-900">流式类型分布（按 Tokens）</h3>
+                  <Radio class="h-4 w-4 text-gray-400" />
+                  <h3 class="text-sm font-semibold text-gray-900">流式类型分布（按 Tokens）</h3>
                 </div>
                 <VChart :option="streamPieOption" autoresize class="h-64" />
               </div>
             </div>
 
-            <div class="grid grid-cols-1 gap-6 xl:grid-cols-2">
-              <div class="overflow-hidden rounded-2xl border border-slate-200/90 bg-white shadow-sm">
-                <div class="flex items-center justify-between border-b border-slate-100 bg-slate-50/80 px-5 py-4">
-                  <h3 class="text-sm font-semibold text-slate-900">慢请求 Top 10</h3>
-                  <span class="text-xs text-slate-500">按耗时降序</span>
+            <div class="grid grid-cols-1 gap-4 xl:grid-cols-2">
+              <div class="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+                <div class="flex items-center justify-between border-b border-gray-100 bg-gray-50/80 px-5 py-4">
+                  <h3 class="text-sm font-semibold text-gray-900">慢请求 Top 10</h3>
+                  <span class="text-xs text-gray-500">按耗时降序</span>
                 </div>
                 <div class="overflow-x-auto">
                   <table class="w-full min-w-[640px] text-left text-sm">
                     <thead>
-                      <tr class="border-b border-slate-100 bg-white text-xs font-semibold uppercase tracking-wide text-slate-500">
+                      <tr class="border-b border-gray-100 bg-white text-xs font-semibold uppercase tracking-wide text-gray-500">
                         <th class="px-5 py-3">应用</th>
                         <th class="px-5 py-3">厂商</th>
                         <th class="px-5 py-3">模型</th>
                         <th class="px-5 py-3 text-right">耗时</th>
                       </tr>
                     </thead>
-                    <tbody class="divide-y divide-slate-100">
-                      <tr v-for="row in (statsData?.top?.slow || [])" :key="row.id" class="transition hover:bg-slate-50/80">
-                        <td class="px-5 py-3 font-medium text-slate-800">{{ row.appName }}</td>
-                        <td class="px-5 py-3 text-slate-600">{{ row.providerName }}</td>
-                        <td class="px-5 py-3 font-mono text-xs text-slate-600">
+                    <tbody class="divide-y divide-gray-100">
+                      <tr v-for="row in (statsData?.top?.slow || [])" :key="row.id" class="transition hover:bg-gray-50/80">
+                        <td class="px-5 py-3 font-medium text-gray-800">{{ row.appName }}</td>
+                        <td class="px-5 py-3 text-gray-600">{{ row.providerName }}</td>
+                        <td class="px-5 py-3 font-mono text-xs text-gray-600 max-w-[160px] truncate">
                           <span v-if="!row.actualModel || row.requestedModel === row.actualModel">{{ row.requestedModel }}</span>
                           <span v-else>{{ row.requestedModel }} → {{ row.actualModel }}</span>
                         </td>
                         <td class="px-5 py-3 text-right font-mono text-xs font-bold text-rose-600">{{ formatMs(row.latencyMs) }}</td>
                       </tr>
                       <tr v-if="!(statsData?.top?.slow || []).length">
-                        <td colspan="4" class="px-5 py-10 text-center text-sm text-slate-400">暂无数据</td>
+                        <td colspan="4" class="px-5 py-10 text-center text-sm text-gray-400">暂无数据</td>
                       </tr>
                     </tbody>
                   </table>
                 </div>
               </div>
-              <div class="overflow-hidden rounded-2xl border border-slate-200/90 bg-white shadow-sm">
-                <div class="flex items-center justify-between border-b border-slate-100 bg-slate-50/80 px-5 py-4">
-                  <h3 class="text-sm font-semibold text-slate-900">错误 Top 10</h3>
-                  <span class="text-xs text-slate-500">最近错误记录</span>
+              <div class="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+                <div class="flex items-center justify-between border-b border-gray-100 bg-gray-50/80 px-5 py-4">
+                  <h3 class="text-sm font-semibold text-gray-900">错误 Top 10</h3>
+                  <span class="text-xs text-gray-500">最近错误记录</span>
                 </div>
                 <div class="overflow-x-auto">
                   <table class="w-full min-w-[700px] text-left text-sm">
                     <thead>
-                      <tr class="border-b border-slate-100 bg-white text-xs font-semibold uppercase tracking-wide text-slate-500">
+                      <tr class="border-b border-gray-100 bg-white text-xs font-semibold uppercase tracking-wide text-gray-500">
                         <th class="px-5 py-3">时间</th>
                         <th class="px-5 py-3">应用</th>
                         <th class="px-5 py-3">厂商</th>
                         <th class="px-5 py-3">错误</th>
                       </tr>
                     </thead>
-                    <tbody class="divide-y divide-slate-100">
-                      <tr v-for="row in (statsData?.top?.errors || [])" :key="row.id" class="transition hover:bg-slate-50/80">
-                        <td class="px-5 py-3 font-mono text-xs text-slate-500">{{ formatTime(row.requestAt) }}</td>
-                        <td class="px-5 py-3 font-medium text-slate-800">{{ row.appName }}</td>
-                        <td class="px-5 py-3 text-slate-600">{{ row.providerName }}</td>
-                        <td class="px-5 py-3 font-mono text-[11px] leading-relaxed text-rose-600 break-all">{{ row.errorMessage || '-' }}</td>
+                    <tbody class="divide-y divide-gray-100">
+                      <tr v-for="row in (statsData?.top?.errors || [])" :key="row.id" class="transition hover:bg-gray-50/80">
+                        <td class="px-5 py-3 font-mono text-xs text-gray-500">{{ formatTime(row.requestAt) }}</td>
+                        <td class="px-5 py-3 font-medium text-gray-800">{{ row.appName }}</td>
+                        <td class="px-5 py-3 text-gray-600">{{ row.providerName }}</td>
+                        <td class="px-5 py-3 font-mono text-[11px] leading-relaxed text-rose-600 max-w-[200px] truncate" :title="row.errorMessage || ''">{{ row.errorMessage || '-' }}</td>
                       </tr>
                       <tr v-if="!(statsData?.top?.errors || []).length">
-                        <td colspan="4" class="px-5 py-10 text-center text-sm text-slate-400">暂无数据</td>
+                        <td colspan="4" class="px-5 py-10 text-center text-sm text-gray-400">暂无数据</td>
                       </tr>
                     </tbody>
                   </table>
@@ -3416,6 +3684,37 @@ onUnmounted(() => {
             </div>
           </div>
 
+          <!-- 管理员时区 -->
+          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+            <div class="flex items-center justify-between gap-4">
+              <div class="flex-1">
+                <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">管理员时区</h3>
+                <p class="text-xs text-gray-400 mt-1">所有时间显示将使用此时区（如日志时间、推送详情、更新时间等）。</p>
+              </div>
+              <div class="flex items-center gap-3">
+                <select
+                  v-model="appSettings.timezone"
+                  class="px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none bg-white"
+                >
+                  <option value="Asia/Shanghai">UTC+8 上海</option>
+                  <option value="Asia/Tokyo">UTC+9 东京</option>
+                  <option value="Asia/Seoul">UTC+9 首尔</option>
+                  <option value="Asia/Kolkata">UTC+5:30 加尔各答</option>
+                  <option value="Asia/Dubai">UTC+4 迪拜</option>
+                  <option value="Europe/London">UTC+0 伦敦</option>
+                  <option value="Europe/Paris">UTC+1 巴黎</option>
+                  <option value="Europe/Moscow">UTC+3 莫斯科</option>
+                  <option value="America/New_York">UTC-5 纽约</option>
+                  <option value="America/Chicago">UTC-6 芝加哥</option>
+                  <option value="America/Denver">UTC-7 丹佛</option>
+                  <option value="America/Los_Angeles">UTC-8 洛杉矶</option>
+                  <option value="Pacific/Auckland">UTC+12 奥克兰</option>
+                  <option value="UTC">UTC 协调世界时</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
           <!-- 保存按钮 -->
           <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
             <div class="flex justify-end">
@@ -3435,20 +3734,90 @@ onUnmounted(() => {
 
         <!-- Notifications View -->
         <div v-if="activeTab === 'notifications'" class="space-y-6">
+          <!-- 全局静默通知 -->
+          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+            <div class="flex items-center justify-between gap-3">
+              <div class="min-w-0">
+                <div class="flex items-center flex-wrap gap-2">
+                  <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">全局静默通知</h3>
+                  <span v-if="appSettings.notificationMuteEnabled"
+                        :class="nowInMute ? 'bg-green-100 text-green-700 border-green-200' : 'bg-gray-100 text-gray-500 border-gray-200'"
+                        class="px-2 py-0.5 rounded-full text-[10px] font-medium border whitespace-nowrap">
+                    {{ nowInMute ? '● 静默中' : '○ 非静默时段' }}
+                  </span>
+                </div>
+                <p class="text-xs text-gray-400 mt-1">开启后，指定时段内所有通知暂停发送</p>
+              </div>
+              <label class="relative inline-flex items-center cursor-pointer flex-shrink-0 ml-auto">
+                <input type="checkbox" v-model="appSettings.notificationMuteEnabled" class="sr-only peer" />
+                <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+              </label>
+            </div>
+
+            <!-- 显示模式 -->
+            <div v-if="appSettings.notificationMuteEnabled && !muteEditing" class="pt-4 border-t border-gray-100">
+              <div class="flex items-center justify-between">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="text-xs text-gray-500 font-medium">静默时段</span>
+                  <span class="font-mono font-bold text-gray-800 bg-gray-100 px-2.5 py-1 rounded-lg text-sm">{{ appSettings.notificationMuteStart }}</span>
+                  <span class="text-gray-300">→</span>
+                  <span class="font-mono font-bold text-gray-800 bg-gray-100 px-2.5 py-1 rounded-lg text-sm">{{ appSettings.notificationMuteEnd }}</span>
+                </div>
+                <div class="flex items-center gap-2">
+                  <span v-if="muteSavedToast" class="text-xs text-green-600 font-medium flex-shrink-0">✓ 已保存</span>
+                  <button @click="muteEditing = true" class="flex items-center gap-1 px-3 py-1.5 text-xs text-blue-600 font-medium hover:bg-blue-50 rounded-lg transition-colors">
+                    <Pencil class="w-3 h-3" /> 编辑
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- 编辑模式 -->
+            <div v-if="appSettings.notificationMuteEnabled && muteEditing" class="space-y-4 pt-4 border-t border-gray-100">
+              <div class="flex flex-col sm:flex-row items-start sm:items-center gap-3">
+                <div class="flex items-center gap-2">
+                  <label class="text-xs font-bold text-gray-500 uppercase whitespace-nowrap">开始时间</label>
+                  <input v-model="appSettings.notificationMuteStart" type="time" class="px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none w-32" />
+                </div>
+                <span class="hidden sm:inline text-gray-300 text-xs">→</span>
+                <div class="flex items-center gap-2">
+                  <label class="text-xs font-bold text-gray-500 uppercase whitespace-nowrap">结束时间</label>
+                  <input v-model="appSettings.notificationMuteEnd" type="time" class="px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none w-32" />
+                </div>
+              </div>
+              <p class="text-[10px] text-gray-400">支持跨天时段，如 22:00 → 08:00 将覆盖夜晚到次日早晨</p>
+              <div class="flex justify-end gap-3">
+                <button @click="cancelMuteSettings" class="px-4 py-2 text-sm border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors">取消</button>
+                <button @click="saveMuteSettings" :disabled="appSettingsSaving" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-bold disabled:opacity-50">
+                  {{ appSettingsSaving ? '保存中…' : '保存设置' }}
+                </button>
+              </div>
+            </div>
+          </div>
           <!-- 消息通知配置 -->
           <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
-            <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider mb-4">消息通知配置</h3>
+            <div class="flex items-center justify-between mb-4">
+              <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">消息通知配置</h3>
+              <button @click="openNotifEditor(null)" v-if="editingNotifConfig === undefined" class="flex items-center gap-1 px-3 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-xs font-bold flex-shrink-0">
+                <Plus class="w-3 h-3" /> 添加
+              </button>
+            </div>
             <p class="text-xs text-gray-400 mb-4">为 App Key 配置通知规则，超时时间根据通知类型自动适配。</p>
             <div v-if="notificationConfigs.length > 0" class="space-y-3 mb-4">
-              <div v-for="cfg in notificationConfigs" :key="cfg.id" class="flex items-center justify-between gap-3 p-4 bg-white rounded-xl border border-gray-200 shadow-sm hover:shadow-md transition-shadow">
+              <div v-for="cfg in notificationConfigs" :key="cfg.id"
+                   :class="['flex items-center justify-between gap-3 p-4 bg-white rounded-xl border shadow-sm transition-shadow', cfg.enabled ? 'border-gray-200 hover:shadow-md' : 'border-gray-100 opacity-60']">
                 <div class="flex-1 min-w-0">
                   <div class="flex items-center gap-2">
                     <span class="font-bold text-sm text-gray-800">{{ cfg.name || cfg.clientKeyNames || cfg.clientKeyName || ('App #' + cfg.clientKeyId) }}</span>
-                    <span :class="cfg.enabled ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-400'" class="px-2 py-0.5 rounded text-[10px] font-bold">{{ cfg.enabled ? '启用' : '停用' }}</span>
+                    <span :class="cfg.notificationType === 'error' ? 'bg-red-100 text-red-600 border-red-200' : cfg.notificationType === 'tool_use_confirmation' ? 'bg-amber-100 text-amber-700 border-amber-200' : 'bg-blue-100 text-blue-600 border-blue-200'" class="px-1.5 py-0.5 rounded text-[10px] font-medium border">{{ cfg.notificationType === 'error' ? '错误' : cfg.notificationType === 'tool_use_confirmation' ? '确认' : '完成' }}</span>
+                    <label class="relative inline-flex items-center cursor-pointer" @click.stop>
+                      <input type="checkbox" :checked="cfg.enabled" @change="toggleNotifEnabled(cfg)" class="sr-only peer" />
+                      <div class="w-9 h-5 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-3.5 after:w-3.5 after:transition-all peer-checked:bg-green-500"></div>
+                    </label>
                   </div>
                   <div class="text-xs text-gray-500 mt-0.5 truncate">{{ cfg.webhookUrl || '未配置 URL' }}</div>
                   <div class="text-[10px] text-gray-400 mt-0.5">
-                    {{ cfg.notificationType === 'error' ? '错误通知' : cfg.notificationType === 'tool_use_confirmation' ? '等待确认' : '对话完成' }} · 方法: {{ cfg.httpMethod }} | 等待: {{ (cfg.notificationType === 'error' ? cfg.errorSuppressSeconds : cfg.notificationType === 'tool_use_confirmation' ? cfg.toolUseTimeoutSeconds : cfg.cooldownSeconds) || '?' }}秒
+                    方法: {{ cfg.httpMethod }} | 等待: {{ (cfg.notificationType === 'error' ? cfg.errorSuppressSeconds : cfg.notificationType === 'tool_use_confirmation' ? cfg.toolUseTimeoutSeconds : cfg.cooldownSeconds) || '?' }}秒
                     <span v-if="cfg.filterClientApps && cfg.filterClientApps.length"> | 客户端: {{ cfg.filterClientApps.join(', ') }}</span>
                   </div>
                 </div>
@@ -3458,100 +3827,107 @@ onUnmounted(() => {
                 </div>
               </div>
             </div>
-            <div v-else class="text-xs text-gray-400 mb-4">暂无通知配置，点击下方按钮添加。</div>
-            <div v-if="editingNotifConfig !== undefined" class="space-y-4 p-6 bg-white rounded-xl border border-gray-200 shadow-sm">
-              <h4 class="text-sm font-bold text-gray-800">{{ editingNotifConfig ? '编辑通知配置' : '添加通知配置' }}</h4>
-              <div class="flex flex-col gap-1">
-                <label class="block text-xs font-bold text-gray-400 uppercase mb-1">规则名称 *</label>
-                <input v-model="notifConfigForm.name" type="text" placeholder="例如: ClaudeCode 通知" required class="w-full px-4 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
-              </div>
-              <div class="flex items-center justify-between">
-                <label class="block text-xs font-bold text-gray-400 uppercase mb-0">启用</label>
-                <label class="relative inline-flex items-center cursor-pointer">
-                  <input type="checkbox" v-model="notifConfigForm.enabled" class="sr-only peer" />
-                  <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
-                </label>
-              </div>
-              <div class="flex flex-col gap-1">
-                <label class="block text-xs font-bold text-gray-400 uppercase mb-1">通知类型</label>
-                <div class="flex gap-3">
-                  <label class="flex items-center gap-2 text-sm cursor-pointer">
-                    <input type="radio" v-model="notifConfigForm.notificationType" value="completion" class="text-blue-600" />
-                    <span>对话完成</span>
-                  </label>
-                  <label class="flex items-center gap-2 text-sm cursor-pointer">
-                    <input type="radio" v-model="notifConfigForm.notificationType" value="tool_use_confirmation" class="text-blue-600" />
-                    <span>等待确认</span>
-                  </label>
-                  <label class="flex items-center gap-2 text-sm cursor-pointer">
-                    <input type="radio" v-model="notifConfigForm.notificationType" value="error" class="text-blue-600" />
-                    <span>错误通知</span>
-                  </label>
+            <div v-else class="text-xs text-gray-400 mb-4">暂无通知配置，点击右上方按钮添加。</div>
+
+            <!-- 通知配置编辑 Modal -->
+            <div v-if="editingNotifConfig !== undefined" class="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50" @click.self="cancelNotifEditor">
+              <div class="bg-white rounded-xl w-full max-w-lg p-6 shadow-2xl max-h-[90vh] overflow-y-auto">
+                <div class="flex items-center justify-between mb-4">
+                  <h4 class="text-lg font-bold text-gray-900">{{ editingNotifConfig ? '编辑通知配置' : '添加通知配置' }}</h4>
+                  <button @click="cancelNotifEditor" class="p-1.5 hover:bg-gray-100 rounded-full transition-colors">
+                    <X class="w-5 h-5 text-gray-400" />
+                  </button>
                 </div>
-              </div>
-              <div class="flex items-center gap-3">
-                <div class="flex flex-col gap-1">
-                  <label class="block text-xs font-bold text-gray-400 uppercase mb-1">
-                    {{ notifConfigForm.notificationType === 'error' ? '错误抑制时间（秒）' : notifConfigForm.notificationType === 'tool_use_confirmation' ? '等待确认超时（秒）' : '对话结束等待（秒）' }}
-                    <span class="text-red-500">*</span>
-                  </label>
-                  <input v-if="notifConfigForm.notificationType === 'error'" v-model.number="notifConfigForm.errorSuppressSeconds" type="number" min="10" max="600" required class="w-24 px-4 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
-                  <input v-else-if="notifConfigForm.notificationType === 'tool_use_confirmation'" v-model.number="notifConfigForm.toolUseTimeoutSeconds" type="number" min="1" max="600" required class="w-24 px-4 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
-                  <input v-else v-model.number="notifConfigForm.cooldownSeconds" type="number" min="1" max="300" required class="w-24 px-4 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
-                </div>
-              </div>
-              <div class="flex flex-col gap-1">
-                <label class="block text-xs font-bold text-gray-400 uppercase mb-1">App Key（多选）</label>
-                <div class="flex flex-wrap gap-1.5">
-                  <button
-                    v-for="key in clientKeys" :key="key.id"
-                    @click="toggleNotifKey(key.id)"
-                    type="button"
-                    :style="notifConfigForm.clientKeyIds.includes(key.id) ? { backgroundColor: `rgb(${getKeyColor(key.id)})`, color: '#fff', borderColor: `rgb(${getKeyColor(key.id)})` } : keyBadgeStyle(key.id)"
-                    class="px-2 py-1 rounded text-[10px] font-semibold font-mono tracking-tight border transition-colors"
-                  >{{ key.name }}</button>
-                  <span v-if="clientKeys.length === 0" class="text-xs text-gray-400">暂无 App Key</span>
-                </div>
-              </div>
-              <div class="flex flex-col gap-1">
-                <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Webhook URL</label>
-                <input v-model="notifConfigForm.webhookUrl" type="text" placeholder="https://example.com/webhook" class="w-full px-4 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
-              </div>
-              <div class="flex flex-col gap-1">
-                <label class="block text-xs font-bold text-gray-400 uppercase mb-1">HTTP 方法</label>
-                <select v-model="notifConfigForm.httpMethod" class="w-full px-4 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none bg-white">
-                  <option>POST</option>
-                  <option>PUT</option>
-                </select>
-              </div>
-              <div class="flex flex-col gap-1">
-                <label class="block text-xs font-bold text-gray-400 uppercase mb-1">自定义 Headers</label>
-                <div class="space-y-1.5">
-                  <div v-for="(h, i) in notifConfigForm.headers" :key="i" class="flex gap-1.5 items-start">
-                    <input v-model="h.key" type="text" placeholder="Header 名" class="flex-1 px-3 py-2 border border-gray-200 rounded-lg text-xs focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none font-mono" />
-                    <input v-model="h.value" type="text" placeholder="Header 值" class="flex-1 px-3 py-2 border border-gray-200 rounded-lg text-xs focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none font-mono" />
-                    <button @click="removeNotifHeader(i)" class="shrink-0 p-1.5 text-red-600 hover:bg-red-50 rounded-lg transition-colors"><X class="w-3.5 h-3.5" /></button>
+                <div class="space-y-4">
+                  <div class="flex flex-col gap-1">
+                    <label class="block text-xs font-bold text-gray-400 uppercase mb-1">规则名称 *</label>
+                    <input v-model="notifConfigForm.name" type="text" placeholder="例如: ClaudeCode 通知" required class="w-full px-4 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+                  </div>
+                  <div class="flex items-center justify-between">
+                    <label class="block text-xs font-bold text-gray-400 uppercase mb-0">启用</label>
+                    <label class="relative inline-flex items-center cursor-pointer">
+                      <input type="checkbox" v-model="notifConfigForm.enabled" class="sr-only peer" />
+                      <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                    </label>
+                  </div>
+                  <div class="flex flex-col gap-1">
+                    <label class="block text-xs font-bold text-gray-400 uppercase mb-1">通知类型</label>
+                    <div class="flex gap-3">
+                      <label class="flex items-center gap-2 text-sm cursor-pointer">
+                        <input type="radio" v-model="notifConfigForm.notificationType" value="completion" class="text-blue-600" />
+                        <span>对话完成</span>
+                      </label>
+                      <label class="flex items-center gap-2 text-sm cursor-pointer">
+                        <input type="radio" v-model="notifConfigForm.notificationType" value="tool_use_confirmation" class="text-blue-600" />
+                        <span>等待确认</span>
+                      </label>
+                      <label class="flex items-center gap-2 text-sm cursor-pointer">
+                        <input type="radio" v-model="notifConfigForm.notificationType" value="error" class="text-blue-600" />
+                        <span>错误通知</span>
+                      </label>
+                    </div>
+                  </div>
+                  <div class="flex items-center gap-3">
+                    <div class="flex flex-col gap-1">
+                      <label class="block text-xs font-bold text-gray-400 uppercase mb-1">
+                        {{ notifConfigForm.notificationType === 'error' ? '错误抑制时间（秒）' : notifConfigForm.notificationType === 'tool_use_confirmation' ? '等待确认超时（秒）' : '对话结束等待（秒）' }}
+                        <span class="text-red-500">*</span>
+                      </label>
+                      <input v-if="notifConfigForm.notificationType === 'error'" v-model.number="notifConfigForm.errorSuppressSeconds" type="number" min="10" max="600" required class="w-24 px-4 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+                      <input v-else-if="notifConfigForm.notificationType === 'tool_use_confirmation'" v-model.number="notifConfigForm.toolUseTimeoutSeconds" type="number" min="1" max="600" required class="w-24 px-4 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+                      <input v-else v-model.number="notifConfigForm.cooldownSeconds" type="number" min="1" max="300" required class="w-24 px-4 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+                    </div>
+                  </div>
+                  <div class="flex flex-col gap-1">
+                    <label class="block text-xs font-bold text-gray-400 uppercase mb-1">App Key（多选）</label>
+                    <div class="flex flex-wrap gap-1.5">
+                      <button
+                        v-for="key in clientKeys" :key="key.id"
+                        @click="toggleNotifKey(key.id)"
+                        type="button"
+                        :style="notifConfigForm.clientKeyIds.includes(key.id) ? { backgroundColor: `rgb(${getKeyColor(key.id)})`, color: '#fff', borderColor: `rgb(${getKeyColor(key.id)})` } : keyBadgeStyle(key.id)"
+                        class="px-2 py-1 rounded text-[10px] font-semibold font-mono tracking-tight border transition-colors"
+                      >{{ key.name }}</button>
+                      <span v-if="clientKeys.length === 0" class="text-xs text-gray-400">暂无 App Key</span>
+                    </div>
+                  </div>
+                  <div class="flex flex-col gap-1">
+                    <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Webhook URL</label>
+                    <input v-model="notifConfigForm.webhookUrl" type="text" placeholder="https://example.com/webhook" class="w-full px-4 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+                  </div>
+                  <div class="flex flex-col gap-1">
+                    <label class="block text-xs font-bold text-gray-400 uppercase mb-1">HTTP 方法</label>
+                    <select v-model="notifConfigForm.httpMethod" class="w-full px-4 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none bg-white">
+                      <option>POST</option>
+                      <option>PUT</option>
+                    </select>
+                  </div>
+                  <div class="flex flex-col gap-1">
+                    <label class="block text-xs font-bold text-gray-400 uppercase mb-1">自定义 Headers</label>
+                    <div class="space-y-1.5">
+                      <div v-for="(h, i) in notifConfigForm.headers" :key="i" class="flex gap-1.5 items-start">
+                        <input v-model="h.key" type="text" placeholder="Header 名" class="flex-1 px-3 py-2 border border-gray-200 rounded-lg text-xs focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none font-mono" />
+                        <input v-model="h.value" type="text" placeholder="Header 值" class="flex-1 px-3 py-2 border border-gray-200 rounded-lg text-xs focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none font-mono" />
+                        <button @click="removeNotifHeader(i)" class="shrink-0 p-1.5 text-red-600 hover:bg-red-50 rounded-lg transition-colors"><X class="w-3.5 h-3.5" /></button>
+                      </div>
+                    </div>
+                    <button @click="addNotifHeader" class="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 mt-1 self-start">
+                      <Plus class="w-3 h-3" /> 添加 Header
+                    </button>
+                  </div>
+                  <div class="flex flex-col gap-1">
+                    <label class="block text-xs font-bold text-gray-400 uppercase mb-1">通知体模板 (JSON, 支持 {{变量}})</label>
+                    <textarea v-model="notifConfigForm.bodyTemplate" rows="4" placeholder='留空使用默认模板，支持变量如 {{model}} {{totalTokens}} {{clientApp}} {{clientName}} {{status}}' class="w-full px-4 py-2 border border-gray-200 rounded-lg text-xs font-mono focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"></textarea>
                   </div>
                 </div>
-                <button @click="addNotifHeader" class="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 mt-1 self-start">
-                  <Plus class="w-3 h-3" /> 添加 Header
-                </button>
-              </div>
-              <div class="flex flex-col gap-1">
-                <label class="block text-xs font-bold text-gray-400 uppercase mb-1">通知体模板 (JSON, 支持 {{变量}})</label>
-                <textarea v-model="notifConfigForm.bodyTemplate" rows="4" placeholder='留空使用默认模板，支持变量如 {{model}} {{totalTokens}} {{clientApp}} {{clientName}} {{status}}' class="w-full px-4 py-2 border border-gray-200 rounded-lg text-xs font-mono focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"></textarea>
-              </div>
-              <div class="flex gap-3 pt-2">
-                <button @click="cancelNotifEditor" class="flex-1 px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors text-sm">取消</button>
-                <button @click="saveNotifConfig" :disabled="notifConfigSaving" class="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-bold text-sm disabled:opacity-50">
-                  {{ notifConfigSaving ? '保存中…' : '保存' }}
-                </button>
+                <div class="flex gap-3 mt-6">
+                  <button @click="cancelNotifEditor" class="flex-1 px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors text-sm">取消</button>
+                  <button @click="saveNotifConfig" :disabled="notifConfigSaving" class="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-bold text-sm disabled:opacity-50">
+                    {{ notifConfigSaving ? '保存中…' : '保存' }}
+                  </button>
+                </div>
               </div>
             </div>
-            <button v-else @click="openNotifEditor(null)" class="flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-sm border border-gray-200">
-              <Plus class="w-4 h-4" />
-              添加通知配置
-            </button>
           </div>
 
           <!-- 推送日志 -->
@@ -3601,47 +3977,79 @@ onUnmounted(() => {
                       <span :class="l.status === 'success' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'" class="px-2 py-0.5 rounded text-[10px] font-bold">{{ l.status === 'success' ? '成功' : '失败' }}</span>
                     </td>
                     <td class="px-3 py-2 text-gray-500 truncate max-w-[300px]">{{ l.webhookUrl }}</td>
-                    <td class="px-3 py-2 text-right font-mono text-[10px]" :class="l.responseStatusCode && l.responseStatusCode < 400 ? 'text-green-600' : 'text-red-600'">{{ l.responseStatusCode || '-' }}</td>
+                    <td class="px-3 py-2 text-right font-mono text-[10px] max-w-[200px] truncate"
+                        :class="l.status === 'error' ? 'text-red-600' : (l.responseStatusCode && l.responseStatusCode < 400 ? 'text-green-600' : 'text-red-600')"
+                        :title="l.status === 'error' ? l.errorMessage || '' : ''">
+                      {{ l.status === 'error' && l.errorMessage ? l.errorMessage.substring(0, 30) + (l.errorMessage.length > 30 ? '…' : '') : (l.responseStatusCode || '-') }}
+                    </td>
                   </tr>
                 </tbody>
               </table>
               <div class="flex items-center justify-between mt-4 pt-3 border-t border-gray-100">
-                <span class="text-xs text-gray-400">共 {{ notifLogsTotal }} 条</span>
-                <div class="flex gap-1">
-                  <button :disabled="notifLogsPage <= 1" @click="fetchNotifLogs(notifLogsPage - 1)" class="px-2 py-1 text-xs border border-gray-200 rounded hover:bg-gray-50 disabled:opacity-30">上一页</button>
-                  <span class="px-2 py-1 text-xs text-gray-500">{{ notifLogsPage }}</span>
-                  <button :disabled="notifLogsPage * notifLogsPageSize >= notifLogsTotal" @click="fetchNotifLogs(notifLogsPage + 1)" class="px-2 py-1 text-xs border border-gray-200 rounded hover:bg-gray-50 disabled:opacity-30">下一页</button>
+                <div class="flex items-center gap-3">
+                  <span class="text-xs text-gray-400">共 {{ notifLogsTotal }} 条</span>
+                  <select v-model.number="notifLogsPageSize" @change="fetchNotifLogs(1)" class="px-2 py-1 text-xs border border-gray-200 rounded-lg outline-none bg-white">
+                    <option :value="20">20 条/页</option>
+                    <option :value="50">50 条/页</option>
+                    <option :value="100">100 条/页</option>
+                  </select>
+                </div>
+                <div class="flex items-center gap-2">
+                  <span class="text-xs text-gray-500">第 {{ notifLogsPage }} / {{ notifLogsTotalPages }} 页</span>
+                  <div class="flex gap-1">
+                    <button :disabled="notifLogsPage <= 1" @click="fetchNotifLogs(notifLogsPage - 1)" class="px-3 py-1.5 text-xs border border-gray-200 rounded-lg hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors font-bold">上一页</button>
+                    <button :disabled="notifLogsPage >= notifLogsTotalPages" @click="fetchNotifLogs(notifLogsPage + 1)" class="px-3 py-1.5 text-xs border border-gray-200 rounded-lg hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors font-bold">下一页</button>
+                  </div>
                 </div>
               </div>
             </div>
-            <div v-else class="text-xs text-gray-400">暂无推送日志。</div>
-            <div v-if="selectedNotifLog" class="mt-4 p-4 bg-gray-50 rounded-lg border border-gray-200 space-y-3">
-              <div class="flex items-center justify-between">
-                <h4 class="text-sm font-bold text-gray-700">推送详情</h4>
-                <button @click="closeNotifLogDetail" class="text-gray-400 hover:text-gray-600"><X class="w-4 h-4" /></button>
+            <div v-if="notifLogs.length === 0 && notifLogsTotal === 0 && notifLogsFilter.clientKeyId === 'all' && notifLogsFilter.status === 'all'" class="text-xs text-gray-400">暂无推送日志。</div>
+            <div v-else-if="notifLogs.length === 0" class="text-xs text-gray-400">没有符合条件的记录，请调整筛选条件。</div>
+          </div>
+
+          <!-- 推送日志详情 Modal -->
+          <div v-if="selectedNotifLog" class="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50" @click.self="closeNotifLogDetail">
+            <div class="bg-white rounded-xl w-full max-w-2xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
+              <div class="p-5 border-b border-gray-200 flex justify-between items-center">
+                <div>
+                  <h3 class="text-lg font-bold text-gray-900">推送详情</h3>
+                  <p class="text-xs text-gray-500 mt-0.5">{{ selectedNotifLog.ruleName || '未命名规则' }}</p>
+                </div>
+                <button type="button" @click="closeNotifLogDetail" class="p-1.5 hover:bg-gray-100 rounded-full transition-colors">
+                  <X class="w-5 h-5 text-gray-400" />
+                </button>
               </div>
-              <div class="grid grid-cols-2 gap-2 text-xs">
-                <div><span class="text-gray-500">方法:</span> <span class="font-mono">{{ selectedNotifLog.httpMethod }}</span></div>
-                <div><span class="text-gray-500">状态:</span> <span :class="selectedNotifLog.status === 'success' ? 'text-green-600 font-bold' : 'text-red-600 font-bold'">{{ selectedNotifLog.status }}</span></div>
-                <div class="col-span-2"><span class="text-gray-500">URL:</span> <span class="font-mono text-[10px] break-all">{{ selectedNotifLog.webhookUrl }}</span></div>
-                <div v-if="selectedNotifLog.responseStatusCode" class="col-span-2"><span class="text-gray-500">响应码:</span> <span class="font-mono">{{ selectedNotifLog.responseStatusCode }}</span></div>
-                <div v-if="selectedNotifLog.errorMessage" class="col-span-2"><span class="text-gray-500">错误:</span> <span class="text-red-600">{{ selectedNotifLog.errorMessage }}</span></div>
+              <div v-if="notifLogDetailLoading" class="flex flex-col items-center justify-center gap-3 py-16 text-gray-500">
+                <Loader2 class="w-8 h-8 animate-spin text-blue-500" />
+                <p class="text-sm">正在加载推送详情…</p>
               </div>
-              <div v-if="selectedNotifLog.requestHeaders" class="space-y-1">
-                <span class="text-xs text-gray-500 font-medium">请求 Headers</span>
-                <pre class="bg-gray-900 text-gray-100 p-3 rounded-lg overflow-auto text-[10px] leading-relaxed max-h-[200px]">{{ formatJson(selectedNotifLog.requestHeaders) }}</pre>
+              <div v-else-if="notifLogDetailError" class="m-5 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                {{ notifLogDetailError }}
               </div>
-              <div v-if="selectedNotifLog.requestBodyPreview" class="space-y-1">
-                <span class="text-xs text-gray-500 font-medium">请求 Body</span>
-                <pre class="bg-gray-900 text-gray-100 p-3 rounded-lg overflow-auto text-[10px] leading-relaxed max-h-[200px]">{{ formatJson(selectedNotifLog.requestBodyPreview) }}</pre>
-              </div>
-              <div v-if="selectedNotifLog.responseBodyPreview" class="space-y-1">
-                <span class="text-xs text-gray-500 font-medium">响应 Body</span>
-                <pre class="bg-gray-900 text-gray-100 p-3 rounded-lg overflow-auto text-[10px] leading-relaxed max-h-[200px]">{{ formatJson(selectedNotifLog.responseBodyPreview) }}</pre>
+              <div v-else class="flex-1 overflow-auto p-5 space-y-4">
+                <div class="grid grid-cols-2 gap-3 text-sm">
+                  <div><span class="text-gray-500">方法:</span> <span class="font-mono font-medium">{{ selectedNotifLog.httpMethod }}</span></div>
+                  <div><span class="text-gray-500">状态:</span> <span :class="selectedNotifLog.status === 'success' ? 'text-green-600 font-bold' : 'text-red-600 font-bold'">{{ selectedNotifLog.status === 'success' ? '成功' : '失败' }}</span></div>
+                  <div class="col-span-2"><span class="text-gray-500">URL:</span> <span class="font-mono text-xs break-all">{{ selectedNotifLog.webhookUrl }}</span></div>
+                  <div v-if="selectedNotifLog.responseStatusCode"><span class="text-gray-500">响应码:</span> <span class="font-mono">{{ selectedNotifLog.responseStatusCode }}</span></div>
+                  <div v-if="selectedNotifLog.errorMessage" class="col-span-2"><span class="text-gray-500">错误:</span> <span class="text-red-600">{{ selectedNotifLog.errorMessage }}</span></div>
+                </div>
+                <div v-if="selectedNotifLog.requestHeaders" class="space-y-1">
+                  <span class="text-xs text-gray-500 font-medium">请求 Headers</span>
+                  <pre class="bg-gray-900 text-gray-100 p-3 rounded-lg overflow-auto text-[10px] leading-relaxed max-h-[200px]">{{ formatJson(selectedNotifLog.requestHeaders) }}</pre>
+                </div>
+                <div v-if="selectedNotifLog.requestBodyPreview" class="space-y-1">
+                  <span class="text-xs text-gray-500 font-medium">请求 Body</span>
+                  <pre class="bg-gray-900 text-gray-100 p-3 rounded-lg overflow-auto text-[10px] leading-relaxed max-h-[200px]">{{ formatJson(selectedNotifLog.requestBodyPreview) }}</pre>
+                </div>
+                <div v-if="selectedNotifLog.responseBodyPreview" class="space-y-1">
+                  <span class="text-xs text-gray-500 font-medium">响应 Body</span>
+                  <pre class="bg-gray-900 text-gray-100 p-3 rounded-lg overflow-auto text-[10px] leading-relaxed max-h-[200px]">{{ formatJson(selectedNotifLog.responseBodyPreview) }}</pre>
+                </div>
               </div>
             </div>
           </div>
-        </div>
+          </div>
 
         <!-- Logs View -->
         <div v-if="activeTab === 'logs'" class="space-y-4">

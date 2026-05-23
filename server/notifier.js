@@ -30,6 +30,21 @@ class Notifier {
         );
         if (!log) return;
 
+        // Load timezone setting for mute window check
+        if (!this._timezone) {
+            const tzRow = await this.db.get("SELECT value FROM app_settings WHERE key = 'admin_timezone'");
+            this._timezone = tzRow?.value || 'Asia/Shanghai';
+        }
+
+        // Global mute check
+        const muteRow = await this.db.get("SELECT value FROM app_settings WHERE key = 'notification_mute'");
+        if (muteRow) {
+            try {
+                const mute = JSON.parse(muteRow.value);
+                if (mute.enabled && this._inMuteWindow(mute.start, mute.end)) return;
+            } catch {}
+        }
+
         const key = log.clientKeyId;
 
         // Error branch — independent of conversation round tracking
@@ -387,6 +402,25 @@ class Notifier {
             filterStatuses: this._safeJsonParse(row.filterStatuses, []),
             enabled: row.enabled === 1
         };
+    }
+
+    _inMuteWindow(start, end) {
+        const now = new Date();
+        let h = now.getHours(), m = now.getMinutes();
+        try {
+            const tz = new Intl.DateTimeFormat('en', { timeZone: this._timezone || 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false }).format(now);
+            const parts = tz.split(':').map(Number);
+            h = parts[0];
+            m = parts[1];
+        } catch {}
+        const mins = h * 60 + m;
+        const [sh, sm] = String(start || '00:00').split(':').map(Number);
+        const [eh, em] = String(end || '00:00').split(':').map(Number);
+        const startMin = sh * 60 + sm;
+        const endMin = eh * 60 + em;
+        if (startMin === endMin) return false;
+        if (startMin <= endMin) return mins >= startMin && mins < endMin;
+        return mins >= startMin || mins < endMin;
     }
 
     _safeJsonParse(str, defaultVal) {

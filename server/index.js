@@ -6,6 +6,7 @@ const bodyParser = require('body-parser');
 const axios = require('axios');
 const setupDb = require('./db');
 const { initNotifier, getNotifier } = require('./notifier');
+const { UsageCache, detectVendor } = require('./usage-cache');
 const https = require('https');
 const crypto = require('crypto');
 const path = require('path');
@@ -257,7 +258,9 @@ const APP_SETTINGS_KEYS = {
     STREAM_MAX_RETRIES: 'stream_max_retries',
     NOTIFICATION_COOLDOWN_SECONDS: 'notification_cooldown_seconds',
     NOTIFICATION_LOG_RETENTION_DAYS: 'notification_log_retention_days',
-    NOTIFICATION_TOOL_USE_TIMEOUT_SECONDS: 'notification_tool_use_timeout_seconds'
+    NOTIFICATION_TOOL_USE_TIMEOUT_SECONDS: 'notification_tool_use_timeout_seconds',
+    NOTIFICATION_MUTE: 'notification_mute',
+    ADMIN_TIMEZONE: 'admin_timezone'
 };
 
 const UPSTREAM_TIMEOUT_MIN_SEC = 5;
@@ -299,6 +302,12 @@ async function getAppSettingInt(key, defaultVal) {
     return Number.isFinite(n) && n >= 0 ? n : defaultVal;
 }
 
+async function getAppSettingString(key, defaultVal) {
+    const row = await db.get('SELECT value FROM app_settings WHERE key = ?', [key]);
+    if (row == null || row.value === undefined || row.value === '') return defaultVal;
+    return String(row.value);
+}
+
 async function setAppSetting(key, val) {
     await db.run(
         'INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
@@ -316,6 +325,24 @@ async function getUpstreamHeadersBlocklist() {
         console.error('[getUpstreamHeadersBlocklist] parse error:', e);
     }
     return UPSTREAM_HEADERS_BLOCKLIST_DEFAULT;
+}
+
+async function getNotificationMute() {
+    const row = await db.get('SELECT value FROM app_settings WHERE key = ?', [APP_SETTINGS_KEYS.NOTIFICATION_MUTE]);
+    if (row == null || row.value === undefined || row.value === '') return { enabled: false, start: '00:00', end: '00:00' };
+    try {
+        const parsed = JSON.parse(row.value);
+        if (parsed && typeof parsed === 'object') {
+            return {
+                enabled: !!parsed.enabled,
+                start: String(parsed.start || '00:00'),
+                end: String(parsed.end || '00:00')
+            };
+        }
+    } catch (e) {
+        console.error('[getNotificationMute] parse error:', e);
+    }
+    return { enabled: false, start: '00:00', end: '00:00' };
 }
 
 /**
@@ -1655,60 +1682,106 @@ app.get('/api/settings', async (req, res) => {
     const notificationCooldownSeconds = await getAppSettingInt(APP_SETTINGS_KEYS.NOTIFICATION_COOLDOWN_SECONDS, 5);
     const notificationLogRetentionDays = await getAppSettingInt(APP_SETTINGS_KEYS.NOTIFICATION_LOG_RETENTION_DAYS, 7);
     const notificationToolUseTimeoutSeconds = await getAppSettingInt(APP_SETTINGS_KEYS.NOTIFICATION_TOOL_USE_TIMEOUT_SECONDS, 10);
-    res.json({ logRetentionDays, statsRetentionDays, upstreamTimeoutSeconds, upstreamHeadersBlocklist, streamChunkTimeoutSeconds, streamRetryEnabled: streamRetryConfig.enabled, streamMaxRetries: streamRetryConfig.maxRetries, notificationCooldownSeconds, notificationLogRetentionDays, notificationToolUseTimeoutSeconds });
+    const notificationMute = await getNotificationMute();
+    const adminTimezone = await getAppSettingString(APP_SETTINGS_KEYS.ADMIN_TIMEZONE, 'Asia/Shanghai');
+    res.json({ logRetentionDays, statsRetentionDays, upstreamTimeoutSeconds, upstreamHeadersBlocklist, streamChunkTimeoutSeconds, streamRetryEnabled: streamRetryConfig.enabled, streamMaxRetries: streamRetryConfig.maxRetries, notificationCooldownSeconds, notificationLogRetentionDays, notificationToolUseTimeoutSeconds, notificationMute, adminTimezone });
 });
 
 app.put('/api/settings', async (req, res) => {
     const body = req.body || {};
-    let logRetentionDays = Math.max(0, parseInt(body.logRetentionDays, 10));
-    let statsRetentionDays = Math.max(0, parseInt(body.statsRetentionDays, 10));
-    if (!Number.isFinite(logRetentionDays)) logRetentionDays = 0;
-    if (!Number.isFinite(statsRetentionDays)) statsRetentionDays = 0;
-    let upstreamTimeoutSeconds = parseInt(body.upstreamTimeoutSeconds, 10);
-    if (!Number.isFinite(upstreamTimeoutSeconds)) upstreamTimeoutSeconds = UPSTREAM_TIMEOUT_DEFAULT_SEC;
-    upstreamTimeoutSeconds = Math.min(UPSTREAM_TIMEOUT_MAX_SEC, Math.max(UPSTREAM_TIMEOUT_MIN_SEC, upstreamTimeoutSeconds));
 
-    // Handle upstream headers blocklist
-    let upstreamHeadersBlocklist = UPSTREAM_HEADERS_BLOCKLIST_DEFAULT;
-    if (body.upstreamHeadersBlocklist && Array.isArray(body.upstreamHeadersBlocklist)) {
-        upstreamHeadersBlocklist = body.upstreamHeadersBlocklist.filter(h => typeof h === 'string' && h.trim());
+    if (body.logRetentionDays !== undefined) {
+        let v = Math.max(0, parseInt(body.logRetentionDays, 10));
+        if (!Number.isFinite(v)) v = 0;
+        await setAppSetting(APP_SETTINGS_KEYS.LOG_RETENTION_DAYS, v);
+    }
+    if (body.statsRetentionDays !== undefined) {
+        let v = parseInt(body.statsRetentionDays, 10);
+        if (!Number.isFinite(v)) v = 0;
+        if (v !== 0 && v < 31) {
+            return res.status(400).json({ error: '统计数据保留天数必须 ≥ 31 天，或设为 0（永不清除）' });
+        }
+        await setAppSetting(APP_SETTINGS_KEYS.STATS_RETENTION_DAYS, v);
+    }
+    if (body.upstreamTimeoutSeconds !== undefined) {
+        let v = parseInt(body.upstreamTimeoutSeconds, 10);
+        if (!Number.isFinite(v)) v = UPSTREAM_TIMEOUT_DEFAULT_SEC;
+        v = Math.min(UPSTREAM_TIMEOUT_MAX_SEC, Math.max(UPSTREAM_TIMEOUT_MIN_SEC, v));
+        await setAppSetting(APP_SETTINGS_KEYS.UPSTREAM_TIMEOUT_SECONDS, v);
+    }
+    if (body.upstreamHeadersBlocklist !== undefined) {
+        let v = UPSTREAM_HEADERS_BLOCKLIST_DEFAULT;
+        if (Array.isArray(body.upstreamHeadersBlocklist)) {
+            v = body.upstreamHeadersBlocklist.filter(h => typeof h === 'string' && h.trim());
+        }
+        await setAppSetting(APP_SETTINGS_KEYS.UPSTREAM_HEADERS_BLOCKLIST, JSON.stringify(v));
     }
 
-    await setAppSetting(APP_SETTINGS_KEYS.LOG_RETENTION_DAYS, logRetentionDays);
-    await setAppSetting(APP_SETTINGS_KEYS.STATS_RETENTION_DAYS, statsRetentionDays);
-    await setAppSetting(APP_SETTINGS_KEYS.UPSTREAM_TIMEOUT_SECONDS, upstreamTimeoutSeconds);
-    await setAppSetting(APP_SETTINGS_KEYS.UPSTREAM_HEADERS_BLOCKLIST, JSON.stringify(upstreamHeadersBlocklist));
-
     // Streaming settings
-    let streamChunkTimeoutSeconds = parseInt(body.streamChunkTimeoutSeconds, 10);
-    if (!Number.isFinite(streamChunkTimeoutSeconds)) streamChunkTimeoutSeconds = STREAM_CHUNK_TIMEOUT_DEFAULT_SEC;
-    streamChunkTimeoutSeconds = Math.min(STREAM_CHUNK_TIMEOUT_MAX_SEC, Math.max(STREAM_CHUNK_TIMEOUT_MIN_SEC, streamChunkTimeoutSeconds));
-    await setAppSetting(APP_SETTINGS_KEYS.STREAM_CHUNK_TIMEOUT_SECONDS, streamChunkTimeoutSeconds);
+    if (body.streamChunkTimeoutSeconds !== undefined) {
+        let v = parseInt(body.streamChunkTimeoutSeconds, 10);
+        if (!Number.isFinite(v)) v = STREAM_CHUNK_TIMEOUT_DEFAULT_SEC;
+        v = Math.min(STREAM_CHUNK_TIMEOUT_MAX_SEC, Math.max(STREAM_CHUNK_TIMEOUT_MIN_SEC, v));
+        await setAppSetting(APP_SETTINGS_KEYS.STREAM_CHUNK_TIMEOUT_SECONDS, v);
+    }
+    if (body.streamRetryEnabled !== undefined) {
+        await setAppSetting(APP_SETTINGS_KEYS.STREAM_RETRY_ENABLED, body.streamRetryEnabled ? 1 : 0);
+    }
+    if (body.streamMaxRetries !== undefined) {
+        let v = parseInt(body.streamMaxRetries, 10);
+        if (!Number.isFinite(v)) v = 2;
+        v = Math.max(0, Math.min(5, v));
+        await setAppSetting(APP_SETTINGS_KEYS.STREAM_MAX_RETRIES, v);
+    }
 
-    let streamRetryEnabled = body.streamRetryEnabled !== undefined ? (body.streamRetryEnabled ? 1 : 0) : 1;
-    let streamMaxRetries = parseInt(body.streamMaxRetries, 10);
-    if (!Number.isFinite(streamMaxRetries)) streamMaxRetries = 2;
-    streamMaxRetries = Math.max(0, Math.min(5, streamMaxRetries));
-    await setAppSetting(APP_SETTINGS_KEYS.STREAM_RETRY_ENABLED, streamRetryEnabled);
-    await setAppSetting(APP_SETTINGS_KEYS.STREAM_MAX_RETRIES, streamMaxRetries);
+    // Notification settings
+    if (body.notificationCooldownSeconds !== undefined) {
+        let v = parseInt(body.notificationCooldownSeconds, 10);
+        if (!Number.isFinite(v) || v < 1) v = 5;
+        v = Math.min(300, v);
+        await setAppSetting(APP_SETTINGS_KEYS.NOTIFICATION_COOLDOWN_SECONDS, v);
+    }
+    if (body.notificationLogRetentionDays !== undefined) {
+        let v = parseInt(body.notificationLogRetentionDays, 10);
+        if (!Number.isFinite(v) || v < 0) v = 7;
+        v = Math.min(365, v);
+        await setAppSetting(APP_SETTINGS_KEYS.NOTIFICATION_LOG_RETENTION_DAYS, v);
+    }
+    if (body.notificationToolUseTimeoutSeconds !== undefined) {
+        let v = parseInt(body.notificationToolUseTimeoutSeconds, 10);
+        if (!Number.isFinite(v) || v < 1) v = 10;
+        v = Math.min(600, v);
+        await setAppSetting(APP_SETTINGS_KEYS.NOTIFICATION_TOOL_USE_TIMEOUT_SECONDS, v);
+    }
 
-    let notificationCooldownSeconds = parseInt(body.notificationCooldownSeconds, 10);
-    if (!Number.isFinite(notificationCooldownSeconds) || notificationCooldownSeconds < 1) notificationCooldownSeconds = 5;
-    notificationCooldownSeconds = Math.min(300, notificationCooldownSeconds);
-    await setAppSetting(APP_SETTINGS_KEYS.NOTIFICATION_COOLDOWN_SECONDS, notificationCooldownSeconds);
-
-    let notificationLogRetentionDays = parseInt(body.notificationLogRetentionDays, 10);
-    if (!Number.isFinite(notificationLogRetentionDays) || notificationLogRetentionDays < 0) notificationLogRetentionDays = 7;
-    notificationLogRetentionDays = Math.min(365, notificationLogRetentionDays);
-    await setAppSetting(APP_SETTINGS_KEYS.NOTIFICATION_LOG_RETENTION_DAYS, notificationLogRetentionDays);
-
-    let notificationToolUseTimeoutSeconds = parseInt(body.notificationToolUseTimeoutSeconds, 10);
-    if (!Number.isFinite(notificationToolUseTimeoutSeconds) || notificationToolUseTimeoutSeconds < 1) notificationToolUseTimeoutSeconds = 10;
-    notificationToolUseTimeoutSeconds = Math.min(600, notificationToolUseTimeoutSeconds);
-    await setAppSetting(APP_SETTINGS_KEYS.NOTIFICATION_TOOL_USE_TIMEOUT_SECONDS, notificationToolUseTimeoutSeconds);
+    // Notification mute
+    if (body.notificationMute && typeof body.notificationMute === 'object') {
+        const mute = {
+            enabled: !!body.notificationMute.enabled,
+            start: String(body.notificationMute.start || '00:00'),
+            end: String(body.notificationMute.end || '00:00')
+        };
+        await setAppSetting(APP_SETTINGS_KEYS.NOTIFICATION_MUTE, JSON.stringify(mute));
+    }
+    if (body.adminTimezone !== undefined) {
+        await setAppSetting(APP_SETTINGS_KEYS.ADMIN_TIMEZONE, String(body.adminTimezone));
+    }
 
     await runRetentionPurge();
-    res.json({ logRetentionDays, statsRetentionDays, upstreamTimeoutSeconds, upstreamHeadersBlocklist, streamChunkTimeoutSeconds, streamRetryEnabled: streamRetryEnabled === 1, streamMaxRetries, notificationCooldownSeconds, notificationLogRetentionDays, notificationToolUseTimeoutSeconds });
+
+    // Reload all settings for response
+    const logRetentionDays = await getAppSettingInt(APP_SETTINGS_KEYS.LOG_RETENTION_DAYS, 0);
+    const statsRetentionDays = await getAppSettingInt(APP_SETTINGS_KEYS.STATS_RETENTION_DAYS, 0);
+    const upstreamTimeoutSeconds = await getUpstreamTimeoutSeconds();
+    const upstreamHeadersBlocklist = await getUpstreamHeadersBlocklist();
+    const streamChunkTimeoutSeconds = await getStreamChunkTimeoutSeconds();
+    const streamRetryConfig = await getStreamRetryConfig();
+    const notificationCooldownSeconds = await getAppSettingInt(APP_SETTINGS_KEYS.NOTIFICATION_COOLDOWN_SECONDS, 5);
+    const notificationLogRetentionDays = await getAppSettingInt(APP_SETTINGS_KEYS.NOTIFICATION_LOG_RETENTION_DAYS, 7);
+    const notificationToolUseTimeoutSeconds = await getAppSettingInt(APP_SETTINGS_KEYS.NOTIFICATION_TOOL_USE_TIMEOUT_SECONDS, 10);
+    const notificationMute = await getNotificationMute();
+    const adminTimezone = await getAppSettingString(APP_SETTINGS_KEYS.ADMIN_TIMEZONE, 'Asia/Shanghai');
+    res.json({ logRetentionDays, statsRetentionDays, upstreamTimeoutSeconds, upstreamHeadersBlocklist, streamChunkTimeoutSeconds, streamRetryEnabled: streamRetryConfig.enabled, streamMaxRetries: streamRetryConfig.maxRetries, notificationCooldownSeconds, notificationLogRetentionDays, notificationToolUseTimeoutSeconds, notificationMute, adminTimezone });
 });
 
 app.post('/api/stats/clear', async (req, res) => {
@@ -3676,6 +3749,45 @@ app.put('/api/client-colors', async (req, res) => {
     res.json({ ok: true });
 });
 
+// Provider usage cache
+app.get('/api/providers/usage', async (req, res) => {
+    try {
+        const rows = await db.all('SELECT * FROM provider_usage_cache ORDER BY providerId, date');
+        const result = {};
+        for (const row of rows) {
+            if (!result[row.providerId]) {
+                result[row.providerId] = { daily: [], summary: null, updatedAt: null };
+            }
+            if (row.date === 'summary') {
+                result[row.providerId].vendor = row.vendor;
+                result[row.providerId].balance = row.balance;
+                let vendorData = null;
+                if (row.vendorDataJson && row.vendorDataJson !== '{}') {
+                    try { vendorData = JSON.parse(row.vendorDataJson); } catch {}
+                }
+                result[row.providerId].vendorData = vendorData;
+                result[row.providerId].summary = {
+                    requests: row.requests,
+                    tokensIn: row.tokensIn,
+                    tokensOut: row.tokensOut,
+                    models: JSON.parse(row.modelsJson || '[]')
+                };
+                result[row.providerId].updatedAt = row.updatedAt;
+            } else {
+                result[row.providerId].daily.push({
+                    date: row.date,
+                    requests: row.requests,
+                    tokensIn: row.tokensIn,
+                    tokensOut: row.tokensOut
+                });
+            }
+        }
+        res.json(result);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 // Error for incorrect paths
 app.post(['/v1', /^\/v1\/.*/], (req, res) => {
     res.status(404).json({
@@ -3696,6 +3808,8 @@ if (fs.existsSync(clientIndexFile)) {
 async function start() {
     db = await setupDb();
     initNotifier(db);
+    const usageCache = new UsageCache(db);
+    usageCache.start();
     await runRetentionPurge().catch((e) => console.error('[Retention]', e));
     setInterval(() => {
         runRetentionPurge().catch((e) => console.error('[Retention]', e));
