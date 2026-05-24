@@ -26,6 +26,8 @@
 - 卡片渐变色条溢出圆角边界
 - groq 厂商颜色与 anthropic 撞色（改为石灰绿 `#84cc16`）
 
+CSS 设计系统参考了 [game-dev-tracker](https://github.com/Zenchronix/game-dev-tracker) 项目的风格。
+
 ---
 
 ## v1.6.0 (2026-05-21)
