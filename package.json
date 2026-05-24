@@ -1,6 +1,6 @@
 {
   "name": "llmpylon",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "llmPylon — self-hosted LLM API proxy with admin UI, multi-provider routing, and usage stats (SQLite).",
   "main": "index.js",
   "scripts": {
