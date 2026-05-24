@@ -43,3 +43,4 @@ data/
 # Temporary files
 request_body.json
 request_body_full.json
+.opencode/
