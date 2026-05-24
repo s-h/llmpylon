@@ -3788,6 +3788,38 @@ app.get('/api/providers/usage', async (req, res) => {
     }
 });
 
+app.get('/api/keys/usage', async (req, res) => {
+    try {
+        const appRows = await db.all(`
+            SELECT
+              e.appId,
+              COALESCE(ck.name, 'unknown') as name,
+              COUNT(*) as requests,
+              SUM(COALESCE(e.tokensTotal, 0)) as tokensTotal,
+              SUM(COALESCE(e.tokensIn, 0)) as tokensIn,
+              SUM(COALESCE(e.tokensOut, 0)) as tokensOut,
+              SUM(CASE WHEN e.status = 'error' THEN 1 ELSE 0 END) as errors,
+              AVG(CASE WHEN e.latencyMs IS NOT NULL THEN e.latencyMs ELSE NULL END) as avgLatencyMs,
+              date(MAX(e.requestAt)) as lastActiveDay,
+              SUM(CASE WHEN date(e.requestAt, 'localtime') = date('now', 'localtime') THEN 1 ELSE 0 END) as todayCount
+            FROM stats_events e
+            LEFT JOIN client_keys ck ON e.appId = ck.id
+            WHERE e.appId IS NOT NULL
+            GROUP BY e.appId
+            ORDER BY requests DESC
+        `);
+
+        const result = {};
+        for (const row of appRows) {
+            const { appId, ...data } = row;
+            result[appId] = data;
+        }
+        res.json(result);
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 // Error for incorrect paths
 app.post(['/v1', /^\/v1\/.*/], (req, res) => {
     res.status(404).json({

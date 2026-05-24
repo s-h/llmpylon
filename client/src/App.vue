@@ -1,5 +1,6 @@
 <script setup>
 import { ref, onMounted, onUnmounted, computed, watch } from 'vue';
+import { useI18n } from 'vue-i18n';
 import axios from 'axios';
 import { io } from 'socket.io-client';
 import VChart from 'vue-echarts';
@@ -48,11 +49,33 @@ import {
   WifiOff,
   HardDrive,
   Eye,
-  EyeOff
+  EyeOff,
+  Flame
 } from 'lucide-vue-next';
 
 use([CanvasRenderer, CalendarComponent, GridComponent, LegendComponent, TooltipComponent, VisualMapComponent, HeatmapChart, LineChart, PieChart, BarChart]);
 import { BarChart } from 'echarts/charts';
+
+const { locale } = useI18n();
+const savedLang = localStorage.getItem('llmpylon_lang');
+if (savedLang === 'en' || savedLang === 'zh') locale.value = savedLang;
+
+const currentLang = computed(() => locale.value);
+const toggleLang = () => {
+  locale.value = locale.value === 'zh' ? 'en' : 'zh';
+  localStorage.setItem('llmpylon_lang', locale.value);
+};
+
+const isDark = ref(localStorage.getItem('llmpylon_theme') === 'dark');
+const applyTheme = (v) => {
+  document.documentElement.classList.toggle('dark', v);
+};
+applyTheme(isDark.value);
+const toggleTheme = () => {
+  isDark.value = !isDark.value;
+  applyTheme(isDark.value);
+  localStorage.setItem('llmpylon_theme', isDark.value ? 'dark' : 'light');
+};
 
 const hostname = window.location.hostname;
 const API_BASE = `http://${hostname}:3000/api`;
@@ -603,87 +626,73 @@ const statsSummary = computed(() => {
   };
 });
 
-const heatmapOption = computed(() => {
+const HEATMAP_INTENSITY = (count) => {
+  if (count === 0) return 0;
+  if (count < 5) return 1;
+  if (count < 10) return 2;
+  if (count < 20) return 3;
+  return 4;
+};
+
+const HEATMAP_COLORS = [
+  { bg: 'var(--color-surface-elevated)', border: 'var(--color-border-default)' },
+  { bg: 'rgba(59,130,246,0.12)', border: 'rgba(59,130,246,0.18)' },
+  { bg: 'rgba(59,130,246,0.28)', border: 'rgba(59,130,246,0.32)' },
+  { bg: 'rgba(59,130,246,0.55)', border: 'rgba(59,130,246,0.50)' },
+  { bg: '#3b82f6', border: '#3b82f6' }
+];
+
+const WEEKDAY_LABELS = ['一', '二', '三', '四', '五', '六', '日'];
+
+const heatmapCells = computed(() => {
   const raw = statsData.value?.heatmapYear || [];
+  if (!raw.length) return { weeks: [], totalDays: 0, activeDays: 0 };
+
+  const map = new Map(raw.map((d) => [d[0], Number(d[1] || 0)]));
+  const calendarRange = statsData.value?.heatmapYearRange;
+  const start = calendarRange?.[0] ? new Date(calendarRange[0] + 'T00:00:00') : new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
+  const end = calendarRange?.[1] ? new Date(calendarRange[1] + 'T00:00:00') : new Date();
+
   const formatLocalDay = (d) => {
     const y = d.getFullYear();
     const m = String(d.getMonth() + 1).padStart(2, '0');
     const day = String(d.getDate()).padStart(2, '0');
     return `${y}-${m}-${day}`;
   };
-  const calendarRange = statsData.value?.heatmapYearRange || (() => {
-    const end = new Date();
-    const start = new Date(end.getTime() - 365 * 24 * 60 * 60 * 1000);
-    return [formatLocalDay(start), formatLocalDay(end)];
-  })();
-  const startStr = calendarRange?.[0];
-  const endStr = calendarRange?.[1];
-  const start = startStr ? new Date(startStr + 'T00:00:00') : new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
-  const end = endStr ? new Date(endStr + 'T00:00:00') : new Date();
 
-  const map = new Map(raw.map((d) => [d[0], Number(d[1] || 0)]));
-  const filled = [];
-  for (let dt = new Date(start); dt <= end; dt.setDate(dt.getDate() + 1)) {
-    const day = formatLocalDay(dt);
-    filled.push([day, map.get(day) || 0]);
+  let activeDays = 0;
+  const weeks = [];
+  let col = [];
+  let colDayOfWeek = start.getDay() === 0 ? 6 : start.getDay() - 1; // Mon=0
+
+  for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+    const dateStr = formatLocalDay(d);
+    const count = map.get(dateStr) || 0;
+    const lvl = HEATMAP_INTENSITY(count);
+    if (count > 0) activeDays++;
+    col.push({ date: dateStr, count, lvl });
+    if (col.length === 7) {
+      weeks.push(col);
+      col = [];
+    }
   }
+  if (col.length) weeks.push(col);
 
-  return {
-    tooltip: {
-      trigger: 'item',
-      formatter: (params) => {
-        const v = params?.value || params?.data;
-        const day = Array.isArray(v) ? v[0] : '';
-        const count = Array.isArray(v) ? Number(v[1] || 0) : 0;
-        const active = count > 0 ? 1 : 0;
-        return `${day}<br/>请求：${count} 次<br/>活跃：${active}`;
-      }
-    },
-    visualMap: {
-      type: 'piecewise',
-      show: false,
-      pieces: [
-        { value: 0, color: '#ebedf0' },
-        { min: 1, max: 4, color: '#9be9a8' },
-        { min: 5, max: 9, color: '#40c463' },
-        { min: 10, max: 19, color: '#30a14e' },
-        { min: 20, color: '#216e39' }
-      ]
-    },
-    calendar: {
-      top: 10,
-      left: 20,
-      right: 20,
-      cellSize: [12, 12],
-      range: calendarRange,
-      itemStyle: { color: '#ebedf0', borderWidth: 2, borderColor: '#fff' },
-      splitLine: { show: false },
-      dayLabel: { color: '#6b7280' },
-      monthLabel: { color: '#6b7280', position: 'top', margin: 8, align: 'left' },
-      yearLabel: { show: false }
-    },
-    series: [
-      {
-        type: 'heatmap',
-        coordinateSystem: 'calendar',
-        data: filled
-      }
-    ]
-  };
+  return { weeks, totalDays: map.size, activeDays };
 });
 
 const requestsOption = computed(() => {
   const ts = statsData.value?.timeseries;
   const days = ts?.days || [];
   return {
-    tooltip: { trigger: 'axis' },
-    legend: { data: ['请求', '错误'], top: 0 },
-    grid: { left: 40, right: 20, top: 40, bottom: 30 },
-    xAxis: { type: 'category', data: days, axisLabel: { color: '#6b7280' } },
-    yAxis: { type: 'value', axisLabel: { color: '#6b7280' } },
+    tooltip: echartsTooltip({ trigger: 'axis' }),
+    legend: { data: ['请求', '错误'], top: 0, textStyle: { fontSize: 11, color: 'var(--color-text-secondary)' } },
+    grid: echartsGrid({ left: 8, right: 20, top: 36, bottom: 24 }),
+    xAxis: echartsXAxis(days),
+    yAxis: echartsYAxis({ axisLabel: { fontSize: 10, color: 'var(--color-text-tertiary)' } }),
     series: [
-      { name: '请求', type: 'line', smooth: true, data: ts?.requests || [], showSymbol: false },
-      { name: '错误', type: 'line', smooth: true, data: ts?.errors || [], showSymbol: false }
+      echartsSmoothLine('请求', ts?.requests || [], '#3b82f6'),
+      echartsSmoothLine('错误', ts?.errors || [], '#f43f5e')
     ]
   };
 });
@@ -692,14 +701,14 @@ const tokensOption = computed(() => {
   const ts = statsData.value?.timeseries;
   const days = ts?.days || [];
   return {
-    tooltip: { trigger: 'axis' },
-    legend: { data: ['Tokens 入', 'Tokens 出'], top: 0 },
-    grid: { left: 50, right: 20, top: 40, bottom: 30 },
-    xAxis: { type: 'category', data: days, axisLabel: { color: '#6b7280' } },
-    yAxis: { type: 'value', axisLabel: { color: '#6b7280' } },
+    tooltip: echartsTooltip({ trigger: 'axis' }),
+    legend: { data: ['Tokens 入', 'Tokens 出'], top: 0, textStyle: { fontSize: 11, color: 'var(--color-text-secondary)' } },
+    grid: echartsGrid({ left: 8, right: 20, top: 36, bottom: 24 }),
+    xAxis: echartsXAxis(days),
+    yAxis: echartsYAxis({ axisLabel: { fontSize: 10, color: 'var(--color-text-tertiary)' } }),
     series: [
-      { name: 'Tokens 入', type: 'line', smooth: true, data: ts?.tokensIn || [], showSymbol: false, lineStyle: { color: '#0891b2' }, itemStyle: { color: '#0891b2' } },
-      { name: 'Tokens 出', type: 'line', smooth: true, data: ts?.tokensOut || [], showSymbol: false, lineStyle: { color: '#0d9488' }, itemStyle: { color: '#0d9488' } }
+      echartsSmoothLine('Tokens 入', ts?.tokensIn || [], '#06b6d4'),
+      echartsSmoothLine('Tokens 出', ts?.tokensOut || [], '#14b8a6')
     ]
   };
 });
@@ -708,50 +717,55 @@ const latencyTtfbOption = computed(() => {
   const ts = statsData.value?.timeseries;
   const days = ts?.days || [];
   return {
-    tooltip: { trigger: 'axis' },
-    legend: { data: ['平均耗时', 'TTFB'], top: 0 },
-    grid: { left: 50, right: 20, top: 40, bottom: 30 },
-    xAxis: { type: 'category', data: days, axisLabel: { color: '#6b7280' } },
-    yAxis: { type: 'value', axisLabel: { color: '#6b7280' } },
+    tooltip: echartsTooltip({ trigger: 'axis' }),
+    legend: { data: ['平均耗时', 'TTFB'], top: 0, textStyle: { fontSize: 11, color: 'var(--color-text-secondary)' } },
+    grid: echartsGrid({ left: 8, right: 20, top: 36, bottom: 24 }),
+    xAxis: echartsXAxis(days),
+    yAxis: echartsYAxis({ axisLabel: { fontSize: 10, color: 'var(--color-text-tertiary)' } }),
     series: [
-      { name: '平均耗时', type: 'line', smooth: true, data: ts?.avgLatencyMs || [], showSymbol: false, lineStyle: { color: '#059669' }, itemStyle: { color: '#059669' } },
-      { name: 'TTFB', type: 'line', smooth: true, data: ts?.ttfbAvgMs || [], showSymbol: false, lineStyle: { color: '#7c3aed' }, itemStyle: { color: '#7c3aed' } }
+      echartsSmoothLine('平均耗时', ts?.avgLatencyMs || [], '#059669'),
+      echartsSmoothLine('TTFB', ts?.ttfbAvgMs || [], '#7c3aed')
     ]
   };
+});
+
+const genDonutColors = (n) => Array.from({ length: Math.max(n, 1) }, (_, i) =>
+  `hsl(${(i * 360 / n + 15).toFixed(1)}, 52%, 58%)`
+);
+
+const errorRateOption = computed(() => {
+  const ts = statsData.value?.timeseries;
+  const days = ts?.days || [];
+  return {
+    tooltip: echartsTooltip({ trigger: 'axis', valueFormatter: (v) => (v * 100).toFixed(2) + '%' }),
+    legend: { data: ['错误率'], top: 0, textStyle: { fontSize: 11, color: 'var(--color-text-secondary)' } },
+    grid: echartsGrid({ left: 8, right: 20, top: 36, bottom: 24 }),
+    xAxis: echartsXAxis(days),
+    yAxis: echartsYAxis({ axisLabel: { fontSize: 10, color: 'var(--color-text-tertiary)', formatter: (v) => (v * 100).toFixed(0) + '%' }, min: 0 }),
+    series: [
+      { ...echartsSmoothLine('错误率', ts?.errorRate || [], '#f43f5e'), areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: 'rgba(244,63,94,0.10)' }, { offset: 1, color: 'rgba(244,63,94,0.01)' }] } } }
+    ]
+  };
+});
+
+const donutStyle = () => ({
+  type: 'pie',
+  radius: ['50%', '75%'],
+  center: ['50%', '52%'],
+  padAngle: 2,
+  avoidLabelOverlap: false,
+  label: { show: false },
+  emphasis: { label: { show: true, fontSize: 12 } }
 });
 
 const modelPieOption = computed(() => {
   const rows = statsData.value?.distributions?.byModel || [];
   const data = rows.map(r => ({ name: r.name, value: Number(r.tokens || 0) }));
   return {
-    tooltip: { trigger: 'item' },
-    legend: { type: 'scroll', orient: 'vertical', right: 10, top: 10, bottom: 10 },
-    series: [
-      {
-        type: 'pie',
-        radius: ['40%', '70%'],
-        center: ['40%', '55%'],
-        data,
-        avoidLabelOverlap: true,
-        label: { show: false },
-        emphasis: { label: { show: true, fontSize: 12 } }
-      }
-    ]
-  };
-});
-
-const errorRateOption = computed(() => {
-  const ts = statsData.value?.timeseries;
-  const days = ts?.days || [];
-  return {
-    tooltip: { trigger: 'axis', valueFormatter: (v) => (v * 100).toFixed(2) + '%' },
-    legend: { data: ['错误率'], top: 0 },
-    grid: { left: 50, right: 20, top: 40, bottom: 30 },
-    xAxis: { type: 'category', data: days, axisLabel: { color: '#6b7280' } },
-    yAxis: { type: 'value', axisLabel: { color: '#6b7280', formatter: (v) => (v * 100).toFixed(0) + '%' }, min: 0 },
-    series: [
-      { name: '错误率', type: 'line', smooth: true, data: ts?.errorRate || [], showSymbol: false, areaStyle: { color: 'rgba(244,63,94,0.08)' }, lineStyle: { color: '#f43f5e' }, itemStyle: { color: '#f43f5e' } }
-    ]
+    tooltip: echartsTooltip({ trigger: 'item' }),
+    color: genDonutColors(data.length),
+    legend: { type: 'scroll', orient: 'horizontal', left: 'center', bottom: 0, itemGap: 8, itemWidth: 10, itemHeight: 10, textStyle: { fontSize: 10, color: 'var(--color-text-secondary)' }, pageTextStyle: { color: 'var(--color-text-tertiary)' } },
+    series: [{ ...donutStyle(), data }]
   };
 });
 
@@ -759,9 +773,10 @@ const protocolPieOption = computed(() => {
   const rows = statsData.value?.distributions?.byClientProtocol || [];
   const data = rows.map(r => ({ name: r.name, value: Number(r.tokens || 0) }));
   return {
-    tooltip: { trigger: 'item' },
-    legend: { type: 'scroll', orient: 'vertical', right: 10, top: 10, bottom: 10 },
-    series: [{ type: 'pie', radius: ['40%', '70%'], center: ['40%', '55%'], data, avoidLabelOverlap: true, label: { show: false }, emphasis: { label: { show: true, fontSize: 12 } } }]
+    tooltip: echartsTooltip({ trigger: 'item' }),
+    color: genDonutColors(data.length),
+    legend: { type: 'scroll', orient: 'horizontal', left: 'center', bottom: 0, itemGap: 8, itemWidth: 10, itemHeight: 10, textStyle: { fontSize: 10, color: 'var(--color-text-secondary)' }, pageTextStyle: { color: 'var(--color-text-tertiary)' } },
+    series: [{ ...donutStyle(), data }]
   };
 });
 
@@ -769,9 +784,10 @@ const streamPieOption = computed(() => {
   const rows = statsData.value?.distributions?.byStreamType || [];
   const data = rows.map(r => ({ name: r.name, value: Number(r.tokens || 0) }));
   return {
-    tooltip: { trigger: 'item' },
-    legend: { type: 'scroll', orient: 'vertical', right: 10, top: 10, bottom: 10 },
-    series: [{ type: 'pie', radius: ['40%', '70%'], center: ['40%', '55%'], data, avoidLabelOverlap: true, label: { show: false }, emphasis: { label: { show: true, fontSize: 12 } } }]
+    tooltip: echartsTooltip({ trigger: 'item' }),
+    color: genDonutColors(data.length),
+    legend: { type: 'scroll', orient: 'horizontal', left: 'center', bottom: 0, itemGap: 8, itemWidth: 10, itemHeight: 10, textStyle: { fontSize: 10, color: 'var(--color-text-secondary)' }, pageTextStyle: { color: 'var(--color-text-tertiary)' } },
+    series: [{ ...donutStyle(), data }]
   };
 });
 
@@ -779,9 +795,10 @@ const errorCategoryPieOption = computed(() => {
   const rows = statsData.value?.distributions?.byErrorCategory || [];
   const data = rows.map(r => ({ name: r.name, value: Number(r.requests || 0) }));
   return {
-    tooltip: { trigger: 'item' },
-    legend: { type: 'scroll', orient: 'vertical', right: 10, top: 10, bottom: 10 },
-    series: [{ type: 'pie', radius: ['40%', '70%'], center: ['40%', '55%'], data, avoidLabelOverlap: true, label: { show: false }, emphasis: { label: { show: true, fontSize: 12 } } }]
+    tooltip: echartsTooltip({ trigger: 'item' }),
+    color: genDonutColors(data.length),
+    legend: { type: 'scroll', orient: 'horizontal', left: 'center', bottom: 0, itemGap: 8, itemWidth: 10, itemHeight: 10, textStyle: { fontSize: 10, color: 'var(--color-text-secondary)' }, pageTextStyle: { color: 'var(--color-text-tertiary)' } },
+    series: [{ ...donutStyle(), data }]
   };
 });
 
@@ -808,6 +825,9 @@ const loadAllData = async () => {
   }
   if (providerViewMode.value === 'usage') {
     await fetchProviderUsage();
+  }
+  if (appViewMode.value === 'usage' && activeTab.value === 'keys') {
+    await fetchAppUsage();
   }
 };
 
@@ -1924,6 +1944,26 @@ const formatJson = (str) => {
   }
 };
 
+const appViewMode = ref(localStorage.getItem('appViewMode') || 'table');
+const appUsageData = ref({});
+const appUsageLoading = ref(false);
+
+const persistAppViewMode = () => {
+  localStorage.setItem('appViewMode', appViewMode.value);
+};
+
+const fetchAppUsage = async () => {
+  appUsageLoading.value = true;
+  try {
+    const res = await axios.get(`${API_BASE}/keys/usage`);
+    appUsageData.value = res.data;
+  } catch (e) {
+    console.error('fetchAppUsage', e);
+  } finally {
+    appUsageLoading.value = false;
+  }
+};
+
 const formatTokens = (n) => {
   if (!n) return '0';
   if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
@@ -1937,8 +1977,43 @@ const vendorLabel = (v) => {
 };
 
 const vendorColor = (v) => {
-  const colors = { deepseek: 'bg-blue-100 text-blue-700', moonshot: 'bg-purple-100 text-purple-700', venice: 'bg-cyan-100 text-cyan-700', openai: 'bg-green-100 text-green-700', anthropic: 'bg-orange-100 text-orange-700', elevenlabs: 'bg-pink-100 text-pink-700', kimik2: 'bg-indigo-100 text-indigo-700', groq: 'bg-amber-100 text-amber-700', deepgram: 'bg-teal-100 text-teal-700' };
-  return colors[v] || 'bg-gray-100 text-gray-700';
+  const colors = { deepseek: 'bg-blue-100 text-accent', moonshot: 'bg-purple-100 text-purple-700', venice: 'bg-cyan-100 text-cyan-700', openai: 'bg-green-100 text-green-700', anthropic: 'bg-orange-100 text-orange-700', elevenlabs: 'bg-pink-100 text-pink-700', kimik2: 'bg-indigo-100 text-indigo-700', groq: 'bg-amber-100 text-amber-700', deepgram: 'bg-teal-100 text-teal-700' };
+  return colors[v] || 'bg-surface-elevated text-secondary';
+};
+
+const VENDOR_URL_PATTERNS = [
+  { pattern: 'api.deepseek.com',  id: 'deepseek' },
+  { pattern: 'api.moonshot.ai',   id: 'moonshot' },
+  { pattern: 'api.moonshot.cn',   id: 'moonshot' },
+  { pattern: 'api.venice.ai',     id: 'venice' },
+  { pattern: 'api.openai.com',    id: 'openai' },
+  { pattern: 'api.anthropic.com',  id: 'anthropic' },
+  { pattern: 'api.elevenlabs.io', id: 'elevenlabs' },
+  { pattern: 'kimi-k2.ai',        id: 'kimik2' },
+  { pattern: 'api.groq.com',      id: 'groq' },
+  { pattern: 'api.deepgram.com',  id: 'deepgram' },
+];
+
+const FALLBACK_PALETTE = [
+  '#3b82f6', '#ec4899', '#84cc16', '#8b5cf6',
+  '#f59e0b', '#06b6d4', '#f97316', '#10b981',
+  '#6366f1', '#ef4444', '#14b8a6', '#a855f7',
+  '#eab308', '#22d3ee',
+];
+
+const vendorAccentColor = (provider) => {
+  if (!provider) return '#3b82f6';
+  const baseUrl = provider.baseUrl || '';
+  for (const vp of VENDOR_URL_PATTERNS) {
+    if (baseUrl.includes(vp.pattern)) {
+      const c = VENDOR_CHART_COLORS[vp.id]?.[0];
+      if (c) return c;
+    }
+  }
+  let hash = 0;
+  const s = baseUrl || provider.name || '';
+  for (let i = 0; i < s.length; i++) hash = ((hash << 5) - hash) + s.charCodeAt(i);
+  return FALLBACK_PALETTE[Math.abs(hash) % FALLBACK_PALETTE.length];
 };
 
 const timeAgo = (dateStr) => {
@@ -1957,40 +2032,97 @@ const timeAgo = (dateStr) => {
 const VENDOR_CHART_COLORS = {
   deepseek: ['#3b82f6', '#22c55e'], moonshot: ['#a855f7', '#d946ef'], venice: ['#06b6d4', '#22d3ee'],
   openai: ['#22c55e', '#86efac'], anthropic: ['#f59e0b', '#fbbf24'], elevenlabs: ['#ec4899', '#f472b6'],
-  kimik2: ['#6366f1', '#818cf8'], groq: ['#f59e0b', '#d97706'], deepgram: ['#14b8a6', '#2dd4bf']
+  kimik2: ['#6366f1', '#818cf8'], groq: ['#84cc16', '#a3e635'], deepgram: ['#14b8a6', '#2dd4bf']
 };
+
+const echartsTooltip = (extra) => ({
+  ...extra,
+  appendToBody: true,
+  backgroundColor: 'var(--color-surface-card)',
+  borderColor: 'var(--color-border-default)',
+  borderWidth: 1,
+  borderRadius: 10,
+  padding: [12, 16],
+  textStyle: { color: 'var(--color-text-primary)', fontSize: 12 },
+  extraCssText: 'box-shadow: var(--shadow-modal);'
+});
+
+const echartsGrid = (overrides) => ({
+  left: 4, right: 4, top: 6, bottom: 20,
+  containLabel: false,
+  ...overrides
+});
+
+const echartsXAxis = (data, overrides) => ({
+  type: 'category',
+  data,
+  axisLabel: { fontSize: 10, color: 'var(--color-text-tertiary)', margin: 6 },
+  axisLine: { show: false },
+  axisTick: { show: false },
+  splitLine: { show: false },
+  ...overrides
+});
+
+const echartsYAxis = (overrides) => ({
+  type: 'value',
+  axisLabel: { fontSize: 10, color: 'var(--color-text-tertiary)', margin: 6, showMaxLabel: false },
+  axisLine: { show: false },
+  axisTick: { show: false },
+  splitLine: { show: true, lineStyle: { color: 'var(--color-border-default)', type: [4, 4], dashOffset: 0 } },
+  ...overrides
+});
+
+const echartsSmoothLine = (name, data, hexColor, opts) => ({
+  name,
+  type: 'line',
+  smooth: 0.4,
+  data,
+  showSymbol: false,
+  symbolSize: 4,
+  lineStyle: { width: 2, color: hexColor },
+  itemStyle: { color: hexColor },
+  ...opts
+});
+
+const echartsBar = (name, data, hexColor, opts) => ({
+  name,
+  type: 'bar',
+  data,
+  barMaxWidth: 24,
+  itemStyle: {
+    color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: hexColor }, { offset: 1, color: hexColor + '60' }] },
+    borderRadius: [4, 4, 0, 0]
+  },
+  emphasis: { itemStyle: { color: hexColor } },
+  ...opts
+});
 
 const usageChartOption = (data) => {
   const days = data?.daily || [];
   const vendor = data?.vendor;
-  const inputColor = VENDOR_CHART_COLORS[vendor]?.[0] || '#3b82f6';
-  const outputColor = VENDOR_CHART_COLORS[vendor]?.[1] || '#22c55e';
+  const c1 = VENDOR_CHART_COLORS[vendor]?.[0] || '#3b82f6';
+  const c2 = VENDOR_CHART_COLORS[vendor]?.[1] || '#22c55e';
+  const labels = days.map(d => d.date.slice(5));
   return {
-    tooltip: {
+    tooltip: echartsTooltip({
       trigger: 'axis',
       formatter: (params) => {
         const date = params[0]?.axisValue || '';
         const totalTokens = params.reduce((s, p) => s + p.value, 0);
-        let s = `<strong>${date}</strong><br/>`;
+        let s = `<div style="font-weight:600;margin-bottom:6px;color:var(--color-text-primary)">${date}</div>`;
         for (const p of params) {
-          s += `${p.marker} ${p.seriesName}: ${formatTokens(p.value)} tokens<br/>`;
+          s += `<div style="display:flex;align-items:center;gap:8px;margin:3px 0"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${p.color}"></span><span style="color:var(--color-text-tertiary);flex:1">${p.seriesName}</span><span style="font-weight:600;color:var(--color-text-primary)">${formatTokens(p.value)}</span></div>`;
         }
-        s += `总计: ${formatTokens(totalTokens)} tokens`;
+        s += `<div style="margin-top:4px;padding-top:4px;border-top:1px solid var(--color-border-default);font-weight:600;color:var(--color-text-primary)">${formatTokens(totalTokens)} tokens</div>`;
         return s;
       }
-    },
-    grid: { left: 36, right: 6, top: 8, bottom: 20 },
-    xAxis: {
-      type: 'category',
-      data: days.map(d => d.date.slice(5)),
-      axisLabel: { fontSize: 9, color: '#999' },
-      axisLine: { show: false },
-      axisTick: { show: false }
-    },
-    yAxis: { type: 'value', show: false },
+    }),
+    grid: echartsGrid({ bottom: 24 }),
+    xAxis: echartsXAxis(labels),
+    yAxis: echartsYAxis({ show: false }),
     series: [
-      { name: '输入', type: 'bar', data: days.map(d => d.tokensIn), stack: 'total', itemStyle: { color: inputColor, borderRadius: [0, 0, 0, 0] }, barMaxWidth: 14 },
-      { name: '输出', type: 'bar', data: days.map(d => d.tokensOut), stack: 'total', itemStyle: { color: outputColor, borderRadius: [0, 0, 0, 0] }, barMaxWidth: 14 }
+      echartsBar('输入', days.map(d => d.tokensIn), c1, { stack: 'total' }),
+      echartsBar('输出', days.map(d => d.tokensOut), c2, { stack: 'total' })
     ]
   };
 };
@@ -2035,6 +2167,9 @@ watch(activeTab, (tab) => {
         fetchManagedModels();
       }
     }
+  }
+  if (tab === 'keys') {
+    if (isAuthenticated.value && appViewMode.value === 'usage') fetchAppUsage();
   }
   if (tab === 'config') {
     if (isAuthenticated.value) {
@@ -2095,265 +2230,304 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div v-if="!isAuthenticated" class="min-h-screen bg-gray-50 flex items-center justify-center p-6">
-    <div class="w-full max-w-md bg-white rounded-2xl border border-gray-200 shadow-sm p-8">
+  <div v-if="!isAuthenticated" class="min-h-screen bg-surface-primary relative flex items-center justify-center p-6">
+    <div class="pointer-events-none fixed inset-0 overflow-hidden" aria-hidden="true">
+      <div class="grid-bg absolute inset-0"></div>
+      <div class="absolute -top-40 -left-40 h-[600px] w-[600px] rounded-full" style="background:radial-gradient(circle, rgba(59,130,246,0.05) 0%, transparent 70%);filter:blur(40px)"></div>
+      <div class="absolute -bottom-60 -right-20 h-[500px] w-[500px] rounded-full" style="background:radial-gradient(circle, rgba(139,92,246,0.04) 0%, transparent 70%);filter:blur(60px)"></div>
+    </div>
+    <div class="w-full max-w-md glow-card p-8 relative z-10">
       <div class="flex items-center gap-3 mb-6">
-        <Settings class="w-8 h-8 text-blue-600" />
+        <div class="flex h-9 w-9 items-center justify-center rounded-btn accent-soft0/12 ring-1 ring-blue-500/25">
+          <Settings class="w-5 h-5 text-accent" />
+        </div>
         <div>
-          <h1 class="text-xl font-bold">llmPylon Admin</h1>
-          <p class="text-xs text-gray-400">登录后才能进行管理操作</p>
+          <h1 class="text-lg font-bold" style="color:var(--color-text-primary)">llmPylon Admin</h1>
+          <p class="text-[11px]" style="color:var(--color-text-tertiary)">登录后才能进行管理操作</p>
         </div>
       </div>
       <div class="space-y-4">
         <div>
-          <label class="block text-xs font-bold text-gray-400 uppercase mb-1">用户名</label>
-          <input v-model="loginForm.username" type="text" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+          <label class="block text-[11px] font-semibold uppercase tracking-wide mb-1.5" style="color:var(--color-text-tertiary)">用户名</label>
+          <input v-model="loginForm.username" type="text" class="w-full px-4 py-2.5 rounded-btn text-sm outline-none transition-colors" style="background-color:var(--color-surface-input);border:1px solid var(--color-border-default);color:var(--color-text-primary)" placeholder="llmpylon" />
         </div>
         <div>
-          <label class="block text-xs font-bold text-gray-400 uppercase mb-1">密码</label>
-          <input v-model="loginForm.password" type="password" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+          <label class="block text-[11px] font-semibold uppercase tracking-wide mb-1.5" style="color:var(--color-text-tertiary)">密码</label>
+          <input v-model="loginForm.password" type="password" class="w-full px-4 py-2.5 rounded-btn text-sm outline-none transition-colors" style="background-color:var(--color-surface-input);border:1px solid var(--color-border-default);color:var(--color-text-primary)" placeholder="••••••••" />
         </div>
       </div>
-      <button @click="login" class="w-full mt-6 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-bold">
+      <button @click="login" class="w-full mt-6 px-4 py-2.5 bg-accent text-white rounded-btn hover:bg-accent-hover transition-colors font-semibold text-sm">
         登录
       </button>
-      <p class="text-[10px] text-gray-400 mt-4">默认用户/密码：llmpylon / llmpylon（首次登录必须修改密码）</p>
-      <p v-if="serverVersion" class="text-center text-[10px] text-gray-400 font-mono mt-2">v{{ serverVersion }}</p>
+      <p class="text-[11px] mt-4" style="color:var(--color-text-tertiary)">默认用户/密码：llmpylon / llmpylon（首次登录必须修改密码）</p>
+      <p v-if="serverVersion" class="text-center text-[11px] font-mono mt-2" style="color:var(--color-text-tertiary)">v{{ serverVersion }}</p>
     </div>
   </div>
 
-  <div v-else class="relative flex h-screen bg-gray-50 text-gray-900 overflow-hidden">
+  <div v-else class="relative flex h-screen bg-surface-primary overflow-hidden" style="color:var(--color-text-primary)">
+    <div class="pointer-events-none fixed inset-0 overflow-hidden" aria-hidden="true">
+      <div class="grid-bg absolute inset-0"></div>
+      <div class="absolute -top-40 -left-40 h-[600px] w-[600px] rounded-full" style="background:radial-gradient(circle, rgba(59,130,246,0.05) 0%, transparent 70%);filter:blur(40px)"></div>
+      <div class="absolute -bottom-60 -right-20 h-[500px] w-[500px] rounded-full" style="background:radial-gradient(circle, rgba(139,92,246,0.04) 0%, transparent 70%);filter:blur(60px)"></div>
+    </div>
     <div
       v-if="mobileMenuOpen"
-      class="fixed inset-0 z-30 bg-black/40 lg:hidden"
       @click="mobileMenuOpen = false"
+      class="modal-overlay lg:hidden"
     ></div>
     <!-- Sidebar -->
     <div
       :class="[
-        'w-64 bg-white border-r border-gray-200 flex flex-col fixed inset-y-0 left-0 z-40 transform transition-transform duration-200 lg:static lg:translate-x-0',
+        'w-64 flex flex-col fixed inset-y-0 left-0 z-40 transform transition-transform duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] lg:static lg:translate-x-0 backdrop-blur-md',
         mobileMenuOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'
       ]"
+      style="background-color:var(--color-surface-sidebar);border-right:1px solid var(--color-border-default)"
     >
-      <div class="p-6 border-b border-gray-200">
-        <h1 class="text-xl font-bold flex items-center gap-2">
-          <Settings class="w-6 h-6 text-blue-600" />
-          llmPylon Admin
-        </h1>
+      <div class="flex h-14 items-center justify-between px-4" style="border-bottom:1px solid var(--color-border-default)">
+        <div class="flex items-center gap-2.5">
+          <div class="flex h-7 w-7 items-center justify-center rounded-btn accent-soft0/12 ring-1 ring-blue-500/25">
+            <Settings class="w-4 h-4 text-blue-400" />
+          </div>
+          <div>
+            <p class="text-sm font-semibold leading-tight" style="color:var(--color-text-primary)">llmPylon Admin</p>
+            <p class="text-[10px]" style="color:var(--color-text-tertiary)">{{ $t('nav.subtitle') }}</p>
+          </div>
+        </div>
+        <span v-if="serverVersion" class="rounded-md px-1.5 py-0.5 text-[10px] font-semibold font-mono" style="background-color:var(--color-accent-soft);color:#60a5fa;border:1px solid rgba(59,130,246,0.2)">v{{ serverVersion }}</span>
       </div>
-      <nav class="flex-1 p-4 space-y-2">
+      <nav class="flex-1 overflow-y-auto p-3" style="min-height:0">
+        <p class="mb-1 px-3 text-[10px] font-semibold uppercase tracking-wider" style="color:var(--color-text-tertiary)">{{ $t('nav.manage') }}</p>
         <button 
           @click="activeTab = 'providers'"
-          :class="['w-full flex items-center gap-3 px-4 py-2 rounded-lg transition-colors', activeTab === 'providers' ? 'bg-blue-50 text-blue-600' : 'hover:bg-gray-100']"
+          :class="['nav-item', activeTab === 'providers' ? 'active' : '']"
         >
-          <Settings class="w-5 h-5" />
-          <span class="flex-1 text-left whitespace-nowrap">厂商管理</span>
+          <Settings class="w-4 h-4 shrink-0" />
+          <span class="flex-1 text-left whitespace-nowrap">{{ $t('nav.providers') }}</span>
           <span
             v-if="activeProvider"
-            class="ml-auto max-w-[140px] px-1.5 py-1 bg-purple-50 text-purple-700 rounded text-[8px] leading-none font-bold uppercase tracking-tight whitespace-nowrap overflow-hidden text-ellipsis"
+            class="ml-auto max-w-[130px] px-1.5 py-0.5 rounded text-[9px] leading-none font-semibold font-mono truncate"
             :title="activeProvider.name"
+            style="background-color:var(--color-accent-soft);color:#60a5fa;border:1px solid rgba(59,130,246,0.15)"
           >
             {{ activeProvider.name }}
           </span>
         </button>
         <button 
           @click="activeTab = 'keys'"
-          :class="['w-full flex items-center gap-3 px-4 py-2 rounded-lg transition-colors', activeTab === 'keys' ? 'bg-blue-50 text-blue-600' : 'hover:bg-gray-100']"
+          :class="['nav-item', activeTab === 'keys' ? 'active' : '']"
         >
-          <LayoutGrid class="w-5 h-5" />
-          应用管理
+          <LayoutGrid class="w-4 h-4 shrink-0" />
+          <span class="flex-1 text-left whitespace-nowrap">{{ $t('nav.keys') }}</span>
         </button>
         <button 
           @click="activeTab = 'models'"
-          :class="['w-full flex items-center gap-3 px-4 py-2 rounded-lg transition-colors', activeTab === 'models' ? 'bg-blue-50 text-blue-600' : 'hover:bg-gray-100']"
+          :class="['nav-item', activeTab === 'models' ? 'active' : '']"
         >
-          <Cpu class="w-5 h-5" />
-          <span class="flex-1 text-left whitespace-nowrap">模型管理</span>
+          <Cpu class="w-4 h-4 shrink-0" />
+          <span class="flex-1 text-left whitespace-nowrap">{{ $t('nav.models') }}</span>
           <span
             v-if="activeDefaultModel"
-            class="ml-auto max-w-[140px] px-1.5 py-1 bg-purple-50 text-purple-700 rounded text-[8px] leading-none font-semibold font-mono tracking-tight whitespace-nowrap overflow-hidden text-ellipsis"
+            class="ml-auto max-w-[130px] px-1.5 py-0.5 rounded text-[9px] leading-none font-semibold font-mono truncate"
             :title="activeDefaultModel.name"
+            style="background-color:var(--color-accent-soft);color:#60a5fa;border:1px solid rgba(59,130,246,0.15)"
           >
             {{ activeDefaultModel.name }}
           </span>
           <span
             v-else
-            class="ml-auto max-w-[140px] px-1.5 py-1 bg-gray-100 text-gray-500 rounded text-[8px] leading-none font-bold uppercase tracking-tight whitespace-nowrap overflow-hidden text-ellipsis"
+            class="ml-auto max-w-[130px] px-1.5 py-0.5 rounded text-[9px] leading-none font-semibold font-mono truncate"
+            style="background-color:var(--color-surface-elevated);color:var(--color-text-tertiary);border:1px solid var(--color-border-default)"
           >
-            未设置
+            {{ $t('nav.notSet') }}
           </span>
         </button>
         <button 
           @click="activeTab = 'modelRules'"
-          :class="['w-full flex items-center gap-3 px-4 py-2 rounded-lg transition-colors', activeTab === 'modelRules' ? 'bg-blue-50 text-blue-600' : 'hover:bg-gray-100']"
+          :class="['nav-item', activeTab === 'modelRules' ? 'active' : '']"
         >
-          <ArrowRightLeft class="w-5 h-5" />
-          <span class="flex-1 text-left whitespace-nowrap">模型规则</span>
+          <ArrowRightLeft class="w-4 h-4 shrink-0" />
+          <span class="flex-1 text-left whitespace-nowrap">{{ $t('nav.modelRules') }}</span>
           <span
             v-if="enabledModelRulesCount"
-            class="ml-auto max-w-[140px] px-1.5 py-1 bg-purple-50 text-purple-700 rounded text-[8px] leading-none font-bold uppercase tracking-tight whitespace-nowrap overflow-hidden text-ellipsis"
+            class="ml-auto max-w-[130px] px-1.5 py-0.5 rounded text-[9px] leading-none font-semibold font-mono truncate"
+            style="background-color:var(--color-accent-soft);color:#60a5fa;border:1px solid rgba(59,130,246,0.15)"
           >
-            启用 {{ enabledModelRulesCount }}
+            {{ $t('nav.enabled') }} {{ enabledModelRulesCount }}
           </span>
         </button>
         <button 
           @click="activeTab = 'logs'"
-          :class="['w-full flex items-center gap-3 px-4 py-2 rounded-lg transition-colors', activeTab === 'logs' ? 'bg-blue-50 text-blue-600' : 'hover:bg-gray-100']"
+          :class="['nav-item', activeTab === 'logs' ? 'active' : '']"
         >
-          <History class="w-5 h-5" />
-          对话日志
+          <History class="w-4 h-4 shrink-0" />
+          <span class="flex-1 text-left whitespace-nowrap">{{ $t('nav.logs') }}</span>
         </button>
         <button 
           @click="activeTab = 'stats'"
-          :class="['w-full flex items-center gap-3 px-4 py-2 rounded-lg transition-colors', activeTab === 'stats' ? 'bg-blue-50 text-blue-600' : 'hover:bg-gray-100']"
+          :class="['nav-item', activeTab === 'stats' ? 'active' : '']"
         >
-          <BarChart3 class="w-5 h-5" />
-          统计
+          <BarChart3 class="w-4 h-4 shrink-0" />
+          <span class="flex-1 text-left whitespace-nowrap">{{ $t('nav.stats') }}</span>
         </button>
         <button
           @click="activeTab = 'config'"
-          :class="['w-full flex items-center gap-3 px-4 py-2 rounded-lg transition-colors', activeTab === 'config' ? 'bg-blue-50 text-blue-600' : 'hover:bg-gray-100']"
+          :class="['nav-item', activeTab === 'config' ? 'active' : '']"
         >
-          <Settings class="w-5 h-5" />
-          配置管理
+          <Settings class="w-4 h-4 shrink-0" />
+          <span class="flex-1 text-left whitespace-nowrap">{{ $t('nav.config') }}</span>
         </button>
         <button
           @click="activeTab = 'notifications'"
-          :class="['w-full flex items-center gap-3 px-4 py-2 rounded-lg transition-colors', activeTab === 'notifications' ? 'bg-blue-50 text-blue-600' : 'hover:bg-gray-100']"
+          :class="['nav-item', activeTab === 'notifications' ? 'active' : '']"
         >
-          <Bell class="w-5 h-5" />
-          通知管理
+          <Bell class="w-4 h-4 shrink-0" />
+          <span class="flex-1 text-left whitespace-nowrap">{{ $t('nav.notifications') }}</span>
         </button>
         <button
           @click="activeTab = 'users'"
-          :class="['w-full flex items-center gap-3 px-4 py-2 rounded-lg transition-colors', activeTab === 'users' ? 'bg-blue-50 text-blue-600' : 'hover:bg-gray-100']"
+          :class="['nav-item', activeTab === 'users' ? 'active' : '']"
         >
-          <User class="w-5 h-5" />
-          用户管理
+          <User class="w-4 h-4 shrink-0" />
+          <span class="flex-1 text-left whitespace-nowrap">{{ $t('nav.users') }}</span>
         </button>
         <button 
           @click="activeTab = 'help'"
-          :class="['w-full flex items-center gap-3 px-4 py-2 rounded-lg transition-colors', activeTab === 'help' ? 'bg-blue-50 text-blue-600' : 'hover:bg-gray-100']"
+          :class="['nav-item', activeTab === 'help' ? 'active' : '']"
         >
-          <BookOpen class="w-5 h-5" />
-          客户端帮助
+          <BookOpen class="w-4 h-4 shrink-0" />
+          <span class="flex-1 text-left whitespace-nowrap">{{ $t('nav.help') }}</span>
         </button>
       </nav>
-      <div class="p-4 border-t border-gray-200">
-        <div class="flex items-center gap-2">
+      <div class="flex flex-col gap-1 p-3" style="border-top:1px solid var(--color-border-default)">
+        <button @click="toggleTheme" class="nav-item justify-between" :title="isDark ? '切换白天模式' : '切换夜晚模式'">
+          <span class="flex items-center gap-2.5">
+            <svg v-if="isDark" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="h-4 w-4 shrink-0"><path d="M20.985 12.486a9 9 0 1 1-9.473-9.472c.405-.022.617.46.402.803a6 6 0 0 0 8.268 8.268c.344-.215.825-.004.803.401"/></svg>
+            <svg v-else xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="h-4 w-4 shrink-0 text-yellow-400"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
+            <span style="color:var(--color-text-secondary)">{{ isDark ? (currentLang === 'zh' ? '夜晚模式' : 'Night') : (currentLang === 'zh' ? '白天模式' : 'Day') }}</span>
+          </span>
+          <div class="flex h-5 w-9 items-center rounded-full px-0.5 transition-all duration-300" :style="{ backgroundColor: isDark ? 'rgba(59,130,246,0.3)' : 'rgba(234,179,8,0.3)', justifyContent: isDark ? 'flex-end' : 'flex-start' }">
+            <div class="h-4 w-4 rounded-full bg-white shadow-sm" />
+          </div>
+        </button>
+        <button @click="toggleLang" class="nav-item justify-between" :title="currentLang === 'zh' ? 'Switch to English' : '切换为中文'">
+          <span class="flex items-center gap-2.5">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="h-4 w-4 shrink-0"><path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/></svg>
+            <span>{{ currentLang === 'zh' ? '中文' : 'English' }}</span>
+          </span>
+          <span class="num rounded border px-1.5 py-0.5 text-[11px]" style="border-color:var(--color-border-default);color:var(--color-text-tertiary)">{{ currentLang === 'zh' ? 'EN' : '中' }}</span>
+        </button>
+        <div class="flex items-center gap-2 px-3 py-1">
           <span
             :class="[
               'w-2.5 h-2.5 rounded-full',
               proxyHealth.status === 'up' ? 'bg-green-500' : (proxyHealth.status === 'down' ? 'bg-red-500' : 'bg-gray-300')
             ]"
           ></span>
-          <span class="text-xs font-bold text-gray-600">
-            {{ proxyHealth.status === 'up' ? 'Proxy 运行中' : (proxyHealth.status === 'down' ? 'Proxy 未运行' : 'Proxy 检测中') }}
+          <span class="text-[11px] font-semibold" style="color:var(--color-text-secondary)">
+            {{ proxyHealth.status === 'up' ? $t('nav.proxyUp') : (proxyHealth.status === 'down' ? $t('nav.proxyDown') : $t('nav.proxyChecking')) }}
           </span>
         </div>
-        <p v-if="serverVersion" class="text-[10px] text-gray-400 font-mono mt-2">v{{ serverVersion }}</p>
       </div>
     </div>
 
     <!-- Main Content -->
     <div class="flex-1 flex flex-col overflow-hidden">
-      <header class="h-16 bg-white border-b border-gray-200 flex items-center justify-between px-4 sm:px-6 lg:px-8">
+      <header class="sticky top-0 z-20 flex h-14 items-center justify-between px-4 md:px-6 backdrop-blur-md" style="background-color:var(--color-surface-overlay);border-bottom:1px solid var(--color-border-default)">
         <div class="flex items-center gap-3 min-w-0">
           <button
             @click="mobileMenuOpen = true"
-            class="inline-flex lg:hidden p-2 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50"
+            class="flex h-8 w-8 items-center justify-center rounded-btn transition-colors hover:bg-black/5 lg:hidden"
+            style="color:var(--color-text-secondary)"
           >
             <Menu class="w-5 h-5" />
           </button>
-          <h2 class="text-base sm:text-lg font-semibold truncate">{{ activeTab === 'providers' ? '厂商配置' : (activeTab === 'keys' ? '应用管理' : (activeTab === 'models' ? '模型管理' : (activeTab === 'modelRules' ? '模型规则' : (activeTab === 'stats' ? '统计' : (activeTab === 'config' ? '配置管理' : (activeTab === 'notifications' ? '通知管理' : (activeTab === 'users' ? '用户管理' : (activeTab === 'help' ? '客户端帮助' : '对话历史')))))))) }}</h2>
+          <h2 class="text-sm font-semibold truncate" style="color:var(--color-text-primary)">{{ activeTab === 'providers' ? '厂商配置' : (activeTab === 'keys' ? '应用管理' : (activeTab === 'models' ? '模型管理' : (activeTab === 'modelRules' ? '模型规则' : (activeTab === 'stats' ? '统计' : (activeTab === 'config' ? '配置管理' : (activeTab === 'notifications' ? '通知管理' : (activeTab === 'users' ? '用户管理' : (activeTab === 'help' ? '客户端帮助' : '对话历史')))))))) }}</h2>
         </div>
-        <div class="flex items-center gap-4">
-          <div class="flex items-center gap-2 sm:gap-3">
-            <span v-if="serverVersion" class="hidden sm:inline text-[10px] text-gray-400 font-mono tabular-nums" title="软件版本">v{{ serverVersion }}</span>
-            <span class="hidden sm:inline text-xs font-bold text-gray-500">{{ authUser?.username }}</span>
-            <button @click="logout" class="px-2.5 sm:px-3 py-1.5 text-xs font-bold rounded-lg border border-gray-200 hover:bg-gray-50 transition-colors whitespace-nowrap">
-              退出登录
-            </button>
-          </div>
+        <div class="flex items-center gap-3">
+          <span v-if="serverVersion" class="hidden sm:inline text-[10px] font-mono tabular-nums" style="color:var(--color-text-tertiary)">v{{ serverVersion }}</span>
+          <span class="hidden sm:inline text-xs font-semibold" style="color:var(--color-text-secondary)">{{ authUser?.username }}</span>
+          <button @click="logout" class="px-3 py-1.5 text-xs font-semibold rounded-btn transition-colors whitespace-nowrap" style="border:1px solid var(--color-border-default);color:var(--color-text-secondary);background:transparent">
+            退出登录
+          </button>
         </div>
       </header>
 
       <main class="flex-1 overflow-auto p-4 sm:p-6 lg:p-8">
         <div v-if="activeTab === 'help'" class="space-y-6">
-          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-8">
-            <h3 class="text-lg font-bold text-gray-900 mb-2">客户端设置</h3>
-            <div class="rounded-xl border border-gray-200 bg-gray-50 p-5 mt-4">
+          <div class="glow-card p-8">
+            <h3 class="text-lg font-bold mb-3" style="color:var(--color-text-primary)">客户端设置</h3>
+            <div class="rounded-card p-5 mt-4" style="background-color:var(--color-surface-elevated);border:1px solid var(--color-border-default)">
               <div class="space-y-3">
                 <div class="flex items-center gap-2">
-                  <span class="px-2 py-1 bg-purple-50 text-purple-700 rounded text-[10px] font-bold uppercase tracking-tight">Base URL</span>
-                  <code class="text-xs font-mono text-gray-700 break-all">http://你的服务器IP:3000/proxy</code>
+                  <span class="badge-sm" style="background-color:rgba(139,92,246,0.10);color:#7c3aed;border:1px solid rgba(139,92,246,0.18)">Base URL</span>
+                  <code class="text-xs font-mono break-all" style="color:var(--color-text-secondary)">http://你的服务器IP:3000/proxy</code>
                 </div>
-                <div class="text-xs text-gray-400 ml-1">
+                <div class="text-xs ml-1" style="color:var(--color-text-tertiary)">
                   不同客户端需使用不同的请求路径：OpenAI 客户端使用 <code class="text-[10px] font-mono">/proxy/v1/chat/completions</code>，Anthropic 客户端使用 <code class="text-[10px] font-mono">/proxy/v1/messages</code>
                 </div>
                 <div class="flex items-center gap-2">
-                  <span class="px-2 py-1 bg-purple-50 text-purple-700 rounded text-[10px] font-bold uppercase tracking-tight">API Key</span>
-                  <code class="text-xs font-mono text-gray-700 break-all">在应用管理中创建应用，复制生成的 key</code>
+                  <span class="badge-sm" style="background-color:rgba(139,92,246,0.10);color:#7c3aed;border:1px solid rgba(139,92,246,0.18)">API Key</span>
+                  <code class="text-xs font-mono break-all" style="color:var(--color-text-secondary)">在应用管理中创建应用，复制生成的 key</code>
                 </div>
                 <div class="flex items-center gap-2">
-                  <span class="px-2 py-1 bg-purple-50 text-purple-700 rounded text-[10px] font-bold uppercase tracking-tight">Model</span>
-                  <code class="text-xs font-mono text-gray-700 break-all">建议设置为 {{ MAGIC_PROXY_MODEL }}（大小写不敏感），自动解析为绑定的默认模型</code>
+                  <span class="badge-sm" style="background-color:rgba(139,92,246,0.10);color:#7c3aed;border:1px solid rgba(139,92,246,0.18)">Model</span>
+                  <code class="text-xs font-mono break-all" style="color:var(--color-text-secondary)">建议设置为 {{ MAGIC_PROXY_MODEL }}（大小写不敏感），自动解析为绑定的默认模型</code>
                 </div>
               </div>
             </div>
           </div>
 
-          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-8">
-            <h3 class="text-lg font-bold text-gray-900 mb-2">使用方法</h3>
-            <div class="space-y-3 text-sm text-gray-700">
-              <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
-                <p class="text-xs font-bold text-gray-500 mb-1">切换厂商和默认模型</p>
+          <div class="glow-card p-8">
+            <h3 class="text-lg font-bold mb-3" style="color:var(--color-text-primary)">使用方法</h3>
+            <div class="space-y-3 text-sm" style="color:var(--color-text-secondary)">
+              <div class="rounded-card p-5" style="background-color:var(--color-surface-elevated);border:1px solid var(--color-border-default)">
+                <p class="text-xs font-semibold mb-1" style="color:var(--color-text-secondary)">切换厂商和默认模型</p>
                 <p>在"厂商管理"中点击厂商卡片即可切换生效厂商；在"模型管理"中选择厂商后点击模型卡片设置该厂商的默认模型。客户端使用 {{ MAGIC_PROXY_MODEL }} 作为 model 时会根据优先级自动路由：App 绑定模型 &gt; 厂商默认模型 &gt; 全局默认模型。</p>
               </div>
-              <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
-                <p class="text-xs font-bold text-gray-500 mb-1">创建应用并绑定模型</p>
+              <div class="rounded-card p-5" style="background-color:var(--color-surface-elevated);border:1px solid var(--color-border-default)">
+                <p class="text-xs font-semibold mb-1" style="color:var(--color-text-secondary)">创建应用并绑定模型</p>
                 <p>在"应用管理"中创建应用获得客户端 Key。可为每个应用单独绑定厂商和模型，绑定后不受全局切换影响。每个应用自动分配独立颜色，在对话日志中一目了然。</p>
               </div>
-              <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
-                <p class="text-xs font-bold text-gray-500 mb-1">模型规则强制映射</p>
+              <div class="rounded-card p-5" style="background-color:var(--color-surface-elevated);border:1px solid var(--color-border-default)">
+                <p class="text-xs font-semibold mb-1" style="color:var(--color-text-secondary)">模型规则强制映射</p>
                 <p>在"模型规则"中添加规则（支持 * 通配符，大小写敏感），请求的 model 字段命中规则后自动替换为目标模型。</p>
               </div>
-              <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
-                <p class="text-xs font-bold text-gray-500 mb-1">开启协议转换</p>
+              <div class="rounded-card p-5" style="background-color:var(--color-surface-elevated);border:1px solid var(--color-border-default)">
+                <p class="text-xs font-semibold mb-1" style="color:var(--color-text-secondary)">开启协议转换</p>
                 <p>编辑厂商，打开"协议强制转换"开关，支持 OpenAI ↔ Anthropic 双向转换。例如：OpenAI 厂商开启后，客户端使用 <code>/proxy/v1/messages</code> 访问；Anthropic 厂商开启后，客户端使用 <code>/proxy/v1/chat/completions</code> 访问。</p>
               </div>
-              <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
-                <p class="text-xs font-bold text-gray-500 mb-1">删除/恢复厂商和应用</p>
+              <div class="rounded-card p-5" style="background-color:var(--color-surface-elevated);border:1px solid var(--color-border-default)">
+                <p class="text-xs font-semibold mb-1" style="color:var(--color-text-secondary)">删除/恢复厂商和应用</p>
                 <p>删除时移入回收站（可恢复），在厂商管理或应用管理页点击"回收站"进入。可恢复或彻底删除。彻底删除前会清理关联配置和日志。</p>
               </div>
-              <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
-                <p class="text-xs font-bold text-gray-500 mb-1">消息通知</p>
+              <div class="rounded-card p-5" style="background-color:var(--color-surface-elevated);border:1px solid var(--color-border-default)">
+                <p class="text-xs font-semibold mb-1" style="color:var(--color-text-secondary)">消息通知</p>
                 <p>在"通知管理"中为 App 配置 webhook。一轮对话完成后自动发送 HTTP 通知到指定 URL。支持自定义请求方法、Headers、JSON 模板、客户端类型过滤，还可设置对话结束等待时间避免频繁通知。</p>
               </div>
-              <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
-                <p class="text-xs font-bold text-gray-500 mb-1">统计面板与配置管理</p>
+              <div class="rounded-card border border-primary bg-surface-elevated p-5">
+                <p class="text-xs font-bold text-secondary mb-1">统计面板与配置管理</p>
                 <p>"统计"页提供请求趋势图、模型分布饼图、活动热力图、延迟 P50/P90/P99 百分位、Top 慢/错请求。"配置管理"页可设置日志/统计保留天数、上游 HTTP 超时、请求头过滤黑名单。</p>
               </div>
-              <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
-                <p class="text-xs font-bold text-gray-500 mb-1">备份配置</p>
+              <div class="rounded-card border border-primary bg-surface-elevated p-5">
+                <p class="text-xs font-bold text-secondary mb-1">备份配置</p>
                 <p>厂商管理页可导出/导入单个厂商。配置管理页可导出/导入全局配置（含厂商、模型、应用、规则、回收站内容）。</p>
               </div>
             </div>
           </div>
 
-          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-8">
-            <h3 class="text-lg font-bold text-gray-900 mb-2">排查问题</h3>
-            <div class="space-y-3 text-sm text-gray-700">
-              <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
-                <p class="text-xs font-bold text-gray-500 mb-1">模型路由不符合预期</p>
+          <div class="glow-card p-8">
+            <h3 class="text-lg font-bold text-primary mb-2">排查问题</h3>
+            <div class="space-y-3 text-sm text-secondary">
+              <div class="rounded-card border border-primary bg-surface-elevated p-5">
+                <p class="text-xs font-bold text-secondary mb-1">模型路由不符合预期</p>
                 <p>进入"对话日志"，查看请求的 <span class="font-mono text-xs">model → actualModel</span> 和目标 URL，确认模型规则和应用绑定是否正确。</p>
               </div>
-              <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
-                <p class="text-xs font-bold text-gray-500 mb-1">协议错误</p>
+              <div class="rounded-card border border-primary bg-surface-elevated p-5">
+                <p class="text-xs font-bold text-secondary mb-1">协议错误</p>
                 <p>日志状态显示"协议错误"时，检查厂商的协议转换开关与客户端使用的 endpoint 是否匹配：转换开启时使用非原生协议，关闭时使用原生协议。</p>
               </div>
-              <div class="rounded-xl border border-gray-200 bg-gray-50 p-5">
-                <p class="text-xs font-bold text-gray-500 mb-1">流中断</p>
+              <div class="rounded-card border border-primary bg-surface-elevated p-5">
+                <p class="text-xs font-bold text-secondary mb-1">流中断</p>
                 <p>日志状态显示"流中断"时，可能是上游响应异常或网络波动。代理内置流式重试机制（可配置重试次数和超时时间）。展开对话日志详情可查看原始上游响应和转换后响应。</p>
               </div>
             </div>
@@ -2363,33 +2537,33 @@ onUnmounted(() => {
         <!-- Providers View -->
         <div v-if="activeTab === 'providers'" class="space-y-6">
           <div class="flex flex-col sm:flex-row gap-3 sm:gap-4 sm:justify-between sm:items-center">
-            <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">{{ showRecycleBin ? '回收站' : '当前已添加的厂商' }}</h3>
+            <h3 class="text-sm font-medium text-secondary uppercase tracking-wider">{{ showRecycleBin ? '回收站' : '当前已添加的厂商' }}</h3>
             <div class="flex flex-wrap gap-2">
               <template v-if="!showRecycleBin">
                 <button
                   @click="openExportDialog"
-                  class="flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-sm border border-gray-200"
+                  class="flex items-center gap-2 px-4 py-2 bg-surface-elevated text-secondary rounded-btn hover:bg-surface-elevated transition-colors text-sm border border-primary"
                 >
                   <Download class="w-4 h-4" />
                   导出
                 </button>
                 <button
                   @click="openImportDialog"
-                  class="flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-sm border border-gray-200"
+                  class="flex items-center gap-2 px-4 py-2 bg-surface-elevated text-secondary rounded-btn hover:bg-surface-elevated transition-colors text-sm border border-primary"
                 >
                   <Upload class="w-4 h-4" />
                   导入
                 </button>
                 <button
                   @click="showAddProvider = true; showProviderApiKey = false; if (selectedLog) closeLogDetail()"
-                class="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
+                class="flex items-center gap-2 px-4 py-2 bg-accent text-white rounded-btn hover:bg-accent-hover transition-colors text-sm"
               >
                 <Plus class="w-4 h-4" />
                 添加厂商
                 </button>
                 <button
                   @click="showRecycleBin = true; fetchDeletedProviders()"
-                  class="flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 transition-colors text-sm border border-gray-200"
+                  class="flex items-center gap-2 px-4 py-2 bg-surface-elevated text-secondary rounded-btn hover:bg-surface-elevated transition-colors text-sm border border-primary"
                 >
                   <Trash2 class="w-4 h-4" />
                   回收站
@@ -2399,7 +2573,7 @@ onUnmounted(() => {
               <button
                 v-else
                 @click="showRecycleBin = false"
-                class="flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-sm border border-gray-200"
+                class="flex items-center gap-2 px-4 py-2 bg-surface-elevated text-secondary rounded-btn hover:bg-surface-elevated transition-colors text-sm border border-primary"
               >
                 厂商列表
               </button>
@@ -2408,22 +2582,22 @@ onUnmounted(() => {
 
           <!-- Sort & view controls -->
           <div v-if="!showRecycleBin" class="flex flex-wrap items-center gap-2">
-            <select v-model="providerSortBy" @change="persistViewMode()" class="text-xs px-3 py-1.5 border border-gray-200 rounded-lg bg-white text-gray-600 outline-none">
+            <select v-model="providerSortBy" @change="persistViewMode()" class="text-xs px-3 py-1.5 border border-primary rounded-btn bg-white text-secondary outline-none">
               <option value="custom">自定义排序</option>
               <option value="name">按名称</option>
               <option value="createdAt">按创建时间</option>
             </select>
-            <button @click="providerSortOrder = providerSortOrder === 'asc' ? 'desc' : 'asc'; persistViewMode()" class="p-1.5 text-gray-500 hover:bg-gray-100 rounded-lg transition-colors" :title="providerSortOrder === 'asc' ? '升序' : '降序'">
+            <button @click="providerSortOrder = providerSortOrder === 'asc' ? 'desc' : 'asc'; persistViewMode()" class="p-1.5 text-secondary hover:bg-surface-elevated rounded-btn transition-colors" :title="providerSortOrder === 'asc' ? '升序' : '降序'">
               <ArrowUpDown class="w-4 h-4" :class="providerSortOrder === 'desc' ? 'rotate-180' : ''" />
             </button>
-            <div class="flex ml-auto gap-1 bg-gray-100 rounded-lg p-0.5">
-              <button @click="providerViewMode = 'grid'; persistViewMode()" class="p-1.5 rounded-md transition-colors" :class="providerViewMode === 'grid' ? 'bg-white shadow text-blue-600' : 'text-gray-400 hover:text-gray-600'" title="网格视图">
+            <div class="flex ml-auto gap-1 bg-surface-elevated rounded-btn p-0.5">
+              <button @click="providerViewMode = 'grid'; persistViewMode()" class="p-1.5 rounded-md transition-colors" :class="providerViewMode === 'grid' ? 'bg-white shadow text-accent' : 'text-tertiary hover:text-secondary'" title="网格视图">
                 <LayoutGrid class="w-4 h-4" />
               </button>
-              <button @click="providerViewMode = 'list'; persistViewMode()" class="p-1.5 rounded-md transition-colors" :class="providerViewMode === 'list' ? 'bg-white shadow text-blue-600' : 'text-gray-400 hover:text-gray-600'" title="列表视图">
+              <button @click="providerViewMode = 'list'; persistViewMode()" class="p-1.5 rounded-md transition-colors" :class="providerViewMode === 'list' ? 'bg-white shadow text-accent' : 'text-tertiary hover:text-secondary'" title="列表视图">
                 <List class="w-4 h-4" />
               </button>
-              <button @click="providerViewMode = 'usage'; persistViewMode(); fetchProviderUsage()" class="p-1.5 rounded-md transition-colors" :class="providerViewMode === 'usage' ? 'bg-white shadow text-blue-600' : 'text-gray-400 hover:text-gray-600'" title="用量视图">
+              <button @click="providerViewMode = 'usage'; persistViewMode(); fetchProviderUsage()" class="p-1.5 rounded-md transition-colors" :class="providerViewMode === 'usage' ? 'bg-white shadow text-accent' : 'text-tertiary hover:text-secondary'" title="用量视图">
                 <BarChart3 class="w-4 h-4" />
               </button>
             </div>
@@ -2440,13 +2614,14 @@ onUnmounted(() => {
               @dragend="onProviderDragEnd"
               @dragover="onProviderDragOver"
               @drop="onProviderDrop($event, idx)"
-              class="bg-white p-6 rounded-xl border border-gray-200 shadow-sm hover:shadow-md transition-shadow relative overflow-hidden cursor-pointer"
+              class="glow-card p-6 hover:shadow-md transition-shadow relative overflow-hidden cursor-pointer"
               :class="{'border-blue-500 ring-1 ring-blue-500': p.active, 'opacity-50': providerDragIndex === idx}"
             >
-              <div v-if="providerSortBy === 'custom'" class="absolute top-2 left-2 text-gray-300 cursor-grab active:cursor-grabbing">
+              <div class="h-[2px] absolute top-0 left-0 right-0" :style="{ background: `linear-gradient(90deg, ${vendorAccentColor(p)}80, transparent 60%)` }" />
+              <div v-if="providerSortBy === 'custom'" class="absolute top-2 left-2 text-tertiary cursor-grab active:cursor-grabbing">
                 <GripVertical class="w-4 h-4" />
               </div>
-              <div v-if="p.active" class="absolute top-0 right-0 bg-blue-500 text-white px-2 py-1 text-[10px] font-bold rounded-bl-lg flex items-center gap-1">
+              <div v-if="p.active" class="absolute top-0 right-0 bg-accent text-white px-2 py-1 text-[10px] font-bold rounded-bl-lg flex items-center gap-1">
                 <Check class="w-3 h-3" /> 生效中
               </div>
               
@@ -2454,14 +2629,14 @@ onUnmounted(() => {
                 <div>
                   <h4 class="font-bold text-lg">{{ p.name }}</h4>
                   <div class="flex flex-wrap gap-1.5 mt-1">
-                    <span class="text-xs px-2 py-0.5 bg-gray-100 text-gray-600 rounded-full border border-gray-200 uppercase">{{ p.type }}</span>
+                    <span class="text-xs px-2 py-0.5 bg-surface-elevated text-secondary rounded-full border border-primary uppercase">{{ p.type }}</span>
                     <span v-if="p.protocolConvert" class="text-xs px-2 py-0.5 bg-amber-50 text-amber-700 rounded-full border border-amber-200 font-medium">转换</span>
                   </div>
                 </div>
                 <div class="flex gap-2">
                   <button 
                     @click.stop="openEditModal(p)"
-                    class="p-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+                    class="p-2 text-accent hover:bg-accent-soft rounded-btn transition-colors"
                     title="编辑厂商"
                   >
                     <Pencil class="w-5 h-5" />
@@ -2469,7 +2644,7 @@ onUnmounted(() => {
                   <button
                     type="button"
                     @click.stop="openCopyProviderDialog(p)"
-                    class="p-2 text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
+                    class="p-2 text-slate-600 hover:bg-slate-100 rounded-btn transition-colors"
                     title="复制厂商"
                   >
                     <Copy class="w-5 h-5" />
@@ -2477,46 +2652,46 @@ onUnmounted(() => {
                   <button 
                     v-if="!p.active"
                     @click.stop="activateProvider(p.id)"
-                    class="p-2 text-green-600 hover:bg-green-50 rounded-lg transition-colors"
+                    class="p-2 text-green-600 hover:bg-green-50 rounded-btn transition-colors"
                     title="设置为生效"
                   >
                     <CheckCircle2 class="w-5 h-5" />
                   </button>
                   <button 
                     @click.stop="deleteProvider(p.id)"
-                    class="p-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                    class="p-2 text-red-600 hover:bg-red-50 rounded-btn transition-colors"
                     title="删除"
                   >
                     <Trash2 class="w-5 h-5" />
                   </button>
                 </div>
               </div>
-              <div class="text-sm text-gray-500 break-all">
-                <span class="block font-medium text-gray-400 text-xs mb-1 uppercase">基础地址</span>
+              <div class="text-sm text-secondary break-all">
+                <span class="block font-medium text-tertiary text-xs mb-1 uppercase">基础地址</span>
                 {{ p.baseUrl }}
               </div>
-              <div class="text-sm text-gray-500 break-all mt-4">
-                <span class="block font-medium text-gray-400 text-xs mb-1 uppercase">托管 Key</span>
+              <div class="text-sm text-secondary break-all mt-4">
+                <span class="block font-medium text-tertiary text-xs mb-1 uppercase">托管 Key</span>
                 <div class="flex items-center gap-1">
                   <span v-if="showApiKeyInCard[p.id]" class="font-mono text-xs break-all">{{ p.apiKey || '未设置' }}</span>
-                  <span v-else class="font-mono text-xs text-gray-400">••••••••••••</span>
+                  <span v-else class="font-mono text-xs text-tertiary">••••••••••••</span>
                   <button
                     v-if="p.apiKey"
                     @click.stop="showApiKeyInCard[p.id] = !showApiKeyInCard[p.id]"
-                    class="flex-shrink-0 p-0.5 rounded hover:bg-gray-100 transition-colors"
+                    class="flex-shrink-0 p-0.5 rounded hover:bg-surface-elevated transition-colors"
                     :title="showApiKeyInCard[p.id] ? '隐藏' : '显示'"
                   >
-                    <EyeOff v-if="showApiKeyInCard[p.id]" class="w-3 h-3 text-gray-400" />
-                    <Eye v-else class="w-3 h-3 text-gray-400" />
+                    <EyeOff v-if="showApiKeyInCard[p.id]" class="w-3 h-3 text-tertiary" />
+                    <Eye v-else class="w-3 h-3 text-tertiary" />
                   </button>
                 </div>
               </div>
-              <div class="text-sm text-gray-500 break-all mt-4">
+              <div class="text-sm text-secondary break-all mt-4">
                 <div class="flex justify-between items-center">
-                  <span class="block font-medium text-gray-400 text-xs uppercase">模型</span>
+                  <span class="block font-medium text-tertiary text-xs uppercase">模型</span>
                   <button
                     @click.stop="openAddProviderModel(p)"
-                    class="text-xs font-bold text-blue-600 hover:underline"
+                    class="text-xs font-bold text-accent hover:underline"
                   >
                     添加模型
                   </button>
@@ -2528,22 +2703,23 @@ onUnmounted(() => {
                     @click.stop="activateProviderModel(p.id, m.id)"
                     :class="[
                       'px-2 py-1 rounded text-[10px] font-semibold font-mono tracking-tight border transition-colors',
-                      p.defaultModelId === m.id ? 'bg-purple-600 text-white border-purple-600 shadow-sm' : 'bg-purple-50 text-purple-700 border-purple-100 hover:border-purple-300'
+                      p.defaultModelId === m.id ? 'bg-purple-600 text-white border-purple-600 shadow-card' : 'bg-purple-50 text-purple-700 border-purple-100 hover:border-purple-300'
                     ]"
                   >
                     {{ m.name }}
                   </button>
-                  <span v-if="!(p.models || []).length" class="text-gray-400 text-xs italic">未添加</span>
+                  <span v-if="!(p.models || []).length" class="text-tertiary text-xs italic">未添加</span>
                 </div>
               </div>
             </div>
           </div>
-          <div v-if="!showRecycleBin && providerViewMode === 'grid' && !providers.length" class="text-center py-12 bg-white rounded-xl border border-gray-200 shadow-sm text-gray-400 text-sm">
+          <div v-if="!showRecycleBin && providerViewMode === 'grid' && !providers.length" class="text-center py-12 glow-card text-tertiary text-sm">
             暂无厂商，点击"添加厂商"开始
           </div>
 
           <!-- List view -->
-          <div v-if="!showRecycleBin && providerViewMode === 'list'" class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+          <div v-if="!showRecycleBin && providerViewMode === 'list'" class="glow-card overflow-hidden relative">
+            <div class="h-[2px] absolute top-0 left-0 right-0" style="background:linear-gradient(90deg, #3b82f680, transparent 60%)" />
             <div 
               v-for="(p, idx) in sortedProviders" 
               :key="p.id"
@@ -2553,27 +2729,27 @@ onUnmounted(() => {
               @dragend="onProviderDragEnd"
               @dragover="onProviderDragOver"
               @drop="onProviderDrop($event, idx)"
-              class="flex items-center gap-4 px-5 py-3 border-b border-gray-100 last:border-b-0 hover:bg-gray-50 transition-colors cursor-pointer"
-              :class="{'bg-blue-50/50 border-l-2 border-l-blue-500': p.active, 'opacity-50': providerDragIndex === idx}"
+              class="flex items-center gap-4 px-5 py-3 border-b border-primary last:border-b-0 hover:bg-surface-elevated transition-colors cursor-pointer"
+              :class="{'accent-soft/50 border-l-2 border-l-blue-500': p.active, 'opacity-50': providerDragIndex === idx}"
             >
-              <span v-if="providerSortBy === 'custom'" class="text-gray-300 cursor-grab shrink-0"><GripVertical class="w-4 h-4" /></span>
+              <span v-if="providerSortBy === 'custom'" class="text-tertiary cursor-grab shrink-0"><GripVertical class="w-4 h-4" /></span>
               <div class="flex-1 min-w-0">
                 <div class="flex items-center gap-2">
                   <span class="font-bold text-sm truncate">{{ p.name }}</span>
-                  <span v-if="p.active" class="shrink-0 px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded text-[10px] font-bold">生效中</span>
-                  <span class="shrink-0 px-1.5 py-0.5 bg-gray-100 text-gray-600 rounded text-[10px] uppercase">{{ p.type }}</span>
+                  <span v-if="p.active" class="shrink-0 px-1.5 py-0.5 bg-blue-100 text-accent rounded text-[10px] font-bold">生效中</span>
+                  <span class="shrink-0 px-1.5 py-0.5 bg-surface-elevated text-secondary rounded text-[10px] uppercase">{{ p.type }}</span>
                   <span v-if="p.protocolConvert" class="shrink-0 px-1.5 py-0.5 bg-amber-50 text-amber-700 rounded text-[10px] border border-amber-200">转换</span>
                 </div>
-                <div class="text-[10px] text-gray-400 truncate mt-0.5">{{ p.baseUrl }}</div>
+                <div class="text-[10px] text-tertiary truncate mt-0.5">{{ p.baseUrl }}</div>
               </div>
               <div class="flex gap-1 shrink-0">
-                <button @click.stop="openEditModal(p)" class="p-1.5 text-blue-600 hover:bg-blue-50 rounded-lg" title="编辑"><Pencil class="w-4 h-4" /></button>
-                <button @click.stop="openCopyProviderDialog(p)" class="p-1.5 text-slate-600 hover:bg-slate-100 rounded-lg" title="复制"><Copy class="w-4 h-4" /></button>
-                <button v-if="!p.active" @click.stop="activateProvider(p.id)" class="p-1.5 text-green-600 hover:bg-green-50 rounded-lg" title="生效"><CheckCircle2 class="w-4 h-4" /></button>
-                <button @click.stop="deleteProvider(p.id)" class="p-1.5 text-red-600 hover:bg-red-50 rounded-lg" title="删除"><Trash2 class="w-4 h-4" /></button>
+                <button @click.stop="openEditModal(p)" class="p-1.5 text-accent hover:bg-accent-soft rounded-btn" title="编辑"><Pencil class="w-4 h-4" /></button>
+                <button @click.stop="openCopyProviderDialog(p)" class="p-1.5 text-slate-600 hover:bg-slate-100 rounded-btn" title="复制"><Copy class="w-4 h-4" /></button>
+                <button v-if="!p.active" @click.stop="activateProvider(p.id)" class="p-1.5 text-green-600 hover:bg-green-50 rounded-btn" title="生效"><CheckCircle2 class="w-4 h-4" /></button>
+                <button @click.stop="deleteProvider(p.id)" class="p-1.5 text-red-600 hover:bg-red-50 rounded-btn" title="删除"><Trash2 class="w-4 h-4" /></button>
               </div>
             </div>
-            <div v-if="!providers.length" class="text-center py-12 text-gray-400 text-sm">
+            <div v-if="!providers.length" class="text-center py-12 text-tertiary text-sm">
               暂无厂商
             </div>
           </div>
@@ -2581,14 +2757,15 @@ onUnmounted(() => {
           <!-- Usage view -->
           <div v-if="!showRecycleBin && providerViewMode === 'usage'" class="space-y-4">
             <div v-if="providerUsageLoading" class="flex justify-center py-12">
-              <Loader2 class="w-8 h-8 animate-spin text-blue-500" />
+              <Loader2 class="w-8 h-8 animate-spin text-accent" />
             </div>
-            <div v-else-if="!providers.length" class="text-center py-12 bg-white rounded-xl border border-gray-200 shadow-sm text-gray-400 text-sm">
+            <div v-else-if="!providers.length" class="text-center py-12 glow-card text-tertiary text-sm">
               暂无厂商
             </div>
             <div v-else class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
               <div v-for="p in providers" :key="p.id"
-                   :class="['bg-white rounded-xl border border-gray-200 shadow-sm p-5 space-y-3', showAllModels[p.id] ? 'max-h-none overflow-visible' : 'h-80 overflow-hidden']">
+                   :class="['glow-card p-5 space-y-3 relative overflow-hidden', showAllModels[p.id] ? 'max-h-none overflow-visible' : 'h-80 overflow-hidden']">
+                <div class="h-[2px] absolute top-0 left-0 right-0" :style="{ background: `linear-gradient(90deg, ${vendorAccentColor(p)}80, transparent 60%)` }" />
                 <div class="flex items-start justify-between gap-2">
                   <div class="min-w-0">
                     <h4 class="font-bold text-base truncate">{{ p.name }}</h4>
@@ -2596,30 +2773,30 @@ onUnmounted(() => {
                       <span v-if="providerUsageData[p.id]?.vendor" :class="vendorColor(providerUsageData[p.id]?.vendor) + ' shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium'">{{ vendorLabel(providerUsageData[p.id]?.vendor) }}</span>
                     </div>
                   </div>
-                  <span v-if="providerUsageData[p.id]?.updatedAt" class="text-[10px] text-gray-400 shrink-0">{{ timeAgo(providerUsageData[p.id].updatedAt) }}</span>
+                  <span v-if="providerUsageData[p.id]?.updatedAt" class="text-[10px] text-tertiary shrink-0">{{ timeAgo(providerUsageData[p.id].updatedAt) }}</span>
                 </div>
 
-                <div v-if="providerUsageData[p.id]?.daily?.length" class="space-y-0.5 text-xs text-gray-500">
-                  <div class="flex items-center gap-2"><span class="text-gray-400 w-10 shrink-0">请求</span>{{ providerUsageData[p.id].summary.requests }} 次</div>
-                  <div class="flex items-center gap-2"><span class="text-gray-400 w-10 shrink-0">输入</span>{{ formatTokens(providerUsageData[p.id].summary.tokensIn) }} tokens</div>
-                  <div class="flex items-center gap-2"><span class="text-gray-400 w-10 shrink-0">输出</span>{{ formatTokens(providerUsageData[p.id].summary.tokensOut) }} tokens</div>
+                <div v-if="providerUsageData[p.id]?.daily?.length" class="space-y-0.5 text-xs text-secondary">
+                  <div class="flex items-center gap-2"><span class="text-tertiary w-10 shrink-0">请求</span>{{ providerUsageData[p.id].summary.requests }} 次</div>
+                  <div class="flex items-center gap-2"><span class="text-tertiary w-10 shrink-0">输入</span>{{ formatTokens(providerUsageData[p.id].summary.tokensIn) }} tokens</div>
+                  <div class="flex items-center gap-2"><span class="text-tertiary w-10 shrink-0">输出</span>{{ formatTokens(providerUsageData[p.id].summary.tokensOut) }} tokens</div>
                 </div>
-                <div v-else class="text-xs text-gray-400 py-4 text-center">暂无用量数据</div>
+                <div v-else class="text-xs text-tertiary py-4 text-center">暂无用量数据</div>
 
                 <!-- Vendor-specific data -->
                 <div v-if="providerUsageData[p.id]?.vendorData" class="space-y-1.5">
                   <div v-if="providerUsageData[p.id].vendorData.balance" class="flex items-center gap-2 text-xs">
-                    <span class="text-gray-400 w-10 shrink-0">余额</span><span class="font-bold text-green-600">${{ providerUsageData[p.id].vendorData.balance }}</span>
+                    <span class="text-tertiary w-10 shrink-0">余额</span><span class="font-bold text-green-600">${{ providerUsageData[p.id].vendorData.balance }}</span>
                   </div>
                   <div v-if="providerUsageData[p.id].vendorData.monthlyCost" class="flex items-center gap-2 text-xs">
-                    <span class="text-gray-400 w-10 shrink-0">月消费</span><span class="font-bold text-orange-600">${{ providerUsageData[p.id].vendorData.monthlyCost }}</span>
+                    <span class="text-tertiary w-10 shrink-0">月消费</span><span class="font-bold text-orange-600">${{ providerUsageData[p.id].vendorData.monthlyCost }}</span>
                   </div>
                   <div v-if="providerUsageData[p.id].vendorData.quotaLabel" class="flex items-center gap-2 text-xs">
-                    <span class="text-gray-400 w-10 shrink-0">{{ providerUsageData[p.id].vendorData.quotaLabel }}</span>
-                    <div class="flex-1 h-2 bg-gray-100 rounded-full overflow-hidden">
-                      <div class="h-full rounded-full bg-blue-500" :style="{ width: Math.min(100, providerUsageData[p.id].vendorData.used / providerUsageData[p.id].vendorData.limit * 100) + '%' }"></div>
+                    <span class="text-tertiary w-10 shrink-0">{{ providerUsageData[p.id].vendorData.quotaLabel }}</span>
+                    <div class="flex-1 h-2 bg-surface-elevated rounded-full overflow-hidden">
+                      <div class="h-full rounded-full accent-soft0" :style="{ width: Math.min(100, providerUsageData[p.id].vendorData.used / providerUsageData[p.id].vendorData.limit * 100) + '%' }"></div>
                     </div>
-                    <span class="text-gray-500 shrink-0">{{ formatTokens(providerUsageData[p.id].vendorData.used) }}/{{ formatTokens(providerUsageData[p.id].vendorData.limit) }}</span>
+                    <span class="text-secondary shrink-0">{{ formatTokens(providerUsageData[p.id].vendorData.used) }}/{{ formatTokens(providerUsageData[p.id].vendorData.limit) }}</span>
                   </div>
                 </div>
 
@@ -2627,22 +2804,22 @@ onUnmounted(() => {
                   <v-chart :option="usageChartOption(providerUsageData[p.id])" autoresize style="height:110px" />
                 </div>
 
-                <div v-if="providerUsageData[p.id]?.summary?.models?.length" class="space-y-1 pt-2 border-t border-gray-100">
+                <div v-if="providerUsageData[p.id]?.summary?.models?.length" class="space-y-1 pt-2 border-t border-primary">
                   <div v-for="(m, i) in providerUsageData[p.id].summary.models"
                        :key="m.name"
                        v-show="showAllModels[p.id] || i < 3"
-                       class="flex justify-between gap-2 text-[10px] text-gray-500">
+                       class="flex justify-between gap-2 text-[10px] text-secondary">
                     <span class="font-mono truncate min-w-0">{{ m.name }}</span>
                     <span class="shrink-0 whitespace-nowrap">{{ formatTokens(m.tokensIn) }} in / {{ formatTokens(m.tokensOut) }} out</span>
                   </div>
                   <button v-if="!showAllModels[p.id] && providerUsageData[p.id].summary.models.length > 3"
                           @click="showAllModels[p.id] = true"
-                          class="text-[10px] text-blue-600 font-medium hover:underline mt-0.5">
+                          class="text-[10px] text-accent font-medium hover:underline mt-0.5">
                     + {{ providerUsageData[p.id].summary.models.length - 3 }} 个更多 ▸
                   </button>
                   <button v-else-if="showAllModels[p.id]"
                           @click="showAllModels[p.id] = false"
-                          class="text-[10px] text-blue-600 font-medium hover:underline mt-0.5">
+                          class="text-[10px] text-accent font-medium hover:underline mt-0.5">
                     ▸ 收起
                   </button>
                 </div>
@@ -2652,45 +2829,45 @@ onUnmounted(() => {
 
           <!-- Recycle bin view -->
           <div v-if="showRecycleBin" class="space-y-4">
-            <div v-if="!deletedProviders.length" class="text-center py-12 text-gray-400 text-sm bg-white rounded-xl border border-gray-200 shadow-sm">
+            <div v-if="!deletedProviders.length" class="text-center py-12 text-tertiary text-sm glow-card">
               回收站为空
             </div>
-            <div v-for="p in deletedProviders" :key="p.id" class="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
+            <div v-for="p in deletedProviders" :key="p.id" class="glow-card p-6">
               <div class="flex justify-between items-start mb-4">
                 <div>
                   <h4 class="font-bold text-lg">{{ p.name }}</h4>
                   <div class="flex flex-wrap gap-1.5 mt-1">
-                    <span class="text-xs px-2 py-0.5 bg-gray-100 text-gray-600 rounded-full border border-gray-200 uppercase">{{ p.type }}</span>
+                    <span class="text-xs px-2 py-0.5 bg-surface-elevated text-secondary rounded-full border border-primary uppercase">{{ p.type }}</span>
                     <span class="text-xs px-2 py-0.5 bg-red-50 text-red-600 rounded-full border border-red-100 font-medium">已删除</span>
                   </div>
-                  <p class="text-[10px] text-gray-400 mt-1">删除时间：{{ formatTime(p.deletedAt) }}</p>
+                  <p class="text-[10px] text-tertiary mt-1">删除时间：{{ formatTime(p.deletedAt) }}</p>
                 </div>
                 <div class="flex gap-2">
                   <button
                     @click="restoreProvider(p.id)"
-                    class="px-3 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-xs font-bold"
+                    class="px-3 py-2 bg-green-600 text-white rounded-btn hover:bg-green-700 transition-colors text-xs font-bold"
                     title="恢复厂商"
                   >
                     恢复
                   </button>
                   <button
                     @click="permanentDeleteProvider(p.id)"
-                    class="px-3 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors text-xs font-bold"
+                    class="px-3 py-2 bg-red-600 text-white rounded-btn hover:bg-red-700 transition-colors text-xs font-bold"
                     title="彻底删除"
                   >
                     彻底删除
                   </button>
                 </div>
               </div>
-              <div class="text-sm text-gray-500 break-all">
-                <span class="block font-medium text-gray-400 text-xs mb-1 uppercase">基础地址</span>
+              <div class="text-sm text-secondary break-all">
+                <span class="block font-medium text-tertiary text-xs mb-1 uppercase">基础地址</span>
                 {{ p.baseUrl }}
               </div>
-              <div class="text-sm text-gray-500 mt-3">
-                <span class="block font-medium text-gray-400 text-xs mb-1 uppercase">模型</span>
+              <div class="text-sm text-secondary mt-3">
+                <span class="block font-medium text-tertiary text-xs mb-1 uppercase">模型</span>
                 <div class="flex flex-wrap gap-2">
-                  <span v-for="m in (p.models || [])" :key="m.id" class="px-2 py-1 rounded text-[10px] font-semibold font-mono bg-gray-100 text-gray-600 border border-gray-200">{{ m.name }}</span>
-                  <span v-if="!(p.models || []).length" class="text-gray-400 text-xs italic">无关联模型</span>
+                  <span v-for="m in (p.models || [])" :key="m.id" class="px-2 py-1 rounded text-[10px] font-semibold font-mono bg-surface-elevated text-secondary border border-primary">{{ m.name }}</span>
+                  <span v-if="!(p.models || []).length" class="text-tertiary text-xs italic">无关联模型</span>
                 </div>
               </div>
             </div>
@@ -2700,19 +2877,24 @@ onUnmounted(() => {
         <!-- Apps View (Renamed from Keys) -->
         <div v-if="activeTab === 'keys'" class="space-y-6">
           <div class="flex flex-col sm:flex-row gap-3 sm:justify-between sm:items-center">
-            <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">{{ showKeyRecycleBin ? '回收站' : '应用管理' }}</h3>
+            <h3 class="text-sm font-medium text-secondary uppercase tracking-wider">{{ showKeyRecycleBin ? '回收站' : '应用管理' }}</h3>
             <div class="flex flex-wrap gap-2">
               <template v-if="!showKeyRecycleBin">
+                <div class="flex gap-1 bg-surface-elevated rounded-btn p-0.5 border border-primary">
+                  <button @click="appViewMode = 'table'; persistAppViewMode()" class="px-2 py-1.5 rounded-md text-xs font-medium transition-colors" :class="appViewMode === 'table' ? 'bg-white text-accent shadow-sm' : 'text-tertiary hover:text-secondary'" title="表格视图"><List class="w-3.5 h-3.5" /></button>
+                  <button @click="appViewMode = 'grid'; persistAppViewMode()" class="px-2 py-1.5 rounded-md text-xs font-medium transition-colors" :class="appViewMode === 'grid' ? 'bg-white text-accent shadow-sm' : 'text-tertiary hover:text-secondary'" title="网格视图"><LayoutGrid class="w-3.5 h-3.5" /></button>
+                  <button @click="appViewMode = 'usage'; persistAppViewMode(); fetchAppUsage()" class="px-2 py-1.5 rounded-md text-xs font-medium transition-colors" :class="appViewMode === 'usage' ? 'bg-white text-accent shadow-sm' : 'text-tertiary hover:text-secondary'" title="用量视图"><BarChart3 class="w-3.5 h-3.5" /></button>
+                </div>
                 <button 
                   @click="showAddApp = true; if (selectedLog) closeLogDetail()"
-                  class="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
+                  class="flex items-center gap-2 px-4 py-2 bg-accent text-white rounded-btn hover:bg-accent-hover transition-colors text-sm"
                 >
                   <Plus class="w-4 h-4" />
                   创建应用
                 </button>
                 <button
                   @click="showKeyRecycleBin = true; fetchDeletedKeys()"
-                  class="flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 transition-colors text-sm border border-gray-200"
+                  class="flex items-center gap-2 px-4 py-2 bg-surface-elevated text-secondary rounded-btn hover:bg-surface-elevated transition-colors text-sm border border-primary"
                 >
                   <Trash2 class="w-4 h-4" />
                   回收站
@@ -2722,37 +2904,36 @@ onUnmounted(() => {
               <button
                 v-else
                 @click="showKeyRecycleBin = false"
-                class="flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-sm border border-gray-200"
+                class="flex items-center gap-2 px-4 py-2 bg-surface-elevated text-secondary rounded-btn hover:bg-surface-elevated transition-colors text-sm border border-primary"
               >
                 应用列表
               </button>
             </div>
           </div>
 
+          <!-- Recycle bin -->
           <div v-if="showKeyRecycleBin" class="space-y-4">
-            <div v-if="!deletedKeys.length" class="text-center py-12 text-gray-400 text-sm bg-white rounded-xl border border-gray-200 shadow-sm">
-              回收站为空
-            </div>
-            <div v-for="k in deletedKeys" :key="k.id" class="bg-white p-6 rounded-xl border border-gray-200 shadow-sm">
+            <div v-if="!deletedKeys.length" class="text-center py-12 text-tertiary text-sm glow-card">回收站为空</div>
+            <div v-for="k in deletedKeys" :key="k.id" class="glow-card p-6">
               <div class="flex justify-between items-start mb-4">
                 <div>
                   <div class="flex items-center gap-2">
                     <span :style="keyBadgeStyle(k.id)" class="px-2 py-1 rounded text-[10px] font-bold uppercase tracking-tight border">{{ k.name }}</span>
                     <span class="text-xs px-2 py-0.5 bg-red-50 text-red-600 rounded-full border border-red-100 font-medium">已删除</span>
                   </div>
-                  <div class="font-mono text-[10px] text-gray-400 mt-1">{{ k.key }}</div>
-                  <p class="text-[10px] text-gray-400 mt-1">删除时间：{{ formatTime(k.deletedAt) }}</p>
+                  <div class="font-mono text-[10px] text-tertiary mt-1">{{ k.key }}</div>
+                  <p class="text-[10px] text-tertiary mt-1">删除时间：{{ formatTime(k.deletedAt) }}</p>
                 </div>
                 <div class="flex gap-2">
-                  <button @click="restoreKey(k.id)" class="px-3 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-xs font-bold">恢复</button>
-                  <button @click="permanentDeleteKey(k.id)" class="px-3 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors text-xs font-bold">彻底删除</button>
+                  <button @click="restoreKey(k.id)" class="px-3 py-2 bg-green-600 text-white rounded-btn hover:bg-green-700 transition-colors text-xs font-bold">恢复</button>
+                  <button @click="permanentDeleteKey(k.id)" class="px-3 py-2 bg-red-600 text-white rounded-btn hover:bg-red-700 transition-colors text-xs font-bold">彻底删除</button>
                 </div>
               </div>
               <div class="flex flex-wrap gap-2">
-                <span v-if="k.providerId" class="px-2 py-1 bg-blue-50 text-blue-700 rounded text-[10px] font-bold uppercase tracking-tight border border-blue-200">
+                <span v-if="k.providerId" class="px-2 py-1 accent-soft text-accent rounded text-[10px] font-bold uppercase tracking-tight border border-blue-200">
                   绑定厂商: {{ providers.find(p => p.id === k.providerId)?.name || '未知' }}
                 </span>
-                <span v-else class="text-gray-400 text-xs italic">绑定厂商: 全局默认</span>
+                <span v-else class="text-tertiary text-xs italic">绑定厂商: 全局默认</span>
                 <span v-if="k.managedModelId" class="px-2 py-1 bg-green-50 text-green-700 rounded text-[10px] font-bold uppercase tracking-tight border border-green-200">
                   绑定模型: {{ getModelCatalogEntry(k.managedModelId)?.name || '未知' }}
                 </span>
@@ -2760,63 +2941,117 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <div v-else class="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
+          <!-- Table view -->
+          <div v-else-if="appViewMode === 'table'" class="glow-card overflow-hidden relative">
+            <div class="h-[2px] absolute top-0 left-0 right-0" style="background:linear-gradient(90deg, #3b82f680, transparent 60%)" />
             <div class="overflow-x-auto">
             <table class="w-full min-w-[680px] text-left text-sm">
-              <thead class="bg-gray-50 border-b border-gray-200">
-                <tr>
-                  <th class="px-6 py-4 font-semibold text-gray-600">应用名称</th>
-                  <th class="px-6 py-4 font-semibold text-gray-600">绑定厂商</th>
-                  <th class="px-6 py-4 font-semibold text-gray-600">绑定模型</th>
-                  <th class="px-6 py-4 font-semibold text-gray-600 text-right">操作</th>
+              <thead>
+                <tr class="text-xs font-semibold uppercase tracking-wide text-tertiary" style="border-bottom:1px solid var(--color-border-default)">
+                  <th class="px-6 py-4">应用名称</th>
+                  <th class="px-6 py-4">绑定厂商</th>
+                  <th class="px-6 py-4">绑定模型</th>
+                  <th class="px-6 py-4 text-right">操作</th>
                 </tr>
               </thead>
-              <tbody class="divide-y divide-gray-200">
-                <tr v-for="k in clientKeys" :key="k.id" class="hover:bg-gray-50 transition-colors">
+              <tbody>
+                <tr v-for="k in clientKeys" :key="k.id" class="transition hover:bg-surface-elevated" style="border-bottom:1px solid var(--color-border-default)">
                   <td class="px-6 py-4">
                     <span :style="keyBadgeStyle(k.id)" class="px-2 py-1 rounded text-[10px] font-bold uppercase tracking-tight border">{{ k.name }}</span>
-                    <div class="font-mono text-[10px] text-gray-400 mt-0.5">{{ k.key }}</div>
+                    <div class="font-mono text-[10px] text-tertiary mt-0.5">{{ k.key }}</div>
                   </td>
                   <td class="px-6 py-4">
-                    <span v-if="k.providerId" class="px-2 py-1 bg-blue-50 text-blue-700 rounded text-[10px] font-bold uppercase tracking-tight border border-blue-200">
+                    <span v-if="k.providerId" class="px-2 py-1 accent-soft text-accent rounded text-[10px] font-bold uppercase tracking-tight border border-blue-200">
                       {{ providers.find(p => p.id === k.providerId)?.name || '未知厂商' }}
                     </span>
-                    <span v-else class="text-gray-400 text-xs italic">全局默认</span>
+                    <span v-else class="text-tertiary text-xs italic">全局默认</span>
                   </td>
                   <td class="px-6 py-4">
                     <template v-if="k.managedModelId">
-                      <div class="flex flex-wrap items-center gap-2">
-                        <span class="px-2 py-1 bg-green-50 text-green-700 rounded text-[10px] font-bold uppercase tracking-tight border border-green-200">
-                          {{ getModelCatalogEntry(k.managedModelId)?.name || '未知模型' }}
-                        </span>
-                      </div>
+                      <span class="px-2 py-1 bg-green-50 text-green-700 rounded text-[10px] font-bold uppercase tracking-tight border border-green-200">
+                        {{ getModelCatalogEntry(k.managedModelId)?.name || '未知模型' }}
+                      </span>
                     </template>
-                    <span v-else class="text-gray-400 text-xs italic">默认</span>
+                    <span v-else class="text-tertiary text-xs italic">默认</span>
                   </td>
                   <td class="px-6 py-4 text-right space-x-3">
-                    <button 
-                      @click="toggleKey(k.id)"
-                      :class="k.enabled ? 'text-amber-600' : 'text-green-600'"
-                      class="hover:underline font-medium text-xs"
-                    >
-                      {{ k.enabled ? '禁用' : '启用' }}
-                    </button>
-                    <button 
-                      @click="openEditClientApp(k)"
-                      class="text-blue-600 hover:underline font-medium text-xs"
-                    >
-                      配置
-                    </button>
-                    <button 
-                      @click="deleteClientApp(k.id)"
-                      class="text-red-600 hover:underline font-medium text-xs"
-                    >
-                      删除
-                    </button>
+                    <button @click="toggleKey(k.id)" :class="k.enabled ? 'text-amber-600' : 'text-green-600'" class="hover:underline font-medium text-xs">{{ k.enabled ? '禁用' : '启用' }}</button>
+                    <button @click="openEditClientApp(k)" class="text-accent hover:underline font-medium text-xs">配置</button>
+                    <button @click="deleteClientApp(k.id)" class="text-red-600 hover:underline font-medium text-xs">删除</button>
                   </td>
                 </tr>
               </tbody>
             </table>
+            </div>
+          </div>
+
+          <!-- Grid view -->
+          <div v-else-if="appViewMode === 'grid'" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+            <div v-for="k in clientKeys" :key="k.id" class="glow-card p-6 relative overflow-hidden transition-shadow hover:shadow-md">
+              <div class="h-[2px] absolute top-0 left-0 right-0" :style="{ background: `linear-gradient(90deg, rgba(${getKeyColor(k.id)}, 0.5), transparent 60%)` }" />
+              <div class="flex justify-between items-start mb-4">
+                <div>
+                  <span :style="keyBadgeStyle(k.id)" class="px-2 py-1 rounded text-[10px] font-bold uppercase tracking-tight border inline-block mb-1">{{ k.name }}</span>
+                  <div class="font-mono text-xs text-tertiary mt-1">{{ k.key }}</div>
+                </div>
+                <label class="relative inline-flex items-center cursor-pointer shrink-0 ml-2" @click.stop>
+                  <input type="checkbox" :checked="k.enabled" @change="toggleKey(k.id)" class="sr-only peer" />
+                  <div class="w-9 h-5 bg-surface-elevated peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-primary after:border after:rounded-full after:h-3.5 after:w-3.5 after:transition-all peer-checked:bg-accent"></div>
+                </label>
+              </div>
+              <div class="space-y-2">
+                <div class="flex items-center gap-2 text-xs">
+                  <span class="text-tertiary w-14 shrink-0">厂商</span>
+                  <span v-if="k.providerId" class="px-1.5 py-0.5 accent-soft text-accent rounded text-[10px] font-bold border border-blue-200">{{ providers.find(p => p.id === k.providerId)?.name || '未知厂商' }}</span>
+                  <span v-else class="text-tertiary italic">全局默认</span>
+                </div>
+                <div class="flex items-center gap-2 text-xs">
+                  <span class="text-tertiary w-14 shrink-0">模型</span>
+                  <span v-if="k.managedModelId" class="px-1.5 py-0.5 bg-green-50 text-green-700 rounded text-[10px] font-bold border border-green-200">{{ getModelCatalogEntry(k.managedModelId)?.name || '未知模型' }}</span>
+                  <span v-else class="text-tertiary italic">默认</span>
+                </div>
+              </div>
+              <div class="flex gap-2 mt-4 pt-3" style="border-top:1px solid var(--color-border-default)">
+                <button @click.stop="openEditClientApp(k)" class="flex-1 px-3 py-1.5 text-xs font-semibold rounded-btn transition-colors" style="background-color:var(--color-surface-elevated);color:var(--color-text-secondary);border:1px solid var(--color-border-default)">配置</button>
+                <button @click.stop="deleteClientApp(k.id)" class="flex-1 px-3 py-1.5 text-xs font-semibold rounded-btn transition-colors" style="background-color:rgba(239,68,68,0.08);color:#dc2626;border:1px solid rgba(239,68,68,0.2)">删除</button>
+              </div>
+            </div>
+            <div v-if="!clientKeys.length" class="col-span-full text-center py-12 glow-card text-tertiary text-sm">暂无应用</div>
+          </div>
+
+           <!-- Usage view -->
+          <div v-else-if="appViewMode === 'usage'">
+            <div v-if="appUsageLoading" class="flex justify-center py-12"><Loader2 class="w-8 h-8 animate-spin text-accent" /></div>
+            <div v-else-if="!clientKeys.length" class="text-center py-12 glow-card text-tertiary text-sm">暂无应用</div>
+            <div v-else class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+              <div v-for="k in clientKeys" :key="k.id" class="glow-card relative overflow-hidden flex flex-col" style="padding:0;min-height:200px">
+                <div class="h-[2px]" :style="{ background: `linear-gradient(90deg, rgba(${getKeyColor(k.id)}, 0.5), transparent 60%)` }" />
+                <div class="flex items-start justify-between gap-2 px-5 pt-5 pb-3" style="border-bottom:1px solid var(--color-border-default)">
+                  <div class="min-w-0 flex-1">
+                    <span :style="keyBadgeStyle(k.id)" class="px-2 py-1 rounded text-xs font-bold uppercase tracking-tight border inline-block">{{ k.name }}</span>
+                    <div class="font-mono text-[10px] text-tertiary mt-0.5 truncate">{{ k.key }}</div>
+                  </div>
+                </div>
+                <div class="flex-1 grid grid-cols-2 gap-2 px-5 py-3">
+                  <div class="rounded-btn p-2.5" style="background-color:var(--color-surface-elevated)">
+                    <span class="text-tertiary text-[10px] block">请求</span>
+                    <span class="num text-sm font-bold" style="color:var(--color-text-primary)">{{ formatNumber(appUsageData[k.id]?.requests ?? 0) }}</span>
+                  </div>
+                  <div class="rounded-btn p-2.5" style="background-color:var(--color-surface-elevated)">
+                    <span class="text-tertiary text-[10px] block">错误</span>
+                    <span class="num text-sm font-bold" style="color:#f43f5e">{{ formatNumber(appUsageData[k.id]?.errors ?? 0) }}</span>
+                  </div>
+                  <div class="rounded-btn p-2.5" style="background-color:var(--color-surface-elevated)">
+                    <span class="text-tertiary text-[10px] block">Tokens</span>
+                    <span class="num text-sm font-bold" style="color:var(--color-text-primary)">{{ formatTokens(appUsageData[k.id]?.tokensTotal ?? 0) }}</span>
+                  </div>
+                  <div class="rounded-btn p-2.5" style="background-color:var(--color-surface-elevated)">
+                    <span class="text-tertiary text-[10px] block">今日</span>
+                    <span class="num text-sm font-bold" style="color:var(--color-text-primary)">{{ appUsageData[k.id]?.todayCount ?? 0 }}</span>
+                  </div>
+                </div>
+                <div class="px-5 pb-4 text-[10px]" style="color:var(--color-text-tertiary)">{{ appUsageData[k.id]?.lastActiveDay ? '最近活跃：' + appUsageData[k.id].lastActiveDay : '暂无使用数据' }}</div>
+              </div>
             </div>
           </div>
         </div>
@@ -2826,43 +3061,43 @@ onUnmounted(() => {
           <div class="flex flex-col gap-3">
             <div class="flex flex-col sm:flex-row gap-3 sm:justify-between sm:items-center">
               <div class="space-y-1">
-                <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">模型管理</h3>
-                <p class="text-[10px] text-gray-400">选择厂商后管理其模型，在此页面选择的默认模型会被记住并用于 {{ MAGIC_PROXY_MODEL }}</p>
+                <h3 class="text-sm font-medium text-secondary uppercase tracking-wider">模型管理</h3>
+                <p class="text-[10px] text-tertiary">选择厂商后管理其模型，在此页面选择的默认模型会被记住并用于 {{ MAGIC_PROXY_MODEL }}</p>
               </div>
               <button 
                 @click="showAddModel = true"
-                class="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
+                class="flex items-center gap-2 px-4 py-2 bg-accent text-white rounded-btn hover:bg-accent-hover transition-colors text-sm"
               >
                 <Plus class="w-4 h-4" />
                 添加模型
               </button>
             </div>
             <div class="flex items-center gap-3">
-              <label class="text-xs font-bold text-gray-400 uppercase tracking-wider whitespace-nowrap">选择厂商</label>
+              <label class="text-xs font-bold text-tertiary uppercase tracking-wider whitespace-nowrap">选择厂商</label>
               <select
                 v-model="selectedModelProviderId"
                 @change="onModelProviderChange"
-                class="px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none bg-white min-w-[200px]"
+                class="px-3 py-2 border border-primary rounded-btn text-sm focus:ring-accent focus:ring-2 focus:border-transparent outline-none bg-surface-input bg-surface-card min-w-[200px]"
               >
                 <option v-for="p in providers" :key="p.id" :value="p.id">{{ p.name }} {{ p.active ? '(生效中)' : '' }}</option>
               </select>
-              <span v-if="activeProviderId" class="text-[10px] text-gray-400">默认模型：{{ activeDefaultModel?.name || '未设置' }}</span>
+              <span v-if="activeProviderId" class="text-[10px] text-tertiary">默认模型：{{ activeDefaultModel?.name || '未设置' }}</span>
             </div>
             <!-- Sort & view controls -->
             <div class="flex flex-wrap items-center gap-2">
-              <select v-model="modelSortBy" @change="persistViewMode()" class="text-xs px-3 py-1.5 border border-gray-200 rounded-lg bg-white text-gray-600 outline-none">
+              <select v-model="modelSortBy" @change="persistViewMode()" class="text-xs px-3 py-1.5 border border-primary rounded-btn bg-surface-card text-secondary outline-none">
                 <option value="custom">自定义排序</option>
                 <option value="name">按名称</option>
                 <option value="createdAt">按创建时间</option>
               </select>
-              <button @click="modelSortOrder = modelSortOrder === 'asc' ? 'desc' : 'asc'; persistViewMode()" class="p-1.5 text-gray-500 hover:bg-gray-100 rounded-lg transition-colors" :title="modelSortOrder === 'asc' ? '升序' : '降序'">
+              <button @click="modelSortOrder = modelSortOrder === 'asc' ? 'desc' : 'asc'; persistViewMode()" class="p-1.5 text-secondary hover:bg-surface-elevated rounded-btn transition-colors" :title="modelSortOrder === 'asc' ? '升序' : '降序'">
                 <ArrowUpDown class="w-4 h-4" :class="modelSortOrder === 'desc' ? 'rotate-180' : ''" />
               </button>
-              <div class="flex ml-auto gap-1 bg-gray-100 rounded-lg p-0.5">
-                <button @click="modelViewMode = 'grid'; persistViewMode()" class="p-1.5 rounded-md transition-colors" :class="modelViewMode === 'grid' ? 'bg-white shadow text-blue-600' : 'text-gray-400 hover:text-gray-600'">
+              <div class="flex ml-auto gap-1 bg-surface-elevated rounded-btn p-0.5">
+                <button @click="modelViewMode = 'grid'; persistViewMode()" class="p-1.5 rounded-md transition-colors" :class="modelViewMode === 'grid' ? 'bg-white shadow text-accent' : 'text-tertiary hover:text-secondary'">
                   <LayoutGrid class="w-4 h-4" />
                 </button>
-                <button @click="modelViewMode = 'list'; persistViewMode()" class="p-1.5 rounded-md transition-colors" :class="modelViewMode === 'list' ? 'bg-white shadow text-blue-600' : 'text-gray-400 hover:text-gray-600'">
+                <button @click="modelViewMode = 'list'; persistViewMode()" class="p-1.5 rounded-md transition-colors" :class="modelViewMode === 'list' ? 'bg-white shadow text-accent' : 'text-tertiary hover:text-secondary'">
                   <List class="w-4 h-4" />
                 </button>
               </div>
@@ -2878,14 +3113,15 @@ onUnmounted(() => {
               @dragend="onModelDragEnd"
               @dragover="onModelDragOver"
               @drop="onModelDrop($event, idx)"
-              class="bg-white p-6 rounded-xl border border-gray-200 shadow-sm hover:shadow-md transition-shadow relative overflow-hidden cursor-pointer"
+              class="glow-card p-6 hover:shadow-md transition-shadow relative overflow-hidden cursor-pointer"
               :class="{'border-blue-500 ring-1 ring-blue-500': activeProviderDefaultModelId === m.id, 'opacity-50': modelDragIndex === idx}"
               @click="activeProviderDefaultModelId !== m.id && activateModel(m.id)"
             >
-              <div v-if="modelSortBy === 'custom'" class="absolute top-2 left-2 text-gray-300 cursor-grab active:cursor-grabbing">
+              <div class="h-[2px] absolute top-0 left-0 right-0" :style="{ background: `linear-gradient(90deg, ${vendorAccentColor(providers.find(p => p.id === selectedModelProviderId) || activeProvider)}80, transparent 60%)` }" />
+              <div v-if="modelSortBy === 'custom'" class="absolute top-2 left-2 text-tertiary cursor-grab active:cursor-grabbing">
                 <GripVertical class="w-4 h-4" />
               </div>
-              <div v-if="activeProviderDefaultModelId === m.id" class="absolute top-0 right-0 bg-blue-500 text-white px-2 py-1 text-[10px] font-bold rounded-bl-lg flex items-center gap-1">
+              <div v-if="activeProviderDefaultModelId === m.id" class="absolute top-0 right-0 bg-accent text-white px-2 py-1 text-[10px] font-bold rounded-bl-lg flex items-center gap-1">
                 <Check class="w-3 h-3" /> 默认
               </div>
               
@@ -2894,15 +3130,15 @@ onUnmounted(() => {
                   v-model="editingModelName"
                   @keyup.enter="saveEditModel"
                   @keyup.escape="cancelEditModel"
-                  class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-bold focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                  class="w-full px-3 py-2 border border-primary rounded-btn text-sm font-bold focus:ring-accent focus:ring-2 focus:border-transparent outline-none"
                   placeholder="模型名称"
                   autofocus
                 />
                 <div class="flex gap-2">
-                  <button @click.stop="saveEditModel" class="px-3 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-xs font-bold">
+                  <button @click.stop="saveEditModel" class="px-3 py-1.5 bg-accent text-white rounded-btn hover:bg-accent-hover transition-colors text-xs font-bold">
                     保存
                   </button>
-                  <button @click.stop="cancelEditModel" class="px-3 py-1.5 bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 transition-colors text-xs font-bold">
+                  <button @click.stop="cancelEditModel" class="px-3 py-1.5 bg-surface-elevated text-secondary rounded-btn hover:bg-surface-elevated transition-colors text-xs font-bold">
                     取消
                   </button>
                 </div>
@@ -2915,7 +3151,7 @@ onUnmounted(() => {
                 <div class="flex gap-2 shrink-0 ml-2">
                   <button 
                     @click.stop="startEditModel(m)"
-                    class="p-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+                    class="p-2 text-accent hover:bg-accent-soft rounded-btn transition-colors"
                     title="编辑模型名称"
                   >
                     <Pencil class="w-4 h-4" />
@@ -2923,32 +3159,33 @@ onUnmounted(() => {
                   <button 
                     v-if="activeProviderDefaultModelId !== m.id"
                     @click.stop="activateModel(m.id)"
-                    class="p-2 text-green-600 hover:bg-green-50 rounded-lg transition-colors"
+                    class="p-2 text-green-600 hover:bg-green-50 rounded-btn transition-colors"
                     title="设置为默认"
                   >
                     <CheckCircle2 class="w-5 h-5" />
                   </button>
                   <button 
                     @click.stop="deleteModel(m.id)"
-                    class="p-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                    class="p-2 text-red-600 hover:bg-red-50 rounded-btn transition-colors"
                     title="删除"
                   >
                     <Trash2 class="w-5 h-5" />
                   </button>
                 </div>
               </div>
-              <p class="text-[10px] text-gray-400">客户端请求模型为 <span class="font-bold text-green-600">{{ MAGIC_PROXY_MODEL }}</span>（大小写不敏感）时，若应用未指定模型，将使用当前厂商的默认模型。</p>
+              <p class="text-[10px] text-tertiary">客户端请求模型为 <span class="font-bold text-green-600">{{ MAGIC_PROXY_MODEL }}</span>（大小写不敏感）时，若应用未指定模型，将使用当前厂商的默认模型。</p>
             </div>
-             <div v-if="!managedModels.length" class="col-span-full text-center py-10 text-gray-400 text-sm">
+             <div v-if="!managedModels.length" class="col-span-full text-center py-10 text-tertiary text-sm">
                该厂商暂无模型，请添加模型
              </div>
           </div>
-          <div v-if="modelViewMode === 'grid' && !managedModels.length" class="text-center py-12 bg-white rounded-xl border border-gray-200 shadow-sm text-gray-400 text-sm">
+          <div v-if="modelViewMode === 'grid' && !managedModels.length" class="text-center py-12 glow-card text-tertiary text-sm">
             该厂商暂无模型，请添加模型
           </div>
 
           <!-- List view -->
-          <div v-if="modelViewMode === 'list'" class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+          <div v-if="modelViewMode === 'list'" class="glow-card overflow-hidden relative">
+            <div class="h-[2px] absolute top-0 left-0 right-0" :style="{ background: `linear-gradient(90deg, ${vendorAccentColor(providers.find(p => p.id === selectedModelProviderId) || activeProvider)}80, transparent 60%)` }" />
             <div 
               v-for="(m, idx) in sortedManagedModels" 
               :key="m.id"
@@ -2958,31 +3195,31 @@ onUnmounted(() => {
               @dragover="onModelDragOver"
               @drop="onModelDrop($event, idx)"
               @click="activeProviderDefaultModelId !== m.id && activateModel(m.id)"
-              class="flex items-center gap-4 px-5 py-3 border-b border-gray-100 last:border-b-0 hover:bg-gray-50 transition-colors cursor-pointer"
-              :class="{'bg-blue-50/50 border-l-2 border-l-blue-500': activeProviderDefaultModelId === m.id, 'opacity-50': modelDragIndex === idx}"
+              class="flex items-center gap-4 px-5 py-3 border-b border-primary last:border-b-0 hover:bg-surface-elevated transition-colors cursor-pointer"
+              :class="{'accent-soft/50 border-l-2 border-l-blue-500': activeProviderDefaultModelId === m.id, 'opacity-50': modelDragIndex === idx}"
             >
-              <span v-if="modelSortBy === 'custom'" class="text-gray-300 cursor-grab shrink-0"><GripVertical class="w-4 h-4" /></span>
+              <span v-if="modelSortBy === 'custom'" class="text-tertiary cursor-grab shrink-0"><GripVertical class="w-4 h-4" /></span>
               <div v-if="editingModel && editingModel.id === m.id" class="flex flex-1 items-center gap-3">
-                <input v-model="editingModelName" @keyup.enter="saveEditModel" @keyup.escape="cancelEditModel" class="px-3 py-1.5 border border-gray-300 rounded text-sm font-bold outline-none focus:ring-2 focus:ring-blue-500" placeholder="模型名称" autofocus @click.stop />
-                <button @click.stop="saveEditModel" class="px-3 py-1 bg-blue-600 text-white rounded text-xs font-bold">保存</button>
-                <button @click.stop="cancelEditModel" class="px-3 py-1 bg-gray-100 text-gray-600 rounded text-xs font-bold">取消</button>
+                <input v-model="editingModelName" @keyup.enter="saveEditModel" @keyup.escape="cancelEditModel" class="px-3 py-1.5 border border-primary rounded text-sm font-bold outline-none focus:ring-accent focus:ring-2" placeholder="模型名称" autofocus @click.stop />
+                <button @click.stop="saveEditModel" class="px-3 py-1 bg-accent text-white rounded text-xs font-bold">保存</button>
+                <button @click.stop="cancelEditModel" class="px-3 py-1 bg-surface-elevated text-secondary rounded text-xs font-bold">取消</button>
               </div>
               <template v-else>
                 <div class="flex-1 min-w-0">
                   <div class="flex items-center gap-2">
                     <span class="font-bold text-sm truncate">{{ m.name }}</span>
-                    <span v-if="activeProviderDefaultModelId === m.id" class="shrink-0 px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded text-[10px] font-bold">默认</span>
+                    <span v-if="activeProviderDefaultModelId === m.id" class="shrink-0 px-1.5 py-0.5 bg-blue-100 text-accent rounded text-[10px] font-bold">默认</span>
                   </div>
-                  <div v-if="m.createdAt" class="text-[10px] text-gray-400 mt-0.5">创建于 {{ formatTime(m.createdAt) }}</div>
+                  <div v-if="m.createdAt" class="text-[10px] text-tertiary mt-0.5">创建于 {{ formatTime(m.createdAt) }}</div>
                 </div>
                 <div class="flex gap-1 shrink-0">
-                  <button @click.stop="startEditModel(m)" class="p-1.5 text-blue-600 hover:bg-blue-50 rounded-lg" title="编辑"><Pencil class="w-4 h-4" /></button>
-                  <button v-if="activeProviderDefaultModelId !== m.id" @click.stop="activateModel(m.id)" class="p-1.5 text-green-600 hover:bg-green-50 rounded-lg" title="默认"><CheckCircle2 class="w-4 h-4" /></button>
-                  <button @click.stop="deleteModel(m.id)" class="p-1.5 text-red-600 hover:bg-red-50 rounded-lg" title="删除"><Trash2 class="w-4 h-4" /></button>
+                  <button @click.stop="startEditModel(m)" class="p-1.5 text-accent hover:bg-accent-soft rounded-btn transition-colors" title="编辑"><Pencil class="w-4 h-4" /></button>
+                  <button v-if="activeProviderDefaultModelId !== m.id" @click.stop="activateModel(m.id)" class="p-1.5 text-green-600 hover:bg-green-50 rounded-btn transition-colors" title="默认"><CheckCircle2 class="w-4 h-4" /></button>
+                  <button @click.stop="deleteModel(m.id)" class="p-1.5 text-red-600 hover:bg-red-50 rounded-btn transition-colors" title="删除"><Trash2 class="w-4 h-4" /></button>
                 </div>
               </template>
             </div>
-            <div v-if="!managedModels.length" class="text-center py-12 text-gray-400 text-sm">
+            <div v-if="!managedModels.length" class="text-center py-12 text-tertiary text-sm">
               该厂商暂无模型
             </div>
           </div>
@@ -2992,35 +3229,35 @@ onUnmounted(() => {
         <div v-if="activeTab === 'modelRules'" class="space-y-6">
           <div class="flex justify-between items-center">
             <div class="space-y-1">
-              <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">模型规则管理</h3>
-              <p class="text-[10px] text-gray-400">支持 * 通配符，大小写敏感。按优先级从高到低匹配，命中第一条后强制转换模型。</p>
+              <h3 class="text-sm font-medium text-secondary uppercase tracking-wider">模型规则管理</h3>
+              <p class="text-[10px] text-tertiary">支持 * 通配符，大小写敏感。按优先级从高到低匹配，命中第一条后强制转换模型。</p>
             </div>
             <button 
               @click="showAddModelRule = true"
-              class="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
+              class="flex items-center gap-2 px-4 py-2 bg-accent text-white rounded-btn hover:bg-accent-hover transition-colors text-sm"
             >
               <Plus class="w-4 h-4" />
               添加规则
             </button>
           </div>
 
-          <div class="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
+          <div class="glow-card overflow-hidden">
             <div class="overflow-x-auto">
             <table class="w-full min-w-[720px] text-left text-sm">
-              <thead class="bg-gray-50 border-b border-gray-200">
+              <thead class="bg-surface-elevated border-b border-primary">
                 <tr>
-                  <th class="px-6 py-4 font-semibold text-gray-600">优先级</th>
-                  <th class="px-6 py-4 font-semibold text-gray-600">匹配模式</th>
-                  <th class="px-6 py-4 font-semibold text-gray-600">转换为</th>
-                  <th class="px-6 py-4 font-semibold text-gray-600">状态</th>
-                  <th class="px-6 py-4 font-semibold text-gray-600 text-right">操作</th>
+                  <th class="px-6 py-4 font-semibold text-secondary">优先级</th>
+                  <th class="px-6 py-4 font-semibold text-secondary">匹配模式</th>
+                  <th class="px-6 py-4 font-semibold text-secondary">转换为</th>
+                  <th class="px-6 py-4 font-semibold text-secondary">状态</th>
+                  <th class="px-6 py-4 font-semibold text-secondary text-right">操作</th>
                 </tr>
               </thead>
               <tbody class="divide-y divide-gray-200">
-                <tr v-for="r in modelRules" :key="r.id" class="hover:bg-gray-50 transition-colors">
-                  <td class="px-6 py-4 font-mono text-xs text-gray-700">{{ r.priority }}</td>
-                  <td class="px-6 py-4 font-mono text-xs text-gray-700">{{ r.pattern }}</td>
-                  <td class="px-6 py-4 font-mono text-xs text-blue-700 font-medium">{{ r.targetModel }}</td>
+                <tr v-for="r in modelRules" :key="r.id" class="hover:bg-surface-elevated transition-colors">
+                  <td class="px-6 py-4 font-mono text-xs text-secondary">{{ r.priority }}</td>
+                  <td class="px-6 py-4 font-mono text-xs text-secondary">{{ r.pattern }}</td>
+                  <td class="px-6 py-4 font-mono text-xs text-accent font-medium">{{ r.targetModel }}</td>
                   <td class="px-6 py-4">
                     <span 
                       v-if="r.enabled" 
@@ -3031,7 +3268,7 @@ onUnmounted(() => {
                     </span>
                     <span 
                       v-else 
-                      class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-gray-50 text-gray-500 border border-gray-200"
+                      class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-surface-elevated text-secondary border border-primary"
                     >
                       <ShieldAlert class="w-3 h-3" />
                       已禁用
@@ -3047,7 +3284,7 @@ onUnmounted(() => {
                     </button>
                     <button 
                       @click="editingModelRule = { ...r }"
-                      class="text-blue-600 hover:underline font-medium text-xs"
+                      class="text-accent hover:underline font-medium text-xs"
                     >
                       编辑
                     </button>
@@ -3060,7 +3297,7 @@ onUnmounted(() => {
                   </td>
                 </tr>
                 <tr v-if="!modelRules.length">
-                  <td colspan="5" class="px-6 py-10 text-center text-gray-400 text-sm">暂无规则</td>
+                  <td colspan="5" class="px-6 py-10 text-center text-tertiary text-sm">暂无规则</td>
                 </tr>
               </tbody>
             </table>
@@ -3072,33 +3309,33 @@ onUnmounted(() => {
         <div v-if="activeTab === 'users'" class="space-y-6">
           <div class="flex flex-col sm:flex-row gap-3 sm:justify-between sm:items-center">
             <div class="space-y-1">
-              <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">用户管理</h3>
-              <p class="text-[10px] text-gray-400">首次登录默认用户必须修改密码；支持创建/禁用/重置密码。</p>
+              <h3 class="text-sm font-medium text-secondary uppercase tracking-wider">用户管理</h3>
+              <p class="text-[10px] text-tertiary">首次登录默认用户必须修改密码；支持创建/禁用/重置密码。</p>
             </div>
             <button
               @click="showAddAdminUser = true"
-              class="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
+              class="flex items-center gap-2 px-4 py-2 bg-accent text-white rounded-btn hover:bg-accent-hover transition-colors text-sm"
             >
               <Plus class="w-4 h-4" />
               添加用户
             </button>
           </div>
 
-          <div class="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
+          <div class="glow-card overflow-hidden">
             <div class="overflow-x-auto">
             <table class="w-full min-w-[760px] text-left text-sm">
-              <thead class="bg-gray-50 border-b border-gray-200">
+              <thead class="bg-surface-elevated border-b border-primary">
                 <tr>
-                  <th class="px-6 py-4 font-semibold text-gray-600">用户名</th>
-                  <th class="px-6 py-4 font-semibold text-gray-600">状态</th>
-                  <th class="px-6 py-4 font-semibold text-gray-600">强制改密</th>
-                  <th class="px-6 py-4 font-semibold text-gray-600">创建时间</th>
-                  <th class="px-6 py-4 font-semibold text-gray-600 text-right">操作</th>
+                  <th class="px-6 py-4 font-semibold text-secondary">用户名</th>
+                  <th class="px-6 py-4 font-semibold text-secondary">状态</th>
+                  <th class="px-6 py-4 font-semibold text-secondary">强制改密</th>
+                  <th class="px-6 py-4 font-semibold text-secondary">创建时间</th>
+                  <th class="px-6 py-4 font-semibold text-secondary text-right">操作</th>
                 </tr>
               </thead>
               <tbody class="divide-y divide-gray-200">
-                <tr v-for="u in adminUsers" :key="u.id" class="hover:bg-gray-50 transition-colors">
-                  <td class="px-6 py-4 font-medium text-gray-900">{{ u.username }}</td>
+                <tr v-for="u in adminUsers" :key="u.id" class="hover:bg-surface-elevated transition-colors">
+                  <td class="px-6 py-4 font-medium text-primary">{{ u.username }}</td>
                   <td class="px-6 py-4">
                     <span
                       v-if="u.enabled"
@@ -3109,7 +3346,7 @@ onUnmounted(() => {
                     </span>
                     <span
                       v-else
-                      class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-gray-50 text-gray-500 border border-gray-200"
+                      class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-surface-elevated text-secondary border border-primary"
                     >
                       <ShieldAlert class="w-3 h-3" />
                       已禁用
@@ -3117,13 +3354,13 @@ onUnmounted(() => {
                   </td>
                   <td class="px-6 py-4">
                     <span v-if="u.mustChangePassword" class="text-amber-600 font-bold text-xs">是</span>
-                    <span v-else class="text-gray-400 text-xs">否</span>
+                    <span v-else class="text-tertiary text-xs">否</span>
                   </td>
-                  <td class="px-6 py-4 text-gray-500 font-mono text-xs">{{ formatTime(u.createdAt) }}</td>
+                  <td class="px-6 py-4 text-secondary font-mono text-xs">{{ formatTime(u.createdAt) }}</td>
                   <td class="px-6 py-4 text-right space-x-3">
                     <button
                       @click="editingAdminUser = { ...u }"
-                      class="text-blue-600 hover:underline font-medium text-xs"
+                      class="text-accent hover:underline font-medium text-xs"
                     >
                       编辑
                     </button>
@@ -3143,7 +3380,7 @@ onUnmounted(() => {
                   </td>
                 </tr>
                 <tr v-if="!adminUsers.length">
-                  <td colspan="5" class="px-6 py-10 text-center text-gray-400 text-sm">暂无用户</td>
+                  <td colspan="5" class="px-6 py-10 text-center text-tertiary text-sm">暂无用户</td>
                 </tr>
               </tbody>
             </table>
@@ -3153,51 +3390,51 @@ onUnmounted(() => {
 
         <!-- Stats View -->
         <div v-if="activeTab === 'stats'" class="space-y-6">
-          <div class="relative overflow-hidden rounded-xl border border-gray-200 bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900 p-6 text-white shadow-xl shadow-gray-900/15 sm:p-8">
-            <div class="pointer-events-none absolute -right-24 -top-24 h-64 w-64 rounded-full bg-cyan-500/15 blur-3xl" />
-            <div class="pointer-events-none absolute -bottom-20 -left-16 h-56 w-56 rounded-full bg-indigo-500/10 blur-3xl" />
-            <div class="relative flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
+          <div class="glow-card p-6 sm:p-8">
+            <div class="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
               <div class="max-w-xl">
-                <p class="text-[11px] font-semibold uppercase tracking-[0.22em] text-gray-400">Analytics</p>
-                <h3 class="mt-1.5 text-2xl font-bold tracking-tight sm:text-3xl">使用统计</h3>
-                <p class="mt-2 text-sm leading-relaxed text-gray-400">请求量、错误与 Token 消耗趋势；可按时间范围筛选，厂商筛选影响下方图表（热力图除外）。</p>
+                <p class="text-[11px] font-semibold uppercase tracking-[0.2em] text-tertiary">Analytics</p>
+                <h3 class="mt-1.5 text-2xl font-bold tracking-tight text-primary sm:text-3xl">使用统计</h3>
+                <p class="mt-2 text-sm leading-relaxed text-secondary">请求量、错误与 Token 消耗趋势；可按时间范围筛选，厂商筛选影响下方图表（热力图除外）。</p>
               </div>
-              <button
-                type="button"
-                @click="fetchStats"
-                class="inline-flex shrink-0 items-center gap-2 rounded-xl border border-white/15 bg-white/10 px-4 py-2.5 text-sm font-semibold text-white backdrop-blur-sm transition hover:bg-white/15"
-              >
-                <Clock class="h-4 w-4 opacity-90" />
-                刷新数据
-              </button>
-              <button
-                type="button"
-                @click="clearAllStats"
-                class="inline-flex shrink-0 items-center gap-2 rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-2.5 text-sm font-semibold text-rose-200 backdrop-blur-sm transition hover:bg-rose-500/20"
-              >
-                <Trash2 class="h-4 w-4 opacity-90" />
-                清空统计
-              </button>
-              <button
-                type="button"
-                @click="exportStats"
-                class="inline-flex shrink-0 items-center gap-2 rounded-xl border border-white/15 bg-white/10 px-4 py-2.5 text-sm font-semibold text-cyan-200 backdrop-blur-sm transition hover:bg-white/15"
-              >
-                <Download class="h-4 w-4 opacity-90" />
-                导出 CSV
-              </button>
+              <div class="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  @click="fetchStats"
+                  class="inline-flex shrink-0 items-center gap-2 rounded-btn border border-primary bg-surface-elevated px-4 py-2 text-sm font-semibold text-secondary transition hover:bg-surface-elevated/80"
+                >
+                  <Clock class="h-4 w-4" />
+                  刷新数据
+                </button>
+                <button
+                  type="button"
+                  @click="clearAllStats"
+                  class="inline-flex shrink-0 items-center gap-2 rounded-btn border border-red-200 bg-red-50 px-4 py-2 text-sm font-semibold text-red-600 transition hover:bg-red-100"
+                >
+                  <Trash2 class="h-4 w-4" />
+                  清空统计
+                </button>
+                <button
+                  type="button"
+                  @click="exportStats"
+                  class="inline-flex shrink-0 items-center gap-2 rounded-btn border border-primary bg-surface-elevated px-4 py-2 text-sm font-semibold text-secondary transition hover:bg-surface-elevated/80"
+                >
+                  <Download class="h-4 w-4" />
+                  导出 CSV
+                </button>
+              </div>
             </div>
 
-            <div class="relative mt-6 flex flex-col gap-4 rounded-xl border border-white/10 bg-white/[0.06] p-4 backdrop-blur-md sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
+            <div class="mt-6 flex flex-col gap-4 rounded-btn border border-primary bg-surface-elevated p-4 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
               <div class="flex flex-wrap gap-1.5">
                 <button
                   type="button"
                   @click="statsRange = '7d'"
                   :class="[
-                    'rounded-lg px-3 py-2 text-xs font-semibold transition',
+                    'rounded-md px-3 py-1.5 text-xs font-semibold transition',
                     statsRange === '7d'
-                      ? 'bg-white text-gray-900 shadow-sm'
-                      : 'text-gray-300 hover:bg-white/10 hover:text-white'
+                      ? 'bg-white text-primary shadow-sm'
+                      : 'text-tertiary hover:text-secondary'
                   ]"
                 >
                   7 天
@@ -3206,10 +3443,10 @@ onUnmounted(() => {
                   type="button"
                   @click="statsRange = '30d'"
                   :class="[
-                    'rounded-lg px-3 py-2 text-xs font-semibold transition',
+                    'rounded-md px-3 py-1.5 text-xs font-semibold transition',
                     statsRange === '30d'
-                      ? 'bg-white text-gray-900 shadow-sm'
-                      : 'text-gray-300 hover:bg-white/10 hover:text-white'
+                      ? 'bg-white text-primary shadow-sm'
+                      : 'text-tertiary hover:text-secondary'
                   ]"
                 >
                   30 天
@@ -3218,10 +3455,10 @@ onUnmounted(() => {
                   type="button"
                   @click="statsRange = '90d'"
                   :class="[
-                    'rounded-lg px-3 py-2 text-xs font-semibold transition',
+                    'rounded-md px-3 py-1.5 text-xs font-semibold transition',
                     statsRange === '90d'
-                      ? 'bg-white text-gray-900 shadow-sm'
-                      : 'text-gray-300 hover:bg-white/10 hover:text-white'
+                      ? 'bg-white text-primary shadow-sm'
+                      : 'text-tertiary hover:text-secondary'
                   ]"
                 >
                   90 天
@@ -3230,318 +3467,378 @@ onUnmounted(() => {
                   type="button"
                   @click="statsRange = 'all'"
                   :class="[
-                    'rounded-lg px-3 py-2 text-xs font-semibold transition',
+                    'rounded-md px-3 py-1.5 text-xs font-semibold transition',
                     statsRange === 'all'
-                      ? 'bg-white text-gray-900 shadow-sm'
-                      : 'text-gray-300 hover:bg-white/10 hover:text-white'
+                      ? 'bg-white text-primary shadow-sm'
+                      : 'text-tertiary hover:text-secondary'
                   ]"
                 >
                   全部
                 </button>
               </div>
               <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
-                <label class="flex items-center gap-2 text-xs font-medium text-gray-300">
+                <label class="flex items-center gap-2 text-xs font-medium text-secondary">
                   <span class="whitespace-nowrap">厂商</span>
                   <select
                     v-model="statsProviderId"
-                    class="min-w-[8rem] rounded-lg border border-white/15 bg-gray-900/40 px-3 py-2 text-xs font-semibold text-white outline-none ring-0 focus:border-cyan-400/50"
+                    class="min-w-[8rem] rounded-btn border border-primary bg-surface-input px-3 py-2 text-xs font-semibold text-primary outline-none focus:border-accent/50"
                   >
-                    <option value="all" class="text-gray-900">全部</option>
-                    <option v-for="p in providers" :key="p.id" :value="p.id" class="text-gray-900">{{ p.name }}</option>
+                    <option value="all">全部</option>
+                    <option v-for="p in providers" :key="p.id" :value="p.id">{{ p.name }}</option>
                   </select>
                 </label>
-                <span class="text-[11px] text-gray-500">热力图不受厂商筛选影响</span>
+                <span class="text-[11px] text-tertiary">热力图不受厂商筛选影响</span>
               </div>
               <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-4">
-                <label class="flex items-center gap-2 text-xs font-medium text-gray-300">
+                <label class="flex items-center gap-2 text-xs font-medium text-secondary">
                   <span class="whitespace-nowrap">类型</span>
                   <select
                     v-model="statsIsStream"
-                    class="min-w-[7rem] rounded-lg border border-white/15 bg-gray-900/40 px-3 py-2 text-xs font-semibold text-white outline-none ring-0 focus:border-cyan-400/50"
+                    class="min-w-[7rem] rounded-btn border border-primary bg-surface-input px-3 py-2 text-xs font-semibold text-primary outline-none focus:border-accent/50"
                   >
-                    <option value="all" class="text-gray-900">全部</option>
-                    <option value="1" class="text-gray-900">流式</option>
-                    <option value="0" class="text-gray-900">非流式</option>
+                    <option value="all">全部</option>
+                    <option value="1">流式</option>
+                    <option value="0">非流式</option>
                   </select>
                 </label>
-                <label class="flex items-center gap-2 text-xs font-medium text-gray-300">
+                <label class="flex items-center gap-2 text-xs font-medium text-secondary">
                   <span class="whitespace-nowrap">协议</span>
                   <select
                     v-model="statsClientProtocol"
-                    class="min-w-[7rem] rounded-lg border border-white/15 bg-gray-900/40 px-3 py-2 text-xs font-semibold text-white outline-none ring-0 focus:border-cyan-400/50"
+                    class="min-w-[7rem] rounded-btn border border-primary bg-surface-input px-3 py-2 text-xs font-semibold text-primary outline-none focus:border-accent/50"
                   >
-                    <option value="all" class="text-gray-900">全部</option>
-                    <option value="openai" class="text-gray-900">OpenAI</option>
-                    <option value="anthropic" class="text-gray-900">Anthropic</option>
+                    <option value="all">全部</option>
+                    <option value="openai">OpenAI</option>
+                    <option value="anthropic">Anthropic</option>
                   </select>
                 </label>
               </div>
             </div>
           </div>
 
-          <div v-if="statsLoading" class="flex min-h-[220px] flex-col items-center justify-center gap-4 rounded-xl border border-gray-200 bg-gray-50/80 p-12 text-gray-600">
+          <div v-if="statsLoading" class="flex min-h-[220px] flex-col items-center justify-center gap-4 rounded-card border border-primary bg-surface-elevated/80 p-12 text-secondary">
             <Loader2 class="h-8 w-8 animate-spin text-cyan-600" />
             <p class="text-sm font-medium">正在加载统计数据…</p>
           </div>
 
           <div v-else class="space-y-8">
+
+            <!-- ════════ KPI 概览 ════════ -->
+            <div class="flex items-center gap-3">
+              <span class="text-[10px] font-semibold uppercase tracking-widest" style="color:var(--color-text-tertiary)">KPI 概览</span>
+              <div class="flex-1 border-t" style="border-color:var(--color-border-default)" />
+            </div>
+
             <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-6">
-              <div class="group relative overflow-hidden rounded-xl border border-gray-200 bg-white p-5 shadow-sm transition hover:border-gray-300 hover:shadow-md">
-                <div class="flex items-start justify-between gap-3">
-                  <div class="rounded-xl bg-blue-50 p-2.5 text-blue-600">
-                    <Activity class="h-5 w-5" />
-                  </div>
+              <div class="relative overflow-hidden glow-card flex flex-col overflow-hidden gap-3 p-5">
+                <div class="h-[2px] absolute top-0 left-0 right-0" style="background:linear-gradient(90deg, #3b82f680, transparent 60%)" />
+                <div class="flex items-center justify-between">
+                  <span class="text-xs font-medium" style="color:var(--color-text-tertiary)">请求数</span>
+                  <div class="flex h-7 w-7 items-center justify-center rounded-lg" style="background-color:#3b82f618"><Activity class="h-3.5 w-3.5" style="color:#3b82f6" /></div>
                 </div>
-                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-gray-500">请求数</p>
-                <p class="mt-1 text-3xl font-bold tabular-nums tracking-tight text-gray-900">{{ statsSummary ? formatNumber(statsSummary.requestCount) : '—' }}</p>
+                <p class="num text-2xl font-bold" style="color:var(--color-text-primary)">{{ statsSummary ? formatNumber(statsSummary.requestCount) : '—' }}</p>
               </div>
-              <div class="group relative overflow-hidden rounded-xl border border-gray-200 bg-white p-5 shadow-sm transition hover:border-gray-300 hover:shadow-md">
-                <div class="flex items-start justify-between gap-3">
-                  <div class="rounded-xl bg-rose-50 p-2.5 text-rose-600">
-                    <AlertTriangle class="h-5 w-5" />
-                  </div>
+              <div class="relative overflow-hidden glow-card flex flex-col overflow-hidden gap-3 p-5">
+                <div class="h-[2px] absolute top-0 left-0 right-0" style="background:linear-gradient(90deg, #f43f5e80, transparent 60%)" />
+                <div class="flex items-center justify-between">
+                  <span class="text-xs font-medium" style="color:var(--color-text-tertiary)">错误数</span>
+                  <div class="flex h-7 w-7 items-center justify-center rounded-lg" style="background-color:#f43f5e18"><AlertTriangle class="h-3.5 w-3.5" style="color:#f43f5e" /></div>
                 </div>
-                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-gray-500">错误数</p>
-                <p class="mt-1 text-3xl font-bold tabular-nums tracking-tight text-rose-600">{{ statsSummary ? formatNumber(statsSummary.errorCount) : '—' }}</p>
+                <p class="num text-2xl font-bold" style="color:#f43f5e">{{ statsSummary ? formatNumber(statsSummary.errorCount) : '—' }}</p>
               </div>
-              <div class="group relative overflow-hidden rounded-xl border border-gray-200 bg-white p-5 shadow-sm transition hover:border-gray-300 hover:shadow-md">
-                <div class="flex items-start justify-between gap-3">
-                  <div class="rounded-xl bg-amber-50 p-2.5 text-amber-600">
-                    <Percent class="h-5 w-5" />
-                  </div>
+              <div class="relative overflow-hidden glow-card flex flex-col overflow-hidden gap-3 p-5">
+                <div class="h-[2px] absolute top-0 left-0 right-0" style="background:linear-gradient(90deg, #f59e0b80, transparent 60%)" />
+                <div class="flex items-center justify-between">
+                  <span class="text-xs font-medium" style="color:var(--color-text-tertiary)">错误率</span>
+                  <div class="flex h-7 w-7 items-center justify-center rounded-lg" style="background-color:#f59e0b18"><Percent class="h-3.5 w-3.5" style="color:#f59e0b" /></div>
                 </div>
-                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-gray-500">错误率</p>
-                <p class="mt-1 text-3xl font-bold tabular-nums tracking-tight text-amber-600">{{ statsSummary ? (statsSummary.errorRate * 100).toFixed(2) + '%' : '—' }}</p>
+                <p class="num text-2xl font-bold" style="color:#f59e0b">{{ statsSummary ? (statsSummary.errorRate * 100).toFixed(2) + '%' : '—' }}</p>
               </div>
-              <div class="group relative overflow-hidden rounded-xl border border-gray-200 bg-white p-5 shadow-sm transition hover:border-gray-300 hover:shadow-md">
-                <div class="flex items-start justify-between gap-3">
-                  <div class="rounded-xl bg-cyan-50 p-2.5 text-cyan-600">
-                    <Download class="h-5 w-5" />
-                  </div>
+              <div class="relative overflow-hidden glow-card flex flex-col overflow-hidden gap-3 p-5">
+                <div class="h-[2px] absolute top-0 left-0 right-0" style="background:linear-gradient(90deg, #06b6d480, transparent 60%)" />
+                <div class="flex items-center justify-between">
+                  <span class="text-xs font-medium" style="color:var(--color-text-tertiary)">Tokens 入</span>
+                  <div class="flex h-7 w-7 items-center justify-center rounded-lg" style="background-color:#06b6d418"><Download class="h-3.5 w-3.5" style="color:#06b6d4" /></div>
                 </div>
-                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-gray-500">Tokens 入</p>
-                <p class="mt-1 text-3xl font-bold tabular-nums tracking-tight text-cyan-700">{{ statsSummary ? formatNumber(statsSummary.tokensInTotal) : '—' }}</p>
+                <p class="num text-2xl font-bold" style="color:#0891b2">{{ statsSummary ? formatNumber(statsSummary.tokensInTotal) : '—' }}</p>
               </div>
-              <div class="group relative overflow-hidden rounded-xl border border-gray-200 bg-white p-5 shadow-sm transition hover:border-gray-300 hover:shadow-md">
-                <div class="flex items-start justify-between gap-3">
-                  <div class="rounded-xl bg-teal-50 p-2.5 text-teal-600">
-                    <Upload class="h-5 w-5" />
-                  </div>
+              <div class="relative overflow-hidden glow-card flex flex-col overflow-hidden gap-3 p-5">
+                <div class="h-[2px] absolute top-0 left-0 right-0" style="background:linear-gradient(90deg, #14b8a680, transparent 60%)" />
+                <div class="flex items-center justify-between">
+                  <span class="text-xs font-medium" style="color:var(--color-text-tertiary)">Tokens 出</span>
+                  <div class="flex h-7 w-7 items-center justify-center rounded-lg" style="background-color:#14b8a618"><Upload class="h-3.5 w-3.5" style="color:#14b8a6" /></div>
                 </div>
-                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-gray-500">Tokens 出</p>
-                <p class="mt-1 text-3xl font-bold tabular-nums tracking-tight text-teal-700">{{ statsSummary ? formatNumber(statsSummary.tokensOutTotal) : '—' }}</p>
+                <p class="num text-2xl font-bold" style="color:#0d9488">{{ statsSummary ? formatNumber(statsSummary.tokensOutTotal) : '—' }}</p>
               </div>
-              <div class="group relative overflow-hidden rounded-xl border border-gray-200 bg-white p-5 shadow-sm transition hover:border-gray-300 hover:shadow-md sm:col-span-2 xl:col-span-1">
-                <div class="flex items-start justify-between gap-3">
-                  <div class="rounded-xl bg-emerald-50 p-2.5 text-emerald-600">
-                    <Timer class="h-5 w-5" />
-                  </div>
+              <div class="relative overflow-hidden glow-card flex flex-col overflow-hidden gap-3 p-5 sm:col-span-2 xl:col-span-1">
+                <div class="h-[2px] absolute top-0 left-0 right-0" style="background:linear-gradient(90deg, #10b98180, transparent 60%)" />
+                <div class="flex items-center justify-between">
+                  <span class="text-xs font-medium" style="color:var(--color-text-tertiary)">平均耗时</span>
+                  <div class="flex h-7 w-7 items-center justify-center rounded-lg" style="background-color:#10b98118"><Timer class="h-3.5 w-3.5" style="color:#10b981" /></div>
                 </div>
-                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-gray-500">平均耗时</p>
-                <p class="mt-1 text-3xl font-bold tabular-nums tracking-tight text-emerald-700">{{ statsSummary ? formatMs(statsSummary.avgLatencyMs) : '—' }}</p>
+                <p class="num text-2xl font-bold" style="color:#059669">{{ statsSummary ? formatMs(statsSummary.avgLatencyMs) : '—' }}</p>
               </div>
+            </div>
+
+            <!-- ════════ 指标详情 ════════ -->
+            <div class="flex items-center gap-3">
+              <span class="text-[10px] font-semibold uppercase tracking-widest" style="color:var(--color-text-tertiary)">指标详情</span>
+              <div class="flex-1 border-t" style="border-color:var(--color-border-default)" />
             </div>
 
             <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-              <div class="group relative overflow-hidden rounded-xl border border-gray-200 bg-white p-5 shadow-sm transition hover:border-gray-300 hover:shadow-md">
-                <div class="flex items-start justify-between gap-3">
-                  <div class="rounded-xl bg-violet-50 p-2.5 text-violet-600">
-                    <Radio class="h-5 w-5" />
-                  </div>
+              <div class="relative overflow-hidden glow-card flex flex-col overflow-hidden gap-3 p-5">
+                <div class="h-[2px] absolute top-0 left-0 right-0" style="background:linear-gradient(90deg, #8b5cf680, transparent 60%)" />
+                <div class="flex items-center justify-between">
+                  <span class="text-xs font-medium" style="color:var(--color-text-tertiary)">流式请求</span>
+                  <div class="flex h-7 w-7 items-center justify-center rounded-lg" style="background-color:#8b5cf618"><Radio class="h-3.5 w-3.5" style="color:#8b5cf6" /></div>
                 </div>
-                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-gray-500">流式请求</p>
-                <p class="mt-1 text-3xl font-bold tabular-nums tracking-tight text-violet-700">{{ statsSummary ? formatNumber(statsSummary.streamCount) : '—' }}</p>
+                <p class="num text-2xl font-bold" style="color:#7c3aed">{{ statsSummary ? formatNumber(statsSummary.streamCount) : '—' }}</p>
               </div>
-              <div class="group relative overflow-hidden rounded-xl border border-gray-200 bg-white p-5 shadow-sm transition hover:border-gray-300 hover:shadow-md">
-                <div class="flex items-start justify-between gap-3">
-                  <div class="rounded-xl bg-purple-50 p-2.5 text-purple-600">
-                    <Gauge class="h-5 w-5" />
-                  </div>
+              <div class="relative overflow-hidden glow-card flex flex-col overflow-hidden gap-3 p-5">
+                <div class="h-[2px] absolute top-0 left-0 right-0" style="background:linear-gradient(90deg, #a855f780, transparent 60%)" />
+                <div class="flex items-center justify-between">
+                  <span class="text-xs font-medium" style="color:var(--color-text-tertiary)">TTFB 平均</span>
+                  <div class="flex h-7 w-7 items-center justify-center rounded-lg" style="background-color:#a855f718"><Gauge class="h-3.5 w-3.5" style="color:#a855f7" /></div>
                 </div>
-                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-gray-500">TTFB 平均</p>
-                <p class="mt-1 text-3xl font-bold tabular-nums tracking-tight text-purple-700">{{ statsSummary ? formatMs(statsSummary.ttfbAvgMs) : '—' }}</p>
+                <p class="num text-2xl font-bold" style="color:#9333ea">{{ statsSummary ? formatMs(statsSummary.ttfbAvgMs) : '—' }}</p>
               </div>
-              <div class="group relative overflow-hidden rounded-xl border border-gray-200 bg-white p-5 shadow-sm transition hover:border-gray-300 hover:shadow-md">
-                <div class="flex items-start justify-between gap-3">
-                  <div class="rounded-xl bg-sky-50 p-2.5 text-sky-600">
-                    <HardDrive class="h-5 w-5" />
-                  </div>
+              <div class="relative overflow-hidden glow-card flex flex-col overflow-hidden gap-3 p-5">
+                <div class="h-[2px] absolute top-0 left-0 right-0" style="background:linear-gradient(90deg, #0ea5e980, transparent 60%)" />
+                <div class="flex items-center justify-between">
+                  <span class="text-xs font-medium" style="color:var(--color-text-tertiary)">数据传输</span>
+                  <div class="flex h-7 w-7 items-center justify-center rounded-lg" style="background-color:#0ea5e918"><HardDrive class="h-3.5 w-3.5" style="color:#0ea5e9" /></div>
                 </div>
-                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-gray-500">数据传输</p>
-                <p class="mt-1 text-3xl font-bold tabular-nums tracking-tight text-sky-700">{{ statsSummary ? formatBytes(statsSummary.responseBytesTotal) : '—' }}</p>
+                <p class="num text-2xl font-bold" style="color:#0284c7">{{ statsSummary ? formatBytes(statsSummary.responseBytesTotal) : '—' }}</p>
               </div>
-              <div class="group relative overflow-hidden rounded-xl border border-gray-200 bg-white p-5 shadow-sm transition hover:border-gray-300 hover:shadow-md">
-                <div class="flex items-start justify-between gap-3">
-                  <div class="rounded-xl bg-orange-50 p-2.5 text-orange-600">
-                    <WifiOff class="h-5 w-5" />
-                  </div>
+              <div class="relative overflow-hidden glow-card flex flex-col overflow-hidden gap-3 p-5">
+                <div class="h-[2px] absolute top-0 left-0 right-0" style="background:linear-gradient(90deg, #f9731680, transparent 60%)" />
+                <div class="flex items-center justify-between">
+                  <span class="text-xs font-medium" style="color:var(--color-text-tertiary)">流中断率</span>
+                  <div class="flex h-7 w-7 items-center justify-center rounded-lg" style="background-color:#f9731618"><WifiOff class="h-3.5 w-3.5" style="color:#f97316" /></div>
                 </div>
-                <p class="mt-4 text-xs font-semibold uppercase tracking-wide text-gray-500">流中断率</p>
-                <p class="mt-1 text-3xl font-bold tabular-nums tracking-tight text-orange-700">{{ statsSummary ? (statsSummary.streamBrokenRate * 100).toFixed(2) + '%' : '—' }}</p>
+                <p class="num text-2xl font-bold" style="color:#ea580c">{{ statsSummary ? (statsSummary.streamBrokenRate * 100).toFixed(2) + '%' : '—' }}</p>
               </div>
             </div>
 
-            <div v-if="statsSummary?.latencyPercentiles || statsSummary?.ttfbPercentiles" class="flex flex-wrap gap-4 rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-              <template v-if="statsSummary?.latencyPercentiles">
-                <span class="text-xs font-semibold uppercase tracking-wide text-gray-400 self-center">延迟分位数</span>
-                <span class="inline-flex items-center rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700">P50 {{ formatMs(statsSummary.latencyPercentiles.p50) }}</span>
-                <span class="inline-flex items-center rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700">P90 {{ formatMs(statsSummary.latencyPercentiles.p90) }}</span>
-                <span class="inline-flex items-center rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700">P99 {{ formatMs(statsSummary.latencyPercentiles.p99) }}</span>
-              </template>
-              <template v-if="statsSummary?.ttfbPercentiles">
-                <span class="text-xs font-semibold uppercase tracking-wide text-gray-400 self-center ml-4">TTFB 分位数</span>
-                <span class="inline-flex items-center rounded-full bg-purple-50 px-3 py-1 text-xs font-medium text-purple-700">P50 {{ formatMs(statsSummary.ttfbPercentiles.p50) }}</span>
-                <span class="inline-flex items-center rounded-full bg-purple-50 px-3 py-1 text-xs font-medium text-purple-700">P90 {{ formatMs(statsSummary.ttfbPercentiles.p90) }}</span>
-                <span class="inline-flex items-center rounded-full bg-purple-50 px-3 py-1 text-xs font-medium text-purple-700">P99 {{ formatMs(statsSummary.ttfbPercentiles.p99) }}</span>
-              </template>
+            <div v-if="statsSummary?.latencyPercentiles || statsSummary?.ttfbPercentiles" class="glow-card flex flex-col overflow-hidden" style="padding:0">
+              <div class="h-[2px]" style="background:linear-gradient(90deg, #3b82f680, transparent 60%)" />
+              <div class="flex flex-wrap gap-4 px-5 py-4">
+                <template v-if="statsSummary?.latencyPercentiles">
+                  <span class="text-xs font-semibold uppercase tracking-wide self-center" style="color:var(--color-text-tertiary)">延迟分位数</span>
+                  <span class="inline-flex items-center rounded-full px-3 py-1 text-xs font-medium" style="background-color:#05966918;color:#059669;border:1px solid rgba(5,150,105,0.2)">P50 {{ formatMs(statsSummary.latencyPercentiles.p50) }}</span>
+                  <span class="inline-flex items-center rounded-full px-3 py-1 text-xs font-medium" style="background-color:#05966918;color:#059669;border:1px solid rgba(5,150,105,0.2)">P90 {{ formatMs(statsSummary.latencyPercentiles.p90) }}</span>
+                  <span class="inline-flex items-center rounded-full px-3 py-1 text-xs font-medium" style="background-color:#05966918;color:#059669;border:1px solid rgba(5,150,105,0.2)">P99 {{ formatMs(statsSummary.latencyPercentiles.p99) }}</span>
+                </template>
+                <template v-if="statsSummary?.ttfbPercentiles">
+                  <span class="text-xs font-semibold uppercase tracking-wide self-center" style="color:var(--color-text-tertiary)">TTFB 分位数</span>
+                  <span class="inline-flex items-center rounded-full px-3 py-1 text-xs font-medium" style="background-color:#7c3aed18;color:#7c3aed;border:1px solid rgba(124,58,237,0.2)">P50 {{ formatMs(statsSummary.ttfbPercentiles.p50) }}</span>
+                  <span class="inline-flex items-center rounded-full px-3 py-1 text-xs font-medium" style="background-color:#7c3aed18;color:#7c3aed;border:1px solid rgba(124,58,237,0.2)">P90 {{ formatMs(statsSummary.ttfbPercentiles.p90) }}</span>
+                  <span class="inline-flex items-center rounded-full px-3 py-1 text-xs font-medium" style="background-color:#7c3aed18;color:#7c3aed;border:1px solid rgba(124,58,237,0.2)">P99 {{ formatMs(statsSummary.ttfbPercentiles.p99) }}</span>
+                </template>
+              </div>
             </div>
 
-            <div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-              <div class="mb-5 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                <div class="flex items-center gap-2">
-                  <span class="flex h-9 w-9 items-center justify-center rounded-xl bg-gray-900 text-white">
-                    <BarChart3 class="h-4 w-4" />
-                  </span>
+            <!-- ════════ 活动趋势 ════════ -->
+            <div class="flex items-center gap-3">
+              <span class="text-[10px] font-semibold uppercase tracking-widest" style="color:var(--color-text-tertiary)">活动趋势</span>
+              <div class="flex-1 border-t" style="border-color:var(--color-border-default)" />
+            </div>
+
+            <div class="glow-card flex flex-col overflow-hidden" style="padding:0">
+              <div class="h-[2px]" style="background:linear-gradient(90deg, #f9731680, transparent 60%)" />
+              <div class="flex items-start justify-between px-5 py-4" style="border-bottom:1px solid var(--color-border-default)">
+                <div class="flex items-center gap-3">
+                  <div class="flex h-8 w-8 items-center justify-center rounded-btn" style="background-color:var(--color-surface-elevated);color:var(--color-text-secondary)">
+                    <Flame class="h-4 w-4" />
+                  </div>
                   <div>
-                    <h3 class="text-sm font-semibold text-gray-900">活跃热力图</h3>
-                    <p class="text-xs text-gray-500">按天请求量分布（近一年）</p>
+                    <h3 class="text-sm font-semibold" style="color:var(--color-text-primary)">活跃热力图</h3>
+                    <p class="text-xs" style="color:var(--color-text-tertiary)">按天请求量分布（近一年）</p>
                   </div>
                 </div>
-                <span class="inline-flex items-center rounded-full border border-gray-200 bg-gray-50 px-3 py-1 text-xs font-medium text-gray-600">
-                  活跃天数 {{ statsSummary ? statsSummary.activeDays : '—' }}
-                </span>
+                <div class="flex items-center gap-3">
+                  <span class="text-[11px] font-semibold rounded-btn px-2.5 py-1" style="background-color:rgba(59,130,246,0.08);color:#60a5fa;border:1px solid rgba(59,130,246,0.18)">
+                    活跃 {{ heatmapCells.activeDays }} 天
+                  </span>
+                  <span v-if="statsSummary?.activeDays" class="text-[11px] font-semibold rounded-btn px-2.5 py-1" style="background-color:var(--color-surface-elevated);color:var(--color-text-secondary);border:1px solid var(--color-border-default)">
+                    总计 {{ statsSummary.requestCount }} 请求
+                  </span>
+                </div>
               </div>
-              <VChart :option="heatmapOption" autoresize class="h-52" />
-              <div class="mt-4 flex flex-wrap items-center justify-center gap-2 text-[10px] font-semibold uppercase tracking-wide text-gray-400">
-                <span>少</span>
-                <span class="h-3 w-3 rounded-sm border border-gray-200 bg-gray-100" title="0 次"></span>
-                <span class="h-3 w-3 rounded-sm border border-gray-200" style="background:#9be9a8" title="1–4 次"></span>
-                <span class="h-3 w-3 rounded-sm border border-gray-200" style="background:#40c463" title="5–9 次"></span>
-                <span class="h-3 w-3 rounded-sm border border-gray-200" style="background:#30a14e" title="10–19 次"></span>
-                <span class="h-3 w-3 rounded-sm border border-gray-200" style="background:#216e39" title="≥ 20 次"></span>
-                <span>多</span>
+
+              <div class="flex-1 overflow-x-auto">
+                <div class="flex gap-1 p-4" style="min-width:fit-content">
+                  <div class="flex flex-col gap-1 pt-0">
+                    <span v-for="(d, di) in WEEKDAY_LABELS" :key="di" class="flex h-3 w-3 items-center text-[9px] font-medium" :style="{ color: di % 2 === 0 ? 'var(--color-text-tertiary)' : 'transparent' }">{{ d }}</span>
+                  </div>
+
+                  <div class="flex gap-1">
+                    <div v-for="(week, wi) in heatmapCells.weeks" :key="wi" class="flex flex-col gap-1">
+                      <div
+                        v-for="cell in week" :key="cell.date"
+                        :title="`${cell.date} · ${cell.count} 次请求`"
+                        class="h-3 w-3 cursor-default rounded-[2px] transition-opacity hover:opacity-80"
+                        :style="{
+                          backgroundColor: HEATMAP_COLORS[cell.lvl].bg,
+                          border: `1px solid ${HEATMAP_COLORS[cell.lvl].border}`,
+                          animationDelay: `${(wi * 7 + (week.indexOf(cell))) * 5}ms`
+                        }"
+                        style="animation: heatmapFadeIn 0.2s ease both"
+                      />
+                    </div>
+                  </div>
+                </div>
               </div>
+
+              <div class="flex items-center justify-end gap-1.5 px-4 pb-4">
+                <span class="text-[10px] font-medium" style="color:var(--color-text-tertiary)">少</span>
+                <div v-for="(c, i) in HEATMAP_COLORS" :key="i" class="h-2.5 w-2.5 rounded-[2px]" :style="{ backgroundColor: c.bg, border: `1px solid ${c.border}` }" />
+                <span class="text-[10px] font-medium" style="color:var(--color-text-tertiary)">多</span>
+              </div>
+            </div>
+
+            <!-- ════════ 图表分析 ════════ -->
+            <div class="flex items-center gap-3">
+              <span class="text-[10px] font-semibold uppercase tracking-widest" style="color:var(--color-text-tertiary)">图表分析</span>
+              <div class="flex-1 border-t" style="border-color:var(--color-border-default)" />
             </div>
 
             <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
-              <div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-                <div class="mb-4 flex items-center gap-2">
-                  <TrendingUp class="h-4 w-4 text-gray-400" />
-                  <h3 class="text-sm font-semibold text-gray-900">请求与错误趋势</h3>
+              <div class="glow-card flex flex-col overflow-hidden" style="padding:0">
+                <div class="h-[2px]" style="background:linear-gradient(90deg, #3b82f680, transparent 60%)" />
+                <div class="flex items-center gap-2 px-5 py-4" style="border-bottom:1px solid var(--color-border-default)">
+                  <TrendingUp class="h-4 w-4" style="color:var(--color-text-tertiary)" />
+                  <h3 class="text-sm font-semibold" style="color:var(--color-text-primary)">请求与错误趋势</h3>
                 </div>
-                <VChart :option="requestsOption" autoresize class="h-64" />
+                <div class="p-4"><VChart :option="requestsOption" autoresize class="h-60" /></div>
               </div>
-              <div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-                <div class="mb-4 flex items-center gap-2">
-                  <AlertTriangle class="h-4 w-4 text-rose-400" />
-                  <h3 class="text-sm font-semibold text-gray-900">错误率趋势</h3>
+              <div class="glow-card flex flex-col overflow-hidden" style="padding:0">
+                <div class="h-[2px]" style="background:linear-gradient(90deg, #f43f5e80, transparent 60%)" />
+                <div class="flex items-center gap-2 px-5 py-4" style="border-bottom:1px solid var(--color-border-default)">
+                  <AlertTriangle class="h-4 w-4" style="color:var(--color-text-tertiary)" />
+                  <h3 class="text-sm font-semibold" style="color:var(--color-text-primary)">错误率趋势</h3>
                 </div>
-                <VChart :option="errorRateOption" autoresize class="h-64" />
+                <div class="p-4"><VChart :option="errorRateOption" autoresize class="h-60" /></div>
               </div>
-              <div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-                <div class="mb-4 flex items-center gap-2">
-                  <Zap class="h-4 w-4 text-gray-400" />
-                  <h3 class="text-sm font-semibold text-gray-900">Tokens 趋势</h3>
+              <div class="glow-card flex flex-col overflow-hidden" style="padding:0">
+                <div class="h-[2px]" style="background:linear-gradient(90deg, #14b8a680, transparent 60%)" />
+                <div class="flex items-center gap-2 px-5 py-4" style="border-bottom:1px solid var(--color-border-default)">
+                  <Zap class="h-4 w-4" style="color:var(--color-text-tertiary)" />
+                  <h3 class="text-sm font-semibold" style="color:var(--color-text-primary)">Tokens 趋势</h3>
                 </div>
-                <VChart :option="tokensOption" autoresize class="h-64" />
+                <div class="p-4"><VChart :option="tokensOption" autoresize class="h-60" /></div>
               </div>
-              <div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-                <div class="mb-4 flex items-center gap-2">
-                  <Timer class="h-4 w-4 text-gray-400" />
-                  <h3 class="text-sm font-semibold text-gray-900">延迟与 TTFB</h3>
+              <div class="glow-card flex flex-col overflow-hidden" style="padding:0">
+                <div class="h-[2px]" style="background:linear-gradient(90deg, #05966980, transparent 60%)" />
+                <div class="flex items-center gap-2 px-5 py-4" style="border-bottom:1px solid var(--color-border-default)">
+                  <Timer class="h-4 w-4" style="color:var(--color-text-tertiary)" />
+                  <h3 class="text-sm font-semibold" style="color:var(--color-text-primary)">延迟与 TTFB</h3>
                 </div>
-                <VChart :option="latencyTtfbOption" autoresize class="h-64" />
+                <div class="p-4"><VChart :option="latencyTtfbOption" autoresize class="h-60" /></div>
               </div>
-              <div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-                <div class="mb-4 flex items-center gap-2">
-                  <Cpu class="h-4 w-4 text-gray-400" />
-                  <h3 class="text-sm font-semibold text-gray-900">模型占比（按 Tokens）</h3>
+              <div class="glow-card flex flex-col overflow-hidden" style="padding:0">
+                <div class="h-[2px]" style="background:linear-gradient(90deg, #8b5cf680, transparent 60%)" />
+                <div class="flex items-center gap-2 px-5 py-4" style="border-bottom:1px solid var(--color-border-default)">
+                  <Cpu class="h-4 w-4" style="color:var(--color-text-tertiary)" />
+                  <h3 class="text-sm font-semibold" style="color:var(--color-text-primary)">模型占比（按 Tokens）</h3>
                 </div>
-                <VChart :option="modelPieOption" autoresize class="h-64" />
+                <div class="p-4"><VChart :option="modelPieOption" autoresize class="h-60" /></div>
               </div>
-              <div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-                <div class="mb-4 flex items-center gap-2">
-                  <ArrowRightLeft class="h-4 w-4 text-gray-400" />
-                  <h3 class="text-sm font-semibold text-gray-900">协议分布（按 Tokens）</h3>
+              <div class="glow-card flex flex-col overflow-hidden" style="padding:0">
+                <div class="h-[2px]" style="background:linear-gradient(90deg, #8b5cf680, transparent 60%)" />
+                <div class="flex items-center gap-2 px-5 py-4" style="border-bottom:1px solid var(--color-border-default)">
+                  <ArrowRightLeft class="h-4 w-4" style="color:var(--color-text-tertiary)" />
+                  <h3 class="text-sm font-semibold" style="color:var(--color-text-primary)">协议分布（按 Tokens）</h3>
                 </div>
-                <VChart :option="protocolPieOption" autoresize class="h-64" />
+                <div class="p-4"><VChart :option="protocolPieOption" autoresize class="h-60" /></div>
               </div>
             </div>
 
             <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-                <div class="mb-4 flex items-center gap-2">
-                  <AlertTriangle class="h-4 w-4 text-rose-400" />
-                  <h3 class="text-sm font-semibold text-gray-900">错误分类</h3>
+              <div class="glow-card flex flex-col overflow-hidden" style="padding:0">
+                <div class="h-[2px]" style="background:linear-gradient(90deg, #f43f5e80, transparent 60%)" />
+                <div class="flex items-center gap-2 px-5 py-4" style="border-bottom:1px solid var(--color-border-default)">
+                  <AlertTriangle class="h-4 w-4" style="color:var(--color-text-tertiary)" />
+                  <h3 class="text-sm font-semibold" style="color:var(--color-text-primary)">错误分类</h3>
                 </div>
-                <VChart :option="errorCategoryPieOption" autoresize class="h-64" />
+                <div class="p-4"><VChart :option="errorCategoryPieOption" autoresize class="h-60" /></div>
               </div>
-              <div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-                <div class="mb-4 flex items-center gap-2">
-                  <Radio class="h-4 w-4 text-gray-400" />
-                  <h3 class="text-sm font-semibold text-gray-900">流式类型分布（按 Tokens）</h3>
+              <div class="glow-card flex flex-col overflow-hidden" style="padding:0">
+                <div class="h-[2px]" style="background:linear-gradient(90deg, #06b6d480, transparent 60%)" />
+                <div class="flex items-center gap-2 px-5 py-4" style="border-bottom:1px solid var(--color-border-default)">
+                  <Radio class="h-4 w-4" style="color:var(--color-text-tertiary)" />
+                  <h3 class="text-sm font-semibold" style="color:var(--color-text-primary)">流式类型分布（按 Tokens）</h3>
                 </div>
-                <VChart :option="streamPieOption" autoresize class="h-64" />
+                <div class="p-4"><VChart :option="streamPieOption" autoresize class="h-60" /></div>
               </div>
             </div>
 
+            <!-- ════════ 明细 ════════ -->
+            <div class="flex items-center gap-3">
+              <span class="text-[10px] font-semibold uppercase tracking-widest" style="color:var(--color-text-tertiary)">明细</span>
+              <div class="flex-1 border-t" style="border-color:var(--color-border-default)" />
+            </div>
+
             <div class="grid grid-cols-1 gap-4 xl:grid-cols-2">
-              <div class="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
-                <div class="flex items-center justify-between border-b border-gray-100 bg-gray-50/80 px-5 py-4">
-                  <h3 class="text-sm font-semibold text-gray-900">慢请求 Top 10</h3>
-                  <span class="text-xs text-gray-500">按耗时降序</span>
+              <div class="glow-card flex flex-col overflow-hidden" style="padding:0">
+                <div class="h-[2px]" style="background:linear-gradient(90deg, #3b82f680, transparent 60%)" />
+                <div class="flex items-center justify-between px-5 py-4" style="border-bottom:1px solid var(--color-border-default)">
+                  <h3 class="text-sm font-semibold" style="color:var(--color-text-primary)">慢请求 Top 10</h3>
+                  <span class="text-xs" style="color:var(--color-text-tertiary)">按耗时降序</span>
                 </div>
                 <div class="overflow-x-auto">
                   <table class="w-full min-w-[640px] text-left text-sm">
                     <thead>
-                      <tr class="border-b border-gray-100 bg-white text-xs font-semibold uppercase tracking-wide text-gray-500">
+                      <tr class="text-xs font-semibold uppercase tracking-wide" style="color:var(--color-text-tertiary);border-bottom:1px solid var(--color-border-default)">
                         <th class="px-5 py-3">应用</th>
                         <th class="px-5 py-3">厂商</th>
                         <th class="px-5 py-3">模型</th>
                         <th class="px-5 py-3 text-right">耗时</th>
                       </tr>
                     </thead>
-                    <tbody class="divide-y divide-gray-100">
-                      <tr v-for="row in (statsData?.top?.slow || [])" :key="row.id" class="transition hover:bg-gray-50/80">
-                        <td class="px-5 py-3 font-medium text-gray-800">{{ row.appName }}</td>
-                        <td class="px-5 py-3 text-gray-600">{{ row.providerName }}</td>
-                        <td class="px-5 py-3 font-mono text-xs text-gray-600 max-w-[160px] truncate">
+                    <tbody>
+                      <tr v-for="row in (statsData?.top?.slow || [])" :key="row.id" class="transition hover:bg-surface-elevated" style="border-bottom:1px solid var(--color-border-default)">
+                        <td class="px-5 py-3 font-medium" style="color:var(--color-text-primary)">{{ row.appName }}</td>
+                        <td class="px-5 py-3" style="color:var(--color-text-secondary)">{{ row.providerName }}</td>
+                        <td class="px-5 py-3 font-mono text-xs max-w-[160px] truncate" style="color:var(--color-text-secondary)">
                           <span v-if="!row.actualModel || row.requestedModel === row.actualModel">{{ row.requestedModel }}</span>
                           <span v-else>{{ row.requestedModel }} → {{ row.actualModel }}</span>
                         </td>
-                        <td class="px-5 py-3 text-right font-mono text-xs font-bold text-rose-600">{{ formatMs(row.latencyMs) }}</td>
+                        <td class="px-5 py-3 text-right font-mono text-xs font-bold" style="color:#f43f5e">{{ formatMs(row.latencyMs) }}</td>
                       </tr>
                       <tr v-if="!(statsData?.top?.slow || []).length">
-                        <td colspan="4" class="px-5 py-10 text-center text-sm text-gray-400">暂无数据</td>
+                        <td colspan="4" class="px-5 py-10 text-center text-sm" style="color:var(--color-text-tertiary)">暂无数据</td>
                       </tr>
                     </tbody>
                   </table>
                 </div>
               </div>
-              <div class="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
-                <div class="flex items-center justify-between border-b border-gray-100 bg-gray-50/80 px-5 py-4">
-                  <h3 class="text-sm font-semibold text-gray-900">错误 Top 10</h3>
-                  <span class="text-xs text-gray-500">最近错误记录</span>
+              <div class="glow-card flex flex-col overflow-hidden" style="padding:0">
+                <div class="h-[2px]" style="background:linear-gradient(90deg, #f43f5e80, transparent 60%)" />
+                <div class="flex items-center justify-between px-5 py-4" style="border-bottom:1px solid var(--color-border-default)">
+                  <h3 class="text-sm font-semibold" style="color:var(--color-text-primary)">错误 Top 10</h3>
+                  <span class="text-xs" style="color:var(--color-text-tertiary)">最近错误记录</span>
                 </div>
                 <div class="overflow-x-auto">
                   <table class="w-full min-w-[700px] text-left text-sm">
                     <thead>
-                      <tr class="border-b border-gray-100 bg-white text-xs font-semibold uppercase tracking-wide text-gray-500">
+                      <tr class="text-xs font-semibold uppercase tracking-wide" style="color:var(--color-text-tertiary);border-bottom:1px solid var(--color-border-default)">
                         <th class="px-5 py-3">时间</th>
                         <th class="px-5 py-3">应用</th>
                         <th class="px-5 py-3">厂商</th>
                         <th class="px-5 py-3">错误</th>
                       </tr>
                     </thead>
-                    <tbody class="divide-y divide-gray-100">
-                      <tr v-for="row in (statsData?.top?.errors || [])" :key="row.id" class="transition hover:bg-gray-50/80">
-                        <td class="px-5 py-3 font-mono text-xs text-gray-500">{{ formatTime(row.requestAt) }}</td>
-                        <td class="px-5 py-3 font-medium text-gray-800">{{ row.appName }}</td>
-                        <td class="px-5 py-3 text-gray-600">{{ row.providerName }}</td>
-                        <td class="px-5 py-3 font-mono text-[11px] leading-relaxed text-rose-600 max-w-[200px] truncate" :title="row.errorMessage || ''">{{ row.errorMessage || '-' }}</td>
+                    <tbody>
+                      <tr v-for="row in (statsData?.top?.errors || [])" :key="row.id" class="transition hover:bg-surface-elevated" style="border-bottom:1px solid var(--color-border-default)">
+                        <td class="px-5 py-3 font-mono text-xs" style="color:var(--color-text-secondary)">{{ formatTime(row.requestAt) }}</td>
+                        <td class="px-5 py-3 font-medium" style="color:var(--color-text-primary)">{{ row.appName }}</td>
+                        <td class="px-5 py-3" style="color:var(--color-text-secondary)">{{ row.providerName }}</td>
+                        <td class="px-5 py-3 font-mono text-[11px] leading-relaxed max-w-[200px] truncate" style="color:#f43f5e" :title="row.errorMessage || ''">{{ row.errorMessage || '-' }}</td>
                       </tr>
                       <tr v-if="!(statsData?.top?.errors || []).length">
-                        <td colspan="4" class="px-5 py-10 text-center text-sm text-gray-400">暂无数据</td>
+                        <td colspan="4" class="px-5 py-10 text-center text-sm" style="color:var(--color-text-tertiary)">暂无数据</td>
                       </tr>
                     </tbody>
                   </table>
@@ -3552,30 +3849,30 @@ onUnmounted(() => {
         </div>
 
         <div v-if="activeTab === 'config'" class="space-y-6">
-          <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 px-1 text-xs text-gray-500">
+          <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 px-1 text-xs text-secondary">
             <span>
               当前软件版本
-              <code class="ml-1 font-mono text-sm font-bold text-gray-800 bg-gray-100 px-2 py-0.5 rounded border border-gray-200">v{{ serverVersion || '…' }}</code>
+              <code class="ml-1 font-mono text-sm font-bold text-primary bg-surface-elevated px-2 py-0.5 rounded border border-primary">v{{ serverVersion || '…' }}</code>
             </span>
-            <span class="text-gray-400 sm:text-right">与根目录 <code class="font-mono text-[10px]">package.json</code> 及 <code class="font-mono text-[10px]">GET /healthz</code> 一致</span>
+            <span class="text-tertiary sm:text-right">与根目录 <code class="font-mono text-[10px]">package.json</code> 及 <code class="font-mono text-[10px]">GET /healthz</code> 一致</span>
           </div>
-          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+          <div class="glow-card p-6">
             <div class="flex flex-col lg:flex-row gap-4 lg:items-center lg:justify-between">
               <div>
-                <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">全局配置导入/导出</h3>
-                <p class="text-xs text-gray-400 mt-1">可导入导出厂商、模型、应用、模型规则等业务配置，不包含管理员用户名和密码。</p>
+                <h3 class="text-sm font-medium text-secondary uppercase tracking-wider">全局配置导入/导出</h3>
+                <p class="text-xs text-tertiary mt-1">可导入导出厂商、模型、应用、模型规则等业务配置，不包含管理员用户名和密码。</p>
               </div>
               <div class="flex flex-wrap gap-2">
                 <button
                   @click="exportGlobalConfig"
-                  class="flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-sm border border-gray-200"
+                  class="flex items-center gap-2 px-4 py-2 bg-surface-elevated text-secondary rounded-btn hover:bg-surface-elevated transition-colors text-sm border border-primary"
                 >
                   <Download class="w-4 h-4" />
                   导出全局配置
                 </button>
                 <button
                   @click="openGlobalImportDialog"
-                  class="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
+                  class="flex items-center gap-2 px-4 py-2 bg-accent text-white rounded-btn hover:bg-accent-hover transition-colors text-sm"
                 >
                   <Upload class="w-4 h-4" />
                   导入全局配置
@@ -3585,11 +3882,11 @@ onUnmounted(() => {
           </div>
 
           <!-- 对话日志保留 -->
-          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+          <div class="glow-card p-6">
             <div class="flex items-center justify-between gap-4">
               <div class="flex-1">
-                <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">对话日志保留</h3>
-                <p class="text-xs text-gray-400 mt-1">按天自动删除过期数据；0 表示不自动删除。保存后立即按新规则清理一次，之后约每 6 小时再执行。</p>
+                <h3 class="text-sm font-medium text-secondary uppercase tracking-wider">对话日志保留</h3>
+                <p class="text-xs text-tertiary mt-1">按天自动删除过期数据；0 表示不自动删除。保存后立即按新规则清理一次，之后约每 6 小时再执行。</p>
               </div>
               <div class="flex items-center gap-3">
                 <input
@@ -3597,19 +3894,19 @@ onUnmounted(() => {
                   type="number"
                   min="0"
                   step="1"
-                  class="w-24 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                  class="w-24 px-3 py-2 border border-primary rounded-btn text-sm focus:ring-accent focus:ring-2 focus:border-transparent outline-none bg-surface-input"
                 />
-                <span class="text-sm text-gray-500">天</span>
+                <span class="text-sm text-secondary">天</span>
               </div>
             </div>
           </div>
 
           <!-- 统计数据保留 -->
-          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+          <div class="glow-card p-6">
             <div class="flex items-center justify-between gap-4">
               <div class="flex-1">
-                <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">统计数据保留</h3>
-                <p class="text-xs text-gray-400 mt-1">按天自动删除过期统计数据；0 表示不自动删除。</p>
+                <h3 class="text-sm font-medium text-secondary uppercase tracking-wider">统计数据保留</h3>
+                <p class="text-xs text-tertiary mt-1">按天自动删除过期统计数据；0 表示不自动删除。</p>
               </div>
               <div class="flex items-center gap-3">
                 <input
@@ -3617,19 +3914,19 @@ onUnmounted(() => {
                   type="number"
                   min="0"
                   step="1"
-                  class="w-24 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                  class="w-24 px-3 py-2 border border-primary rounded-btn text-sm focus:ring-accent focus:ring-2 focus:border-transparent outline-none bg-surface-input"
                 />
-                <span class="text-sm text-gray-500">天</span>
+                <span class="text-sm text-secondary">天</span>
               </div>
             </div>
           </div>
 
           <!-- 上游超时 -->
-          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+          <div class="glow-card p-6">
             <div class="flex items-center justify-between gap-4">
               <div class="flex-1">
-                <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">上游 HTTP 超时</h3>
-                <p class="text-xs text-gray-400 mt-1">代理请求大模型 API 的单次 HTTP 超时时间。默认 360，范围 5～86400 秒。</p>
+                <h3 class="text-sm font-medium text-secondary uppercase tracking-wider">上游 HTTP 超时</h3>
+                <p class="text-xs text-tertiary mt-1">代理请求大模型 API 的单次 HTTP 超时时间。默认 360，范围 5～86400 秒。</p>
               </div>
               <div class="flex items-center gap-3">
                 <input
@@ -3638,37 +3935,37 @@ onUnmounted(() => {
                   min="5"
                   max="86400"
                   step="1"
-                  class="w-24 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                  class="w-24 px-3 py-2 border border-primary rounded-btn text-sm focus:ring-accent focus:ring-2 focus:border-transparent outline-none bg-surface-input"
                 />
-                <span class="text-sm text-gray-500">秒</span>
+                <span class="text-sm text-secondary">秒</span>
               </div>
             </div>
           </div>
 
           <!-- 请求头转发黑名单 -->
-          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+          <div class="glow-card p-6">
             <div class="flex items-center justify-between gap-4">
               <div class="flex-1">
-                <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">请求头转发黑名单</h3>
-                <p class="text-xs text-gray-400 mt-1">这些请求头不会转发到上游。默认: host, content-length, connection, accept-encoding。</p>
+                <h3 class="text-sm font-medium text-secondary uppercase tracking-wider">请求头转发黑名单</h3>
+                <p class="text-xs text-tertiary mt-1">这些请求头不会转发到上游。默认: host, content-length, connection, accept-encoding。</p>
               </div>
               <div class="flex-1 max-w-md">
                 <input
                   :value="appSettings.upstreamHeadersBlocklist.join(', ')"
                   @input="appSettings.upstreamHeadersBlocklist = $event.target.value.split(',').map(s => s.trim()).filter(s => s)"
                   type="text"
-                  class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                  class="w-full px-3 py-2 border border-primary rounded-btn text-sm focus:ring-accent focus:ring-2 focus:border-transparent outline-none bg-surface-input"
                 />
               </div>
             </div>
           </div>
 
           <!-- 通知推送日志保留 -->
-          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+          <div class="glow-card p-6">
             <div class="flex items-center justify-between gap-4">
               <div class="flex-1">
-                <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">通知推送日志保留</h3>
-                <p class="text-xs text-gray-400 mt-1">按天自动删除过期的通知推送日志；0 表示不自动删除。默认 7 天，范围 0～365 天。</p>
+                <h3 class="text-sm font-medium text-secondary uppercase tracking-wider">通知推送日志保留</h3>
+                <p class="text-xs text-tertiary mt-1">按天自动删除过期的通知推送日志；0 表示不自动删除。默认 7 天，范围 0～365 天。</p>
               </div>
               <div class="flex items-center gap-3">
                 <input
@@ -3677,24 +3974,24 @@ onUnmounted(() => {
                   min="0"
                   max="365"
                   step="1"
-                  class="w-24 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                  class="w-24 px-3 py-2 border border-primary rounded-btn text-sm focus:ring-accent focus:ring-2 focus:border-transparent outline-none bg-surface-input"
                 />
-                <span class="text-sm text-gray-500">天</span>
+                <span class="text-sm text-secondary">天</span>
               </div>
             </div>
           </div>
 
           <!-- 管理员时区 -->
-          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+          <div class="glow-card p-6">
             <div class="flex items-center justify-between gap-4">
               <div class="flex-1">
-                <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">管理员时区</h3>
-                <p class="text-xs text-gray-400 mt-1">所有时间显示将使用此时区（如日志时间、推送详情、更新时间等）。</p>
+                <h3 class="text-sm font-medium text-secondary uppercase tracking-wider">管理员时区</h3>
+                <p class="text-xs text-tertiary mt-1">所有时间显示将使用此时区（如日志时间、推送详情、更新时间等）。</p>
               </div>
               <div class="flex items-center gap-3">
                 <select
                   v-model="appSettings.timezone"
-                  class="px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none bg-white"
+                  class="px-3 py-2 border border-primary rounded-btn text-sm focus:ring-accent focus:ring-2 focus:border-transparent outline-none bg-surface-input"
                 >
                   <option value="Asia/Shanghai">UTC+8 上海</option>
                   <option value="Asia/Tokyo">UTC+9 东京</option>
@@ -3716,13 +4013,13 @@ onUnmounted(() => {
           </div>
 
           <!-- 保存按钮 -->
-          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+          <div class="glow-card p-6">
             <div class="flex justify-end">
               <button
                 type="button"
                 :disabled="appSettingsSaving"
                 @click="saveAppSettings"
-                class="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm font-bold disabled:opacity-50"
+                class="px-6 py-2 bg-accent text-white rounded-btn hover:bg-accent-hover transition-colors text-sm font-bold disabled:opacity-50"
               >
                 {{ appSettingsSaving ? '保存中…' : '保存配置' }}
               </button>
@@ -3735,37 +4032,37 @@ onUnmounted(() => {
         <!-- Notifications View -->
         <div v-if="activeTab === 'notifications'" class="space-y-6">
           <!-- 全局静默通知 -->
-          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+          <div class="glow-card p-6">
             <div class="flex items-center justify-between gap-3">
               <div class="min-w-0">
                 <div class="flex items-center flex-wrap gap-2">
-                  <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">全局静默通知</h3>
+                  <h3 class="text-sm font-medium text-secondary uppercase tracking-wider">全局静默通知</h3>
                   <span v-if="appSettings.notificationMuteEnabled"
-                        :class="nowInMute ? 'bg-green-100 text-green-700 border-green-200' : 'bg-gray-100 text-gray-500 border-gray-200'"
+                        :class="nowInMute ? 'bg-green-100 text-green-700 border-green-200' : 'bg-surface-elevated text-secondary border-primary'"
                         class="px-2 py-0.5 rounded-full text-[10px] font-medium border whitespace-nowrap">
                     {{ nowInMute ? '● 静默中' : '○ 非静默时段' }}
                   </span>
                 </div>
-                <p class="text-xs text-gray-400 mt-1">开启后，指定时段内所有通知暂停发送</p>
+                <p class="text-xs text-tertiary mt-1">开启后，指定时段内所有通知暂停发送</p>
               </div>
               <label class="relative inline-flex items-center cursor-pointer flex-shrink-0 ml-auto">
                 <input type="checkbox" v-model="appSettings.notificationMuteEnabled" class="sr-only peer" />
-                <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                <div class="w-11 h-6 bg-surface-elevated peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-primary after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-accent"></div>
               </label>
             </div>
 
             <!-- 显示模式 -->
-            <div v-if="appSettings.notificationMuteEnabled && !muteEditing" class="pt-4 border-t border-gray-100">
+            <div v-if="appSettings.notificationMuteEnabled && !muteEditing" class="pt-4 border-t border-primary">
               <div class="flex items-center justify-between">
                 <div class="flex items-center gap-2 flex-wrap">
-                  <span class="text-xs text-gray-500 font-medium">静默时段</span>
-                  <span class="font-mono font-bold text-gray-800 bg-gray-100 px-2.5 py-1 rounded-lg text-sm">{{ appSettings.notificationMuteStart }}</span>
-                  <span class="text-gray-300">→</span>
-                  <span class="font-mono font-bold text-gray-800 bg-gray-100 px-2.5 py-1 rounded-lg text-sm">{{ appSettings.notificationMuteEnd }}</span>
+                  <span class="text-xs text-secondary font-medium">静默时段</span>
+                  <span class="font-mono font-bold text-primary bg-surface-elevated px-2.5 py-1 rounded-btn text-sm">{{ appSettings.notificationMuteStart }}</span>
+                  <span class="text-tertiary">→</span>
+                  <span class="font-mono font-bold text-primary bg-surface-elevated px-2.5 py-1 rounded-btn text-sm">{{ appSettings.notificationMuteEnd }}</span>
                 </div>
                 <div class="flex items-center gap-2">
                   <span v-if="muteSavedToast" class="text-xs text-green-600 font-medium flex-shrink-0">✓ 已保存</span>
-                  <button @click="muteEditing = true" class="flex items-center gap-1 px-3 py-1.5 text-xs text-blue-600 font-medium hover:bg-blue-50 rounded-lg transition-colors">
+                  <button @click="muteEditing = true" class="flex items-center gap-1 px-3 py-1.5 text-xs text-accent font-medium hover:bg-accent-soft rounded-btn transition-colors">
                     <Pencil class="w-3 h-3" /> 编辑
                   </button>
                 </div>
@@ -3773,113 +4070,113 @@ onUnmounted(() => {
             </div>
 
             <!-- 编辑模式 -->
-            <div v-if="appSettings.notificationMuteEnabled && muteEditing" class="space-y-4 pt-4 border-t border-gray-100">
+            <div v-if="appSettings.notificationMuteEnabled && muteEditing" class="space-y-4 pt-4 border-t border-primary">
               <div class="flex flex-col sm:flex-row items-start sm:items-center gap-3">
                 <div class="flex items-center gap-2">
-                  <label class="text-xs font-bold text-gray-500 uppercase whitespace-nowrap">开始时间</label>
-                  <input v-model="appSettings.notificationMuteStart" type="time" class="px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none w-32" />
+                  <label class="text-xs font-bold text-secondary uppercase whitespace-nowrap">开始时间</label>
+                  <input v-model="appSettings.notificationMuteStart" type="time" class="px-3 py-2 border border-primary rounded-btn text-sm focus:ring-accent focus:ring-2 focus:border-transparent outline-none bg-surface-input w-32" />
                 </div>
-                <span class="hidden sm:inline text-gray-300 text-xs">→</span>
+                <span class="hidden sm:inline text-tertiary text-xs">→</span>
                 <div class="flex items-center gap-2">
-                  <label class="text-xs font-bold text-gray-500 uppercase whitespace-nowrap">结束时间</label>
-                  <input v-model="appSettings.notificationMuteEnd" type="time" class="px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none w-32" />
+                  <label class="text-xs font-bold text-secondary uppercase whitespace-nowrap">结束时间</label>
+                  <input v-model="appSettings.notificationMuteEnd" type="time" class="px-3 py-2 border border-primary rounded-btn text-sm focus:ring-accent focus:ring-2 focus:border-transparent outline-none bg-surface-input w-32" />
                 </div>
               </div>
-              <p class="text-[10px] text-gray-400">支持跨天时段，如 22:00 → 08:00 将覆盖夜晚到次日早晨</p>
+              <p class="text-[10px] text-tertiary">支持跨天时段，如 22:00 → 08:00 将覆盖夜晚到次日早晨</p>
               <div class="flex justify-end gap-3">
-                <button @click="cancelMuteSettings" class="px-4 py-2 text-sm border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors">取消</button>
-                <button @click="saveMuteSettings" :disabled="appSettingsSaving" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-bold disabled:opacity-50">
+                <button @click="cancelMuteSettings" class="px-4 py-2 text-sm border border-primary rounded-btn hover:bg-surface-elevated transition-colors">取消</button>
+                <button @click="saveMuteSettings" :disabled="appSettingsSaving" class="px-4 py-2 text-sm bg-accent text-white rounded-btn hover:bg-accent-hover transition-colors font-bold disabled:opacity-50">
                   {{ appSettingsSaving ? '保存中…' : '保存设置' }}
                 </button>
               </div>
             </div>
           </div>
           <!-- 消息通知配置 -->
-          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+          <div class="glow-card p-6">
             <div class="flex items-center justify-between mb-4">
-              <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">消息通知配置</h3>
-              <button @click="openNotifEditor(null)" v-if="editingNotifConfig === undefined" class="flex items-center gap-1 px-3 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-xs font-bold flex-shrink-0">
+              <h3 class="text-sm font-medium text-secondary uppercase tracking-wider">消息通知配置</h3>
+              <button @click="openNotifEditor(null)" v-if="editingNotifConfig === undefined" class="flex items-center gap-1 px-3 py-1.5 bg-accent text-white rounded-btn hover:bg-accent-hover transition-colors text-xs font-bold flex-shrink-0">
                 <Plus class="w-3 h-3" /> 添加
               </button>
             </div>
-            <p class="text-xs text-gray-400 mb-4">为 App Key 配置通知规则，超时时间根据通知类型自动适配。</p>
+            <p class="text-xs text-tertiary mb-4">为 App Key 配置通知规则，超时时间根据通知类型自动适配。</p>
             <div v-if="notificationConfigs.length > 0" class="space-y-3 mb-4">
               <div v-for="cfg in notificationConfigs" :key="cfg.id"
-                   :class="['flex items-center justify-between gap-3 p-4 bg-white rounded-xl border shadow-sm transition-shadow', cfg.enabled ? 'border-gray-200 hover:shadow-md' : 'border-gray-100 opacity-60']">
+                   :class="['flex items-center justify-between gap-3 p-4 glow-card transition-shadow', cfg.enabled ? 'border-primary hover:shadow-md' : 'border-primary opacity-60']">
                 <div class="flex-1 min-w-0">
                   <div class="flex items-center gap-2">
-                    <span class="font-bold text-sm text-gray-800">{{ cfg.name || cfg.clientKeyNames || cfg.clientKeyName || ('App #' + cfg.clientKeyId) }}</span>
-                    <span :class="cfg.notificationType === 'error' ? 'bg-red-100 text-red-600 border-red-200' : cfg.notificationType === 'tool_use_confirmation' ? 'bg-amber-100 text-amber-700 border-amber-200' : 'bg-blue-100 text-blue-600 border-blue-200'" class="px-1.5 py-0.5 rounded text-[10px] font-medium border">{{ cfg.notificationType === 'error' ? '错误' : cfg.notificationType === 'tool_use_confirmation' ? '确认' : '完成' }}</span>
+                    <span class="font-bold text-sm text-primary">{{ cfg.name || cfg.clientKeyNames || cfg.clientKeyName || ('App #' + cfg.clientKeyId) }}</span>
+                    <span :class="cfg.notificationType === 'error' ? 'bg-red-100 text-red-600 border-red-200' : cfg.notificationType === 'tool_use_confirmation' ? 'bg-amber-100 text-amber-700 border-amber-200' : 'bg-blue-100 text-accent border-blue-200'" class="px-1.5 py-0.5 rounded text-[10px] font-medium border">{{ cfg.notificationType === 'error' ? '错误' : cfg.notificationType === 'tool_use_confirmation' ? '确认' : '完成' }}</span>
                     <label class="relative inline-flex items-center cursor-pointer" @click.stop>
                       <input type="checkbox" :checked="cfg.enabled" @change="toggleNotifEnabled(cfg)" class="sr-only peer" />
-                      <div class="w-9 h-5 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-3.5 after:w-3.5 after:transition-all peer-checked:bg-green-500"></div>
+                      <div class="w-9 h-5 bg-surface-elevated peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-primary after:border after:rounded-full after:h-3.5 after:w-3.5 after:transition-all peer-checked:bg-green-500"></div>
                     </label>
                   </div>
-                  <div class="text-xs text-gray-500 mt-0.5 truncate">{{ cfg.webhookUrl || '未配置 URL' }}</div>
-                  <div class="text-[10px] text-gray-400 mt-0.5">
+                  <div class="text-xs text-secondary mt-0.5 truncate">{{ cfg.webhookUrl || '未配置 URL' }}</div>
+                  <div class="text-[10px] text-tertiary mt-0.5">
                     方法: {{ cfg.httpMethod }} | 等待: {{ (cfg.notificationType === 'error' ? cfg.errorSuppressSeconds : cfg.notificationType === 'tool_use_confirmation' ? cfg.toolUseTimeoutSeconds : cfg.cooldownSeconds) || '?' }}秒
                     <span v-if="cfg.filterClientApps && cfg.filterClientApps.length"> | 客户端: {{ cfg.filterClientApps.join(', ') }}</span>
                   </div>
                 </div>
                 <div class="flex gap-1 shrink-0">
-                  <button @click="openNotifEditor(cfg)" class="p-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"><Pencil class="w-4 h-4" /></button>
-                  <button @click="deleteNotifConfig(cfg.id)" class="p-2 text-red-600 hover:bg-red-50 rounded-lg transition-colors"><Trash2 class="w-4 h-4" /></button>
+                  <button @click="openNotifEditor(cfg)" class="p-2 text-accent hover:bg-accent-soft rounded-btn transition-colors"><Pencil class="w-4 h-4" /></button>
+                  <button @click="deleteNotifConfig(cfg.id)" class="p-2 text-red-600 hover:bg-red-50 rounded-btn transition-colors"><Trash2 class="w-4 h-4" /></button>
                 </div>
               </div>
             </div>
-            <div v-else class="text-xs text-gray-400 mb-4">暂无通知配置，点击右上方按钮添加。</div>
+            <div v-else class="text-xs text-tertiary mb-4">暂无通知配置，点击右上方按钮添加。</div>
 
             <!-- 通知配置编辑 Modal -->
-            <div v-if="editingNotifConfig !== undefined" class="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50" @click.self="cancelNotifEditor">
-              <div class="bg-white rounded-xl w-full max-w-lg p-6 shadow-2xl max-h-[90vh] overflow-y-auto">
+            <div v-if="editingNotifConfig !== undefined" class="modal-overlay" @click.self="cancelNotifEditor">
+              <div class="glow-card w-full max-w-lg p-6 shadow-modal max-h-[90vh] overflow-y-auto">
                 <div class="flex items-center justify-between mb-4">
-                  <h4 class="text-lg font-bold text-gray-900">{{ editingNotifConfig ? '编辑通知配置' : '添加通知配置' }}</h4>
-                  <button @click="cancelNotifEditor" class="p-1.5 hover:bg-gray-100 rounded-full transition-colors">
-                    <X class="w-5 h-5 text-gray-400" />
+                  <h4 class="text-lg font-bold text-primary">{{ editingNotifConfig ? '编辑通知配置' : '添加通知配置' }}</h4>
+                  <button @click="cancelNotifEditor" class="p-1.5 hover:bg-surface-elevated rounded-full transition-colors">
+                    <X class="w-5 h-5 text-tertiary" />
                   </button>
                 </div>
                 <div class="space-y-4">
                   <div class="flex flex-col gap-1">
-                    <label class="block text-xs font-bold text-gray-400 uppercase mb-1">规则名称 *</label>
-                    <input v-model="notifConfigForm.name" type="text" placeholder="例如: ClaudeCode 通知" required class="w-full px-4 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+                    <label class="block text-xs font-bold text-tertiary uppercase mb-1">规则名称 *</label>
+                    <input v-model="notifConfigForm.name" type="text" placeholder="例如: ClaudeCode 通知" required class="w-full px-4 py-2 border border-primary rounded-btn text-sm focus:ring-accent focus:ring-2 focus:border-transparent outline-none bg-surface-input" />
                   </div>
                   <div class="flex items-center justify-between">
-                    <label class="block text-xs font-bold text-gray-400 uppercase mb-0">启用</label>
+                    <label class="block text-xs font-bold text-tertiary uppercase mb-0">启用</label>
                     <label class="relative inline-flex items-center cursor-pointer">
                       <input type="checkbox" v-model="notifConfigForm.enabled" class="sr-only peer" />
-                      <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                      <div class="w-11 h-6 bg-surface-elevated peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-primary after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-accent"></div>
                     </label>
                   </div>
                   <div class="flex flex-col gap-1">
-                    <label class="block text-xs font-bold text-gray-400 uppercase mb-1">通知类型</label>
+                    <label class="block text-xs font-bold text-tertiary uppercase mb-1">通知类型</label>
                     <div class="flex gap-3">
                       <label class="flex items-center gap-2 text-sm cursor-pointer">
-                        <input type="radio" v-model="notifConfigForm.notificationType" value="completion" class="text-blue-600" />
+                        <input type="radio" v-model="notifConfigForm.notificationType" value="completion" class="text-accent" />
                         <span>对话完成</span>
                       </label>
                       <label class="flex items-center gap-2 text-sm cursor-pointer">
-                        <input type="radio" v-model="notifConfigForm.notificationType" value="tool_use_confirmation" class="text-blue-600" />
+                        <input type="radio" v-model="notifConfigForm.notificationType" value="tool_use_confirmation" class="text-accent" />
                         <span>等待确认</span>
                       </label>
                       <label class="flex items-center gap-2 text-sm cursor-pointer">
-                        <input type="radio" v-model="notifConfigForm.notificationType" value="error" class="text-blue-600" />
+                        <input type="radio" v-model="notifConfigForm.notificationType" value="error" class="text-accent" />
                         <span>错误通知</span>
                       </label>
                     </div>
                   </div>
                   <div class="flex items-center gap-3">
                     <div class="flex flex-col gap-1">
-                      <label class="block text-xs font-bold text-gray-400 uppercase mb-1">
+                      <label class="block text-xs font-bold text-tertiary uppercase mb-1">
                         {{ notifConfigForm.notificationType === 'error' ? '错误抑制时间（秒）' : notifConfigForm.notificationType === 'tool_use_confirmation' ? '等待确认超时（秒）' : '对话结束等待（秒）' }}
                         <span class="text-red-500">*</span>
                       </label>
-                      <input v-if="notifConfigForm.notificationType === 'error'" v-model.number="notifConfigForm.errorSuppressSeconds" type="number" min="10" max="600" required class="w-24 px-4 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
-                      <input v-else-if="notifConfigForm.notificationType === 'tool_use_confirmation'" v-model.number="notifConfigForm.toolUseTimeoutSeconds" type="number" min="1" max="600" required class="w-24 px-4 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
-                      <input v-else v-model.number="notifConfigForm.cooldownSeconds" type="number" min="1" max="300" required class="w-24 px-4 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+                      <input v-if="notifConfigForm.notificationType === 'error'" v-model.number="notifConfigForm.errorSuppressSeconds" type="number" min="10" max="600" required class="w-24 px-4 py-2 border border-primary rounded-btn text-sm focus:ring-accent focus:ring-2 focus:border-transparent outline-none bg-surface-input" />
+                      <input v-else-if="notifConfigForm.notificationType === 'tool_use_confirmation'" v-model.number="notifConfigForm.toolUseTimeoutSeconds" type="number" min="1" max="600" required class="w-24 px-4 py-2 border border-primary rounded-btn text-sm focus:ring-accent focus:ring-2 focus:border-transparent outline-none bg-surface-input" />
+                      <input v-else v-model.number="notifConfigForm.cooldownSeconds" type="number" min="1" max="300" required class="w-24 px-4 py-2 border border-primary rounded-btn text-sm focus:ring-accent focus:ring-2 focus:border-transparent outline-none bg-surface-input" />
                     </div>
                   </div>
                   <div class="flex flex-col gap-1">
-                    <label class="block text-xs font-bold text-gray-400 uppercase mb-1">App Key（多选）</label>
+                    <label class="block text-xs font-bold text-tertiary uppercase mb-1">App Key（多选）</label>
                     <div class="flex flex-wrap gap-1.5">
                       <button
                         v-for="key in clientKeys" :key="key.id"
@@ -3888,41 +4185,41 @@ onUnmounted(() => {
                         :style="notifConfigForm.clientKeyIds.includes(key.id) ? { backgroundColor: `rgb(${getKeyColor(key.id)})`, color: '#fff', borderColor: `rgb(${getKeyColor(key.id)})` } : keyBadgeStyle(key.id)"
                         class="px-2 py-1 rounded text-[10px] font-semibold font-mono tracking-tight border transition-colors"
                       >{{ key.name }}</button>
-                      <span v-if="clientKeys.length === 0" class="text-xs text-gray-400">暂无 App Key</span>
+                      <span v-if="clientKeys.length === 0" class="text-xs text-tertiary">暂无 App Key</span>
                     </div>
                   </div>
                   <div class="flex flex-col gap-1">
-                    <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Webhook URL</label>
-                    <input v-model="notifConfigForm.webhookUrl" type="text" placeholder="https://example.com/webhook" class="w-full px-4 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+                    <label class="block text-xs font-bold text-tertiary uppercase mb-1">Webhook URL</label>
+                    <input v-model="notifConfigForm.webhookUrl" type="text" placeholder="https://example.com/webhook" class="w-full px-4 py-2 border border-primary rounded-btn text-sm focus:ring-accent focus:ring-2 focus:border-transparent outline-none bg-surface-input" />
                   </div>
                   <div class="flex flex-col gap-1">
-                    <label class="block text-xs font-bold text-gray-400 uppercase mb-1">HTTP 方法</label>
-                    <select v-model="notifConfigForm.httpMethod" class="w-full px-4 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none bg-white">
+                    <label class="block text-xs font-bold text-tertiary uppercase mb-1">HTTP 方法</label>
+                    <select v-model="notifConfigForm.httpMethod" class="w-full px-4 py-2 border border-primary rounded-btn text-sm focus:ring-accent focus:ring-2 focus:border-transparent outline-none bg-surface-input">
                       <option>POST</option>
                       <option>PUT</option>
                     </select>
                   </div>
                   <div class="flex flex-col gap-1">
-                    <label class="block text-xs font-bold text-gray-400 uppercase mb-1">自定义 Headers</label>
+                    <label class="block text-xs font-bold text-tertiary uppercase mb-1">自定义 Headers</label>
                     <div class="space-y-1.5">
                       <div v-for="(h, i) in notifConfigForm.headers" :key="i" class="flex gap-1.5 items-start">
-                        <input v-model="h.key" type="text" placeholder="Header 名" class="flex-1 px-3 py-2 border border-gray-200 rounded-lg text-xs focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none font-mono" />
-                        <input v-model="h.value" type="text" placeholder="Header 值" class="flex-1 px-3 py-2 border border-gray-200 rounded-lg text-xs focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none font-mono" />
-                        <button @click="removeNotifHeader(i)" class="shrink-0 p-1.5 text-red-600 hover:bg-red-50 rounded-lg transition-colors"><X class="w-3.5 h-3.5" /></button>
+                        <input v-model="h.key" type="text" placeholder="Header 名" class="flex-1 px-3 py-2 border border-primary rounded-btn text-xs focus:ring-accent focus:ring-2 focus:border-transparent outline-none font-mono bg-surface-input" />
+                        <input v-model="h.value" type="text" placeholder="Header 值" class="flex-1 px-3 py-2 border border-primary rounded-btn text-xs focus:ring-accent focus:ring-2 focus:border-transparent outline-none font-mono bg-surface-input" />
+                        <button @click="removeNotifHeader(i)" class="shrink-0 p-1.5 text-red-600 hover:bg-red-50 rounded-btn transition-colors"><X class="w-3.5 h-3.5" /></button>
                       </div>
                     </div>
-                    <button @click="addNotifHeader" class="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 mt-1 self-start">
+                    <button @click="addNotifHeader" class="flex items-center gap-1 text-xs text-accent hover:text-accent mt-1 self-start">
                       <Plus class="w-3 h-3" /> 添加 Header
                     </button>
                   </div>
                   <div class="flex flex-col gap-1">
-                    <label class="block text-xs font-bold text-gray-400 uppercase mb-1">通知体模板 (JSON, 支持 {{变量}})</label>
-                    <textarea v-model="notifConfigForm.bodyTemplate" rows="4" placeholder='留空使用默认模板，支持变量如 {{model}} {{totalTokens}} {{clientApp}} {{clientName}} {{status}}' class="w-full px-4 py-2 border border-gray-200 rounded-lg text-xs font-mono focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"></textarea>
+                    <label class="block text-xs font-bold text-tertiary uppercase mb-1">通知体模板 (JSON, 支持 {{变量}})</label>
+                    <textarea v-model="notifConfigForm.bodyTemplate" rows="4" placeholder='留空使用默认模板，支持变量如 {{model}} {{totalTokens}} {{clientApp}} {{clientName}} {{status}}' class="w-full px-4 py-2 border border-primary rounded-btn text-xs font-mono focus:ring-accent focus:ring-2 focus:border-transparent outline-none bg-surface-input"></textarea>
                   </div>
                 </div>
                 <div class="flex gap-3 mt-6">
-                  <button @click="cancelNotifEditor" class="flex-1 px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors text-sm">取消</button>
-                  <button @click="saveNotifConfig" :disabled="notifConfigSaving" class="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-bold text-sm disabled:opacity-50">
+                  <button @click="cancelNotifEditor" class="flex-1 px-4 py-2 border border-primary rounded-btn hover:bg-surface-elevated transition-colors text-sm">取消</button>
+                  <button @click="saveNotifConfig" :disabled="notifConfigSaving" class="flex-1 px-4 py-2 bg-accent text-white rounded-btn hover:bg-accent-hover transition-colors font-bold text-sm disabled:opacity-50">
                     {{ notifConfigSaving ? '保存中…' : '保存' }}
                   </button>
                 </div>
@@ -3931,24 +4228,24 @@ onUnmounted(() => {
           </div>
 
           <!-- 推送日志 -->
-          <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+          <div class="glow-card p-6">
             <div class="flex items-center justify-between mb-4">
-              <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">推送日志</h3>
+              <h3 class="text-sm font-medium text-secondary uppercase tracking-wider">推送日志</h3>
               <div class="flex gap-2">
-                <button @click="fetchNotifLogs(notifLogsPage)" class="flex items-center gap-1 px-3 py-1.5 bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 text-xs border border-gray-200">
+                <button @click="fetchNotifLogs(notifLogsPage)" class="flex items-center gap-1 px-3 py-1.5 bg-surface-elevated text-secondary rounded-btn hover:bg-surface-elevated text-xs border border-primary">
                   <Clock class="w-3 h-3" /> 刷新
                 </button>
-                <button @click="clearNotifLogs" class="flex items-center gap-2 px-3 py-1.5 bg-red-50 text-red-600 rounded-lg hover:bg-red-100 transition-colors text-xs font-bold border border-red-200">
+                <button @click="clearNotifLogs" class="flex items-center gap-2 px-3 py-1.5 bg-red-50 text-red-600 rounded-btn hover:bg-red-100 transition-colors text-xs font-bold border border-red-200">
                   <Trash2 class="w-3 h-3" /> 清空日志
                 </button>
               </div>
             </div>
             <div class="flex gap-2 mb-4">
-              <select v-model="notifLogsFilter.clientKeyId" @change="fetchNotifLogs(1)" class="px-3 py-1.5 border border-gray-200 rounded-lg text-xs focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none bg-white">
+              <select v-model="notifLogsFilter.clientKeyId" @change="fetchNotifLogs(1)" class="px-3 py-1.5 border border-primary rounded-btn text-xs focus:ring-accent focus:ring-2 focus:border-transparent outline-none bg-surface-input">
                 <option value="all">全部 App</option>
                 <option v-for="key in clientKeys" :key="key.id" :value="key.id">{{ key.name }}</option>
               </select>
-              <select v-model="notifLogsFilter.status" @change="fetchNotifLogs(1)" class="px-3 py-1.5 border border-gray-200 rounded-lg text-xs focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none bg-white">
+              <select v-model="notifLogsFilter.status" @change="fetchNotifLogs(1)" class="px-3 py-1.5 border border-primary rounded-btn text-xs focus:ring-accent focus:ring-2 focus:border-transparent outline-none bg-surface-input">
                 <option value="all">全部状态</option>
                 <option value="success">成功</option>
                 <option value="error">失败</option>
@@ -3956,7 +4253,7 @@ onUnmounted(() => {
             </div>
             <div v-if="notifLogs.length > 0" class="overflow-x-auto">
               <table class="w-full text-left text-xs">
-                <thead class="bg-gray-50 border-b border-gray-200 text-gray-500">
+                <thead class="bg-surface-elevated border-b border-primary text-secondary">
                   <tr>
                     <th class="px-3 py-2 font-medium">时间</th>
                     <th class="px-3 py-2 font-medium">App</th>
@@ -3968,15 +4265,15 @@ onUnmounted(() => {
                   </tr>
                 </thead>
                 <tbody class="divide-y divide-gray-100">
-                  <tr v-for="l in notifLogs" :key="l.id" @click="openNotifLogDetail(l)" class="hover:bg-gray-50 cursor-pointer transition-colors">
-                    <td class="px-3 py-2 font-mono text-[10px] text-gray-500 whitespace-nowrap">{{ formatTime(l.createdAt) }}</td>
+                  <tr v-for="l in notifLogs" :key="l.id" @click="openNotifLogDetail(l)" class="hover:bg-surface-elevated cursor-pointer transition-colors">
+                    <td class="px-3 py-2 font-mono text-[10px] text-secondary whitespace-nowrap">{{ formatTime(l.createdAt) }}</td>
                     <td class="px-3 py-2 font-medium">{{ l.clientKeyName || ('App #' + l.clientKeyId) }}</td>
-                    <td class="px-3 py-2 font-medium text-gray-700 text-[11px] max-w-[120px] truncate">{{ l.ruleName || '-' }}</td>
-                    <td class="px-3 py-2"><span :class="l.notificationType === 'error' ? 'bg-red-50 text-red-700' : l.notificationType === 'tool_use_confirmation' ? 'bg-amber-50 text-amber-700' : 'bg-blue-50 text-blue-700'" class="px-2 py-0.5 rounded text-[10px] font-bold">{{ l.notificationType === 'error' ? '错误通知' : l.notificationType === 'tool_use_confirmation' ? '等待确认' : '对话完成' }}</span></td>
+                    <td class="px-3 py-2 font-medium text-secondary text-[11px] max-w-[120px] truncate">{{ l.ruleName || '-' }}</td>
+                    <td class="px-3 py-2"><span :class="l.notificationType === 'error' ? 'bg-red-50 text-red-700' : l.notificationType === 'tool_use_confirmation' ? 'bg-amber-50 text-amber-700' : 'accent-soft text-accent'" class="px-2 py-0.5 rounded text-[10px] font-bold">{{ l.notificationType === 'error' ? '错误通知' : l.notificationType === 'tool_use_confirmation' ? '等待确认' : '对话完成' }}</span></td>
                     <td class="px-3 py-2">
                       <span :class="l.status === 'success' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'" class="px-2 py-0.5 rounded text-[10px] font-bold">{{ l.status === 'success' ? '成功' : '失败' }}</span>
                     </td>
-                    <td class="px-3 py-2 text-gray-500 truncate max-w-[300px]">{{ l.webhookUrl }}</td>
+                    <td class="px-3 py-2 text-secondary truncate max-w-[300px]">{{ l.webhookUrl }}</td>
                     <td class="px-3 py-2 text-right font-mono text-[10px] max-w-[200px] truncate"
                         :class="l.status === 'error' ? 'text-red-600' : (l.responseStatusCode && l.responseStatusCode < 400 ? 'text-green-600' : 'text-red-600')"
                         :title="l.status === 'error' ? l.errorMessage || '' : ''">
@@ -3985,66 +4282,66 @@ onUnmounted(() => {
                   </tr>
                 </tbody>
               </table>
-              <div class="flex items-center justify-between mt-4 pt-3 border-t border-gray-100">
+              <div class="flex items-center justify-between mt-4 pt-3 border-t border-primary">
                 <div class="flex items-center gap-3">
-                  <span class="text-xs text-gray-400">共 {{ notifLogsTotal }} 条</span>
-                  <select v-model.number="notifLogsPageSize" @change="fetchNotifLogs(1)" class="px-2 py-1 text-xs border border-gray-200 rounded-lg outline-none bg-white">
+                  <span class="text-xs text-tertiary">共 {{ notifLogsTotal }} 条</span>
+                  <select v-model.number="notifLogsPageSize" @change="fetchNotifLogs(1)" class="px-2 py-1 text-xs border border-primary rounded-btn outline-none bg-surface-input">
                     <option :value="20">20 条/页</option>
                     <option :value="50">50 条/页</option>
                     <option :value="100">100 条/页</option>
                   </select>
                 </div>
                 <div class="flex items-center gap-2">
-                  <span class="text-xs text-gray-500">第 {{ notifLogsPage }} / {{ notifLogsTotalPages }} 页</span>
+                  <span class="text-xs text-secondary">第 {{ notifLogsPage }} / {{ notifLogsTotalPages }} 页</span>
                   <div class="flex gap-1">
-                    <button :disabled="notifLogsPage <= 1" @click="fetchNotifLogs(notifLogsPage - 1)" class="px-3 py-1.5 text-xs border border-gray-200 rounded-lg hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors font-bold">上一页</button>
-                    <button :disabled="notifLogsPage >= notifLogsTotalPages" @click="fetchNotifLogs(notifLogsPage + 1)" class="px-3 py-1.5 text-xs border border-gray-200 rounded-lg hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors font-bold">下一页</button>
+                    <button :disabled="notifLogsPage <= 1" @click="fetchNotifLogs(notifLogsPage - 1)" class="px-3 py-1.5 text-xs border border-primary rounded-btn hover:bg-surface-elevated disabled:opacity-40 disabled:cursor-not-allowed transition-colors font-bold">上一页</button>
+                    <button :disabled="notifLogsPage >= notifLogsTotalPages" @click="fetchNotifLogs(notifLogsPage + 1)" class="px-3 py-1.5 text-xs border border-primary rounded-btn hover:bg-surface-elevated disabled:opacity-40 disabled:cursor-not-allowed transition-colors font-bold">下一页</button>
                   </div>
                 </div>
               </div>
             </div>
-            <div v-if="notifLogs.length === 0 && notifLogsTotal === 0 && notifLogsFilter.clientKeyId === 'all' && notifLogsFilter.status === 'all'" class="text-xs text-gray-400">暂无推送日志。</div>
-            <div v-else-if="notifLogs.length === 0" class="text-xs text-gray-400">没有符合条件的记录，请调整筛选条件。</div>
+            <div v-if="notifLogs.length === 0 && notifLogsTotal === 0 && notifLogsFilter.clientKeyId === 'all' && notifLogsFilter.status === 'all'" class="text-xs text-tertiary">暂无推送日志。</div>
+            <div v-else-if="notifLogs.length === 0" class="text-xs text-tertiary">没有符合条件的记录，请调整筛选条件。</div>
           </div>
 
           <!-- 推送日志详情 Modal -->
-          <div v-if="selectedNotifLog" class="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50" @click.self="closeNotifLogDetail">
-            <div class="bg-white rounded-xl w-full max-w-2xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
-              <div class="p-5 border-b border-gray-200 flex justify-between items-center">
+          <div v-if="selectedNotifLog" class="modal-overlay" @click.self="closeNotifLogDetail">
+            <div class="glow-card w-full max-w-2xl max-h-[90vh] flex flex-col shadow-modal overflow-hidden">
+              <div class="p-5 border-b border-primary flex justify-between items-center">
                 <div>
-                  <h3 class="text-lg font-bold text-gray-900">推送详情</h3>
-                  <p class="text-xs text-gray-500 mt-0.5">{{ selectedNotifLog.ruleName || '未命名规则' }}</p>
+                  <h3 class="text-lg font-bold text-primary">推送详情</h3>
+                  <p class="text-xs text-secondary mt-0.5">{{ selectedNotifLog.ruleName || '未命名规则' }}</p>
                 </div>
-                <button type="button" @click="closeNotifLogDetail" class="p-1.5 hover:bg-gray-100 rounded-full transition-colors">
-                  <X class="w-5 h-5 text-gray-400" />
+                <button type="button" @click="closeNotifLogDetail" class="p-1.5 hover:bg-surface-elevated rounded-full transition-colors">
+                  <X class="w-5 h-5 text-tertiary" />
                 </button>
               </div>
-              <div v-if="notifLogDetailLoading" class="flex flex-col items-center justify-center gap-3 py-16 text-gray-500">
-                <Loader2 class="w-8 h-8 animate-spin text-blue-500" />
+              <div v-if="notifLogDetailLoading" class="flex flex-col items-center justify-center gap-3 py-16 text-secondary">
+                <Loader2 class="w-8 h-8 animate-spin text-accent" />
                 <p class="text-sm">正在加载推送详情…</p>
               </div>
-              <div v-else-if="notifLogDetailError" class="m-5 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+              <div v-else-if="notifLogDetailError" class="m-5 rounded-btn border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
                 {{ notifLogDetailError }}
               </div>
               <div v-else class="flex-1 overflow-auto p-5 space-y-4">
                 <div class="grid grid-cols-2 gap-3 text-sm">
-                  <div><span class="text-gray-500">方法:</span> <span class="font-mono font-medium">{{ selectedNotifLog.httpMethod }}</span></div>
-                  <div><span class="text-gray-500">状态:</span> <span :class="selectedNotifLog.status === 'success' ? 'text-green-600 font-bold' : 'text-red-600 font-bold'">{{ selectedNotifLog.status === 'success' ? '成功' : '失败' }}</span></div>
-                  <div class="col-span-2"><span class="text-gray-500">URL:</span> <span class="font-mono text-xs break-all">{{ selectedNotifLog.webhookUrl }}</span></div>
-                  <div v-if="selectedNotifLog.responseStatusCode"><span class="text-gray-500">响应码:</span> <span class="font-mono">{{ selectedNotifLog.responseStatusCode }}</span></div>
-                  <div v-if="selectedNotifLog.errorMessage" class="col-span-2"><span class="text-gray-500">错误:</span> <span class="text-red-600">{{ selectedNotifLog.errorMessage }}</span></div>
+                  <div><span class="text-secondary">方法:</span> <span class="font-mono font-medium">{{ selectedNotifLog.httpMethod }}</span></div>
+                  <div><span class="text-secondary">状态:</span> <span :class="selectedNotifLog.status === 'success' ? 'text-green-600 font-bold' : 'text-red-600 font-bold'">{{ selectedNotifLog.status === 'success' ? '成功' : '失败' }}</span></div>
+                  <div class="col-span-2"><span class="text-secondary">URL:</span> <span class="font-mono text-xs break-all">{{ selectedNotifLog.webhookUrl }}</span></div>
+                  <div v-if="selectedNotifLog.responseStatusCode"><span class="text-secondary">响应码:</span> <span class="font-mono">{{ selectedNotifLog.responseStatusCode }}</span></div>
+                  <div v-if="selectedNotifLog.errorMessage" class="col-span-2"><span class="text-secondary">错误:</span> <span class="text-red-600">{{ selectedNotifLog.errorMessage }}</span></div>
                 </div>
                 <div v-if="selectedNotifLog.requestHeaders" class="space-y-1">
-                  <span class="text-xs text-gray-500 font-medium">请求 Headers</span>
-                  <pre class="bg-gray-900 text-gray-100 p-3 rounded-lg overflow-auto text-[10px] leading-relaxed max-h-[200px]">{{ formatJson(selectedNotifLog.requestHeaders) }}</pre>
+                  <span class="text-xs text-secondary font-medium">请求 Headers</span>
+                  <pre class="bg-gray-900 text-gray-100 p-3 rounded-btn overflow-auto text-[10px] leading-relaxed max-h-[200px]">{{ formatJson(selectedNotifLog.requestHeaders) }}</pre>
                 </div>
                 <div v-if="selectedNotifLog.requestBodyPreview" class="space-y-1">
-                  <span class="text-xs text-gray-500 font-medium">请求 Body</span>
-                  <pre class="bg-gray-900 text-gray-100 p-3 rounded-lg overflow-auto text-[10px] leading-relaxed max-h-[200px]">{{ formatJson(selectedNotifLog.requestBodyPreview) }}</pre>
+                  <span class="text-xs text-secondary font-medium">请求 Body</span>
+                  <pre class="bg-gray-900 text-gray-100 p-3 rounded-btn overflow-auto text-[10px] leading-relaxed max-h-[200px]">{{ formatJson(selectedNotifLog.requestBodyPreview) }}</pre>
                 </div>
                 <div v-if="selectedNotifLog.responseBodyPreview" class="space-y-1">
-                  <span class="text-xs text-gray-500 font-medium">响应 Body</span>
-                  <pre class="bg-gray-900 text-gray-100 p-3 rounded-lg overflow-auto text-[10px] leading-relaxed max-h-[200px]">{{ formatJson(selectedNotifLog.responseBodyPreview) }}</pre>
+                  <span class="text-xs text-secondary font-medium">响应 Body</span>
+                  <pre class="bg-gray-900 text-gray-100 p-3 rounded-btn overflow-auto text-[10px] leading-relaxed max-h-[200px]">{{ formatJson(selectedNotifLog.responseBodyPreview) }}</pre>
                 </div>
               </div>
             </div>
@@ -4055,12 +4352,12 @@ onUnmounted(() => {
         <div v-if="activeTab === 'logs'" class="space-y-4">
           <div class="flex flex-col lg:flex-row gap-3 lg:justify-between lg:items-center mb-4">
             <div class="flex flex-col gap-2">
-              <h3 class="text-sm font-medium text-gray-500 uppercase tracking-wider">对话历史记录</h3>
+              <h3 class="text-sm font-medium text-secondary uppercase tracking-wider">对话历史记录</h3>
               <div class="flex flex-wrap gap-2">
                 <button 
                   @click="selectedClientKey = 'all'; logsPage = 1; fetchLogs()"
                   :class="['px-3 py-1 rounded text-xs font-bold transition-all border', 
-                    selectedClientKey === 'all' ? 'bg-gray-900 text-white border-gray-900' : 'bg-white text-gray-600 border-gray-200 hover:border-gray-400']"
+                    selectedClientKey === 'all' ? 'bg-gray-900 text-white border-gray-900' : 'bg-surface-elevated text-secondary border-primary hover:border-accent/50']"
                 >
                   全部客户端
                 </button>
@@ -4069,7 +4366,7 @@ onUnmounted(() => {
                   :key="key.id"
                   @click="selectedClientKey = key.id; logsPage = 1; fetchLogs()"
                   :style="selectedClientKey === key.id ? { backgroundColor: `rgb(${getKeyColor(key.id)})`, color: '#fff', borderColor: `rgb(${getKeyColor(key.id)})` } : keyBadgeStyle(key.id)"
-                  class="px-3 py-1 rounded text-xs font-bold transition-all border shadow-sm"
+                  class="px-3 py-1 rounded text-xs font-bold transition-all border shadow-card"
                 >
                   {{ key.name }}
                 </button>
@@ -4077,56 +4374,56 @@ onUnmounted(() => {
             </div>
             <button 
               @click="clearLogs"
-              class="flex items-center gap-2 px-4 py-2 bg-red-50 text-red-600 rounded-lg hover:bg-red-100 transition-colors text-sm font-bold border border-red-200"
+              class="flex items-center gap-2 px-4 py-2 bg-red-50 text-red-600 rounded-btn hover:bg-red-100 transition-colors text-sm font-bold border border-red-200"
             >
               <Trash2 class="w-4 h-4" />
               清空对话日志
             </button>
           </div>
-          <div v-if="hasNewLogs" class="bg-blue-50 border border-blue-200 text-blue-700 rounded-lg px-4 py-3 flex items-center justify-between">
+          <div v-if="hasNewLogs" class="accent-soft border border-blue-200 text-accent rounded-btn px-4 py-3 flex items-center justify-between">
             <div class="text-sm font-medium">有新日志到达</div>
-            <button @click="goToLatestLogs" class="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs font-bold hover:bg-blue-700 transition-colors">
+            <button @click="goToLatestLogs" class="px-3 py-1.5 bg-accent text-white rounded-btn text-xs font-bold hover:bg-accent-hover transition-colors">
               加载最新
             </button>
           </div>
-          <div class="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
+          <div class="glow-card overflow-hidden">
             <div class="overflow-x-auto">
             <table class="w-full min-w-[1100px] text-left text-sm">
-              <thead class="bg-gray-50 border-b border-gray-200">
+              <thead class="bg-surface-elevated border-b border-primary">
                 <tr>
-                  <th class="px-6 py-4 font-semibold text-gray-600">时间</th>
-                  <th class="px-6 py-4 font-semibold text-gray-600">客户端 Key</th>
-                  <th class="px-6 py-4 font-semibold text-gray-600">厂商</th>
-                  <th class="px-6 py-4 font-semibold text-gray-600">模型</th>
-                  <th class="px-6 py-4 font-semibold text-gray-600">路径</th>
-                  <th class="px-6 py-4 font-semibold text-gray-600">耗时</th>
-                  <th class="px-6 py-4 font-semibold text-gray-600">状态</th>
-                  <th class="px-6 py-4 font-semibold text-gray-600 text-right">操作</th>
+                  <th class="px-6 py-4 font-semibold text-secondary">时间</th>
+                  <th class="px-6 py-4 font-semibold text-secondary">客户端 Key</th>
+                  <th class="px-6 py-4 font-semibold text-secondary">厂商</th>
+                  <th class="px-6 py-4 font-semibold text-secondary">模型</th>
+                  <th class="px-6 py-4 font-semibold text-secondary">路径</th>
+                  <th class="px-6 py-4 font-semibold text-secondary">耗时</th>
+                  <th class="px-6 py-4 font-semibold text-secondary">状态</th>
+                  <th class="px-6 py-4 font-semibold text-secondary text-right">操作</th>
                 </tr>
               </thead>
               <tbody class="divide-y divide-gray-200">
-                <tr v-for="log in logs" :key="log.id" class="hover:bg-gray-50 transition-colors">
-                  <td class="px-6 py-4 text-gray-500 font-mono text-xs">{{ formatTime(log.requestAt || log.createdAt) }}</td>
+                <tr v-for="log in logs" :key="log.id" class="hover:bg-surface-elevated transition-colors">
+                  <td class="px-6 py-4 text-secondary font-mono text-xs">{{ formatTime(log.requestAt || log.createdAt) }}</td>
                   <td class="px-6 py-4">
                     <span :style="keyBadgeStyle(log.clientKeyId)" class="px-2 py-1 rounded text-[10px] font-bold uppercase tracking-tight border">{{ log.clientKeyName || '未知' }}</span>
-                    <span v-if="log.clientApp" class="ml-1 text-[8px] text-gray-400 italic">{{ log.clientApp }}</span>
+                    <span v-if="log.clientApp" class="ml-1 text-[8px] text-tertiary italic">{{ log.clientApp }}</span>
                   </td>
                   <td class="px-6 py-4 font-medium">{{ log.providerName }}</td>
                   <td class="px-6 py-4 font-mono text-xs">
                     <template v-if="!log.actualModel || log.model === log.actualModel">
-                      <span :class="isMagicProxyModel(log.model) ? 'text-green-600 font-bold' : 'text-gray-600'">{{ log.model }}</span>
+                      <span :class="isMagicProxyModel(log.model) ? 'text-green-600 font-bold' : 'text-secondary'">{{ log.model }}</span>
                     </template>
                     <template v-else>
                       <span class="text-green-600 font-bold">{{ log.model }}</span>
-                      <span class="mx-2 text-gray-400">→</span>
-                      <span class="text-blue-600 font-medium">{{ log.actualModel }}</span>
+                      <span class="mx-2 text-tertiary">→</span>
+                      <span class="text-accent font-medium">{{ log.actualModel }}</span>
                     </template>
                   </td>
-                  <td class="px-6 py-4 text-gray-600 font-mono text-[10px] max-w-[200px]">
-                    <span class="text-gray-400">{{ log.httpMethod || 'POST' }}</span>
-                    <span class="block truncate text-gray-700" :title="log.requestPath || ''">{{ log.requestPath || '—' }}</span>
+                  <td class="px-6 py-4 text-secondary font-mono text-[10px] max-w-[200px]">
+                    <span class="text-tertiary">{{ log.httpMethod || 'POST' }}</span>
+                    <span class="block truncate text-secondary" :title="log.requestPath || ''">{{ log.requestPath || '—' }}</span>
                   </td>
-                  <td class="px-6 py-4 text-gray-700 font-mono text-xs">
+                  <td class="px-6 py-4 text-secondary font-mono text-xs">
                     {{ formatLogLatency(log) }}
                   </td>
                   <td class="px-6 py-4">
@@ -4150,7 +4447,7 @@ onUnmounted(() => {
                     >
                       {{ log.responseBody && log.responseBody.includes('Missing API Key') ? '缺少 API Key' : log.responseBody && log.responseBody.includes('Invalid API Key') ? '无效 API Key' : log.responseBody && log.responseBody.includes('disabled') ? 'Key 已禁用' : log.responseBody && log.responseBody.includes('协议错误') ? '协议错误' : '错误' }}
                     </span>
-                    <p v-if="Number(log.isStream) === 1" class="mt-1 text-[9px] text-gray-500 font-mono">
+                    <p v-if="Number(log.isStream) === 1" class="mt-1 text-[9px] text-secondary font-mono">
                       流式<span v-if="Number(log.streamBroken) === 1" class="text-red-600"> · 流中断</span>
                     </p>
                   </td>
@@ -4158,25 +4455,25 @@ onUnmounted(() => {
                     <button 
                       type="button"
                       @click="openLogDetail(log)"
-                      class="text-blue-600 hover:underline font-medium"
+                      class="text-accent hover:underline font-medium"
                     >
                       查看详情
                     </button>
                   </td>
                 </tr>
                 <tr v-if="!logs.length">
-                  <td colspan="8" class="px-6 py-10 text-center text-gray-400 text-sm">暂无数据</td>
+                  <td colspan="8" class="px-6 py-10 text-center text-tertiary text-sm">暂无数据</td>
                 </tr>
               </tbody>
             </table>
             </div>
           </div>
-          <div class="flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between bg-white rounded-xl border border-gray-200 shadow-sm px-4 sm:px-6 py-4">
-            <div class="flex flex-wrap items-center gap-3 text-xs text-gray-500">
+          <div class="flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between glow-card px-4 sm:px-6 py-4">
+            <div class="flex flex-wrap items-center gap-3 text-xs text-secondary">
               <span>总计 {{ logsTotal }} 条</span>
               <div class="flex items-center gap-2">
                 <span>每页</span>
-                <select v-model.number="logsPageSize" @change="logsPage = 1; fetchLogs()" class="px-2 py-1 border border-gray-200 rounded-lg bg-white text-xs">
+                <select v-model.number="logsPageSize" @change="logsPage = 1; fetchLogs()" class="px-2 py-1 border border-primary rounded-btn bg-surface-input text-xs">
                   <option :value="20">20</option>
                   <option :value="50">50</option>
                   <option :value="100">100</option>
@@ -4184,11 +4481,11 @@ onUnmounted(() => {
               </div>
             </div>
             <div class="flex items-center gap-3">
-              <button @click="prevLogsPage" :disabled="logsPage <= 1" class="px-3 py-1.5 rounded-lg border border-gray-200 text-xs font-bold disabled:opacity-40 disabled:cursor-not-allowed hover:bg-gray-50 transition-colors">
+              <button @click="prevLogsPage" :disabled="logsPage <= 1" class="px-3 py-1.5 rounded-btn border border-primary text-xs font-bold disabled:opacity-40 disabled:cursor-not-allowed hover:bg-surface-elevated transition-colors">
                 上一页
               </button>
-              <span class="text-xs text-gray-600 font-bold">第 {{ logsPage }} / {{ logsTotalPages }} 页</span>
-              <button @click="nextLogsPage" :disabled="logsPage >= logsTotalPages" class="px-3 py-1.5 rounded-lg border border-gray-200 text-xs font-bold disabled:opacity-40 disabled:cursor-not-allowed hover:bg-gray-50 transition-colors">
+              <span class="text-xs text-secondary font-bold">第 {{ logsPage }} / {{ logsTotalPages }} 页</span>
+              <button @click="nextLogsPage" :disabled="logsPage >= logsTotalPages" class="px-3 py-1.5 rounded-btn border border-primary text-xs font-bold disabled:opacity-40 disabled:cursor-not-allowed hover:bg-surface-elevated transition-colors">
                 下一页
               </button>
             </div>
@@ -4198,12 +4495,12 @@ onUnmounted(() => {
     </div>
 
     <!-- 导出对话框 -->
-    <div v-if="showExportDialog" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div class="bg-white rounded-xl shadow-xl max-w-md w-full p-6">
-        <h3 class="text-lg font-semibold text-gray-900 mb-4">导出厂商配置</h3>
+    <div v-if="showExportDialog" class="modal-overlay">
+      <div class="glow-card shadow-modal max-w-md w-full p-6">
+        <h3 class="text-lg font-semibold text-primary mb-4">导出厂商配置</h3>
 
         <div class="space-y-4">
-          <div class="flex items-center gap-3 p-4 bg-amber-50 border border-amber-200 rounded-lg">
+          <div class="flex items-center gap-3 p-4 bg-amber-50 border border-amber-200 rounded-btn">
             <input
               v-model="exportIncludeApiKey"
               type="checkbox"
@@ -4211,16 +4508,16 @@ onUnmounted(() => {
               class="w-5 h-5 text-amber-600 rounded focus:ring-amber-500"
             >
             <label for="includeApiKey" class="text-sm">
-              <span class="font-medium text-gray-900">包含 API Key</span>
-              <p class="text-gray-600 mt-1">⚠️ 警告：导出的文件包含敏感信息，请勿随意分享或公开存储！</p>
+              <span class="font-medium text-primary">包含 API Key</span>
+              <p class="text-secondary mt-1">⚠️ 警告：导出的文件包含敏感信息，请勿随意分享或公开存储！</p>
             </label>
           </div>
 
-          <div class="p-4 bg-blue-50 border border-blue-200 rounded-lg">
-            <p class="text-sm text-gray-700">
+          <div class="p-4 accent-soft border border-blue-200 rounded-btn">
+            <p class="text-sm text-secondary">
               导出内容包括：
             </p>
-            <ul class="text-sm text-gray-600 mt-2 space-y-1 list-disc list-inside">
+            <ul class="text-sm text-secondary mt-2 space-y-1 list-disc list-inside">
               <li>厂商名称、类型、API 基础地址</li>
               <li>激活状态</li>
               <li>模型关联关系</li>
@@ -4233,13 +4530,13 @@ onUnmounted(() => {
         <div class="flex gap-3 mt-6">
           <button
             @click="doExport"
-            class="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+            class="flex-1 px-4 py-2 bg-accent text-white rounded-btn hover:bg-accent-hover transition-colors"
           >
             确认导出
           </button>
           <button
             @click="showExportDialog = false"
-            class="flex-1 px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
+            class="flex-1 px-4 py-2 border border-primary rounded-btn hover:bg-surface-elevated transition-colors"
           >
             取消
           </button>
@@ -4248,20 +4545,20 @@ onUnmounted(() => {
     </div>
 
     <!-- 导入对话框 -->
-    <div v-if="showImportDialog" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+    <div v-if="showImportDialog" class="modal-overlay">
       <!-- 步骤1: 选择文件 -->
-      <div v-if="importStep === 'file'" class="bg-white rounded-xl shadow-xl max-w-md w-full p-6">
-        <h3 class="text-lg font-semibold text-gray-900 mb-4">导入厂商配置</h3>
+      <div v-if="importStep === 'file'" class="glow-card shadow-modal max-w-md w-full p-6">
+        <h3 class="text-lg font-semibold text-primary mb-4">导入厂商配置</h3>
 
         <div
           @dragover.prevent
           @drop.prevent="handleImportDrop"
           @click="$refs.importFileInput?.click()"
-          class="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center cursor-pointer hover:border-blue-400 hover:bg-blue-50 transition-colors"
+          class="border-2 border-dashed border-primary rounded-btn p-8 text-center cursor-pointer hover:border-accent/50 hover:bg-accent-soft transition-colors"
         >
-          <Upload class="w-12 h-12 mx-auto text-gray-400 mb-3" />
-          <p class="text-sm text-gray-600">拖放 JSON 文件到此处，或点击选择文件</p>
-          <p class="text-xs text-gray-400 mt-2">支持 .json 格式的厂商配置文件</p>
+          <Upload class="w-12 h-12 mx-auto text-tertiary mb-3" />
+          <p class="text-sm text-secondary">拖放 JSON 文件到此处，或点击选择文件</p>
+          <p class="text-xs text-tertiary mt-2">支持 .json 格式的厂商配置文件</p>
         </div>
         <input
           ref="importFileInput"
@@ -4274,7 +4571,7 @@ onUnmounted(() => {
         <div class="flex gap-3 mt-6">
           <button
             @click="showImportDialog = false"
-            class="flex-1 px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
+            class="flex-1 px-4 py-2 border border-primary rounded-btn hover:bg-surface-elevated transition-colors"
           >
             取消
           </button>
@@ -4282,32 +4579,32 @@ onUnmounted(() => {
       </div>
 
       <!-- 步骤2: 处理冲突 -->
-      <div v-if="importStep === 'conflict'" class="bg-white rounded-xl shadow-xl max-w-lg w-full max-h-[80vh] overflow-y-auto p-6">
-        <h3 class="text-lg font-semibold text-gray-900 mb-2">处理冲突</h3>
-        <p class="text-sm text-gray-600 mb-4">以下厂商名称已存在，请选择处理方式：</p>
+      <div v-if="importStep === 'conflict'" class="glow-card shadow-modal max-w-lg w-full max-h-[80vh] overflow-y-auto p-6">
+        <h3 class="text-lg font-semibold text-primary mb-2">处理冲突</h3>
+        <p class="text-sm text-secondary mb-4">以下厂商名称已存在，请选择处理方式：</p>
 
         <div class="space-y-3">
           <div
             v-for="item in importConflicts"
             :key="item.provider.name"
-            class="p-4 border border-gray-200 rounded-lg"
+            class="p-4 border border-primary rounded-btn"
           >
             <div class="flex items-center justify-between mb-3">
-              <span class="font-medium text-gray-900">{{ item.provider.name }}</span>
+              <span class="font-medium text-primary">{{ item.provider.name }}</span>
               <span class="text-xs px-2 py-1 bg-red-100 text-red-700 rounded-full">冲突</span>
             </div>
             <div class="flex gap-2">
               <button
                 @click="importMergeStrategy[item.provider.name] = 'skip'"
-                :class="importMergeStrategy[item.provider.name] === 'skip' ? 'ring-2 ring-blue-500 bg-blue-50' : 'bg-gray-100'"
-                class="flex-1 px-3 py-2 rounded-lg text-sm font-medium transition-colors"
+                :class="importMergeStrategy[item.provider.name] === 'skip' ? 'ring-2 ring-blue-500 accent-soft' : 'bg-surface-elevated'"
+                class="flex-1 px-3 py-2 rounded-btn text-sm font-medium transition-colors"
               >
                 跳过
               </button>
               <button
                 @click="importMergeStrategy[item.provider.name] = 'overwrite'"
-                :class="importMergeStrategy[item.provider.name] === 'overwrite' ? 'ring-2 ring-blue-500 bg-blue-50' : 'bg-gray-100'"
-                class="flex-1 px-3 py-2 rounded-lg text-sm font-medium transition-colors"
+                :class="importMergeStrategy[item.provider.name] === 'overwrite' ? 'ring-2 ring-blue-500 accent-soft' : 'bg-surface-elevated'"
+                class="flex-1 px-3 py-2 rounded-btn text-sm font-medium transition-colors"
               >
                 覆盖
               </button>
@@ -4318,13 +4615,13 @@ onUnmounted(() => {
         <div class="flex gap-3 mt-6">
           <button
             @click="doImport"
-            class="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+            class="flex-1 px-4 py-2 bg-accent text-white rounded-btn hover:bg-accent-hover transition-colors"
           >
             确认导入
           </button>
           <button
             @click="showImportDialog = false"
-            class="flex-1 px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
+            class="flex-1 px-4 py-2 border border-primary rounded-btn hover:bg-surface-elevated transition-colors"
           >
             取消
           </button>
@@ -4332,25 +4629,25 @@ onUnmounted(() => {
       </div>
 
       <!-- 步骤3: 导入结果 -->
-      <div v-if="importStep === 'result'" class="bg-white rounded-xl shadow-xl max-w-md w-full p-6">
-        <h3 class="text-lg font-semibold text-gray-900 mb-4">导入完成</h3>
+      <div v-if="importStep === 'result'" class="glow-card shadow-modal max-w-md w-full p-6">
+        <h3 class="text-lg font-semibold text-primary mb-4">导入完成</h3>
 
         <div class="space-y-2 max-h-60 overflow-y-auto">
           <div
             v-for="result in importResults"
             :key="result.name"
-            class="flex items-center justify-between p-3 rounded-lg"
+            class="flex items-center justify-between p-3 rounded-btn"
             :class="{
               'bg-green-50': result.action === 'created',
               'bg-amber-50': result.action === 'overwritten',
-              'bg-gray-50': result.action === 'skipped'
+              'bg-surface-elevated': result.action === 'skipped'
             }"
           >
             <span class="font-medium">{{ result.name }}</span>
             <span class="text-xs px-2 py-1 rounded-full" :class="{
               'bg-green-200 text-green-800': result.action === 'created',
               'bg-amber-200 text-amber-800': result.action === 'overwritten',
-              'bg-gray-200 text-gray-800': result.action === 'skipped'
+              'bg-surface-elevated text-primary': result.action === 'skipped'
             }">
               {{ result.action === 'created' ? '已创建' : result.action === 'overwritten' ? '已覆盖' : '已跳过' }}
             </span>
@@ -4359,7 +4656,7 @@ onUnmounted(() => {
 
         <button
           @click="closeImportDialog"
-          class="w-full mt-6 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+          class="w-full mt-6 px-4 py-2 bg-accent text-white rounded-btn hover:bg-accent-hover transition-colors"
         >
           关闭
         </button>
@@ -4367,12 +4664,12 @@ onUnmounted(() => {
     </div>
 
     <!-- 全局配置导入对话框 -->
-    <div v-if="showGlobalImportDialog" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div class="bg-white rounded-xl shadow-xl max-w-lg w-full p-6">
-        <h3 class="text-lg font-semibold text-gray-900 mb-2">导入全局配置</h3>
-        <p class="text-sm text-gray-600 mb-4">将覆盖当前业务配置（厂商、模型、应用、规则），不影响管理员用户名和密码。</p>
+    <div v-if="showGlobalImportDialog" class="modal-overlay">
+      <div class="glow-card shadow-modal max-w-lg w-full p-6">
+        <h3 class="text-lg font-semibold text-primary mb-2">导入全局配置</h3>
+        <p class="text-sm text-secondary mb-4">将覆盖当前业务配置（厂商、模型、应用、规则），不影响管理员用户名和密码。</p>
 
-        <div class="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 mb-4">
+        <div class="rounded-btn border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 mb-4">
           导入前建议先执行“导出全局配置”作为备份。
         </div>
 
@@ -4380,9 +4677,9 @@ onUnmounted(() => {
           type="file"
           accept=".json"
           @change="handleGlobalImportFileSelect"
-          class="block w-full text-sm text-gray-700 file:mr-3 file:px-3 file:py-2 file:rounded-lg file:border-0 file:bg-gray-100 file:text-gray-700 hover:file:bg-gray-200"
+          class="block w-full text-sm text-secondary file:mr-3 file:px-3 file:py-2 file:rounded-btn file:border-0 file:bg-surface-elevated file:text-secondary hover:file:bg-surface-elevated/80"
         />
-        <p class="text-xs text-gray-500 mt-2">
+        <p class="text-xs text-secondary mt-2">
           {{ globalImportData ? '已选择并解析配置文件，可执行导入。' : '请选择导出的全局配置 JSON 文件。' }}
         </p>
 
@@ -4390,13 +4687,13 @@ onUnmounted(() => {
           <button
             @click="doGlobalImport"
             :disabled="!globalImportData"
-            class="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            class="flex-1 px-4 py-2 bg-accent text-white rounded-btn hover:bg-accent-hover transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             确认导入
           </button>
           <button
             @click="showGlobalImportDialog = false"
-            class="flex-1 px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
+            class="flex-1 px-4 py-2 border border-primary rounded-btn hover:bg-surface-elevated transition-colors"
           >
             取消
           </button>
@@ -4405,186 +4702,186 @@ onUnmounted(() => {
     </div>
 
     <!-- Copy Provider Modal -->
-    <div v-if="showCopyProviderDialog" class="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50 overflow-y-auto">
-      <div class="bg-white rounded-2xl w-full max-w-lg p-8 shadow-2xl my-8 max-h-[90vh] overflow-y-auto">
+    <div v-if="showCopyProviderDialog" class="modal-overlay overflow-y-auto">
+      <div class="glow-card shadow-modal w-full max-w-lg p-8 my-8 max-h-[90vh] overflow-y-auto">
         <h3 class="text-xl font-bold mb-1">复制厂商</h3>
-        <p class="text-xs text-gray-500 mb-6">填写新厂商名称；基础地址、托管 Key、类型默认与源厂商一致，可直接修改。模型列表默认与源一致，可自行增删；保存后会创建新厂商并关联模型。</p>
+        <p class="text-xs text-secondary mb-6">填写新厂商名称；基础地址、托管 Key、类型默认与源厂商一致，可直接修改。模型列表默认与源一致，可自行增删；保存后会创建新厂商并关联模型。</p>
         <div class="space-y-4">
           <div>
-            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">新厂商名称 <span class="text-red-500">*</span></label>
-            <input v-model="copyProviderForm.name" type="text" placeholder="例如：生产环境-OpenAI" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+            <label class="block text-xs font-bold text-tertiary uppercase mb-1">新厂商名称 <span class="text-red-500">*</span></label>
+            <input v-model="copyProviderForm.name" type="text" placeholder="例如：生产环境-OpenAI" class="w-full px-4 py-2 border border-primary rounded-btn focus:ring-accent focus:ring-2 focus:border-transparent outline-none" />
           </div>
           <div>
-            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">厂商类型</label>
-            <select v-model="copyProviderForm.type" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none">
+            <label class="block text-xs font-bold text-tertiary uppercase mb-1">厂商类型</label>
+            <select v-model="copyProviderForm.type" class="w-full px-4 py-2 border border-primary rounded-btn focus:ring-accent focus:ring-2 focus:border-transparent outline-none">
               <option value="openai">OpenAI 兼容</option>
               <option value="anthropic">Anthropic 兼容</option>
             </select>
           </div>
           <div>
-            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">基础地址 (Base URL)</label>
-            <input v-model="copyProviderForm.baseUrl" type="text" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+            <label class="block text-xs font-bold text-tertiary uppercase mb-1">基础地址 (Base URL)</label>
+            <input v-model="copyProviderForm.baseUrl" type="text" class="w-full px-4 py-2 border border-primary rounded-btn focus:ring-accent focus:ring-2 focus:border-transparent outline-none" />
           </div>
           <div>
-            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">托管 API Key</label>
+            <label class="block text-xs font-bold text-tertiary uppercase mb-1">托管 API Key</label>
             <div class="relative">
-              <input v-model="copyProviderForm.apiKey" :type="showCopyApiKey ? 'text' : 'password'" placeholder="默认已填入源厂商 Key，可修改" class="w-full px-4 py-2 pr-10 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+              <input v-model="copyProviderForm.apiKey" :type="showCopyApiKey ? 'text' : 'password'" placeholder="默认已填入源厂商 Key，可修改" class="w-full px-4 py-2 pr-10 border border-primary rounded-btn focus:ring-accent focus:ring-2 focus:border-transparent outline-none" />
               <button
                 @click="showCopyApiKey = !showCopyApiKey"
-                class="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded hover:bg-gray-100 transition-colors"
+                class="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded hover:bg-surface-elevated transition-colors"
                 :title="showCopyApiKey ? '隐藏' : '显示'"
               >
-                <EyeOff v-if="showCopyApiKey" class="w-4 h-4 text-gray-400" />
-                <Eye v-else class="w-4 h-4 text-gray-400" />
+                <EyeOff v-if="showCopyApiKey" class="w-4 h-4 text-tertiary" />
+                <Eye v-else class="w-4 h-4 text-tertiary" />
               </button>
             </div>
           </div>
           <div class="flex items-center justify-between py-2">
             <div>
-              <label class="block text-xs font-bold text-gray-400 uppercase mb-0.5">协议强制转换</label>
-              <p class="text-[10px] text-gray-400">开启后只接受非原生协议的客户端请求并自动转换</p>
+              <label class="block text-xs font-bold text-tertiary uppercase mb-0.5">协议强制转换</label>
+              <p class="text-[10px] text-tertiary">开启后只接受非原生协议的客户端请求并自动转换</p>
             </div>
             <label class="relative inline-flex items-center cursor-pointer">
               <input type="checkbox" v-model="copyProviderForm.protocolConvert" class="sr-only peer" />
-              <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+              <div class="w-11 h-6 bg-surface-elevated peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-primary after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-accent"></div>
             </label>
           </div>
           <div>
-            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">默认模型（保存后生效）</label>
-            <select v-model="copyDefaultModelName" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none text-sm">
+            <label class="block text-xs font-bold text-tertiary uppercase mb-1">默认模型（保存后生效）</label>
+            <select v-model="copyDefaultModelName" class="w-full px-4 py-2 border border-primary rounded-btn focus:ring-accent focus:ring-2 focus:border-transparent outline-none text-sm">
               <option value="">暂不设置默认（创建后在卡片上点选）</option>
               <option v-for="n in copyModelNamesForSelect" :key="'def-' + n" :value="n">{{ n }}</option>
             </select>
           </div>
           <div>
             <div class="flex justify-between items-center mb-2">
-              <span class="text-xs font-bold text-gray-400 uppercase">模型列表</span>
+              <span class="text-xs font-bold text-tertiary uppercase">模型列表</span>
             </div>
-            <div class="space-y-2 max-h-48 overflow-y-auto rounded-lg border border-gray-100 p-2 bg-gray-50/80">
+            <div class="space-y-2 max-h-48 overflow-y-auto rounded-btn border border-primary p-2 bg-surface-elevated/80">
               <div v-for="(row, idx) in copyProviderModelNames" :key="'cm-' + idx" class="flex gap-2 items-center">
                 <input
                   v-model="copyProviderModelNames[idx]"
                   type="text"
                   placeholder="模型名"
-                  class="flex-1 min-w-0 px-3 py-2 text-sm border border-gray-200 rounded-lg bg-white focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                  class="flex-1 min-w-0 px-3 py-2 text-sm border border-primary rounded-btn bg-white focus:ring-accent focus:ring-2 focus:border-transparent outline-none"
                 />
-                <button type="button" @click="removeCopyModelAt(idx)" class="shrink-0 p-2 text-red-600 hover:bg-red-50 rounded-lg" title="删除">
+                <button type="button" @click="removeCopyModelAt(idx)" class="shrink-0 p-2 text-red-600 hover:bg-red-50 rounded-btn" title="删除">
                   <Trash2 class="w-4 h-4" />
                 </button>
               </div>
-              <p v-if="!copyProviderModelNames.length" class="text-xs text-gray-400 py-2 text-center">暂无模型，可在下方添加</p>
+              <p v-if="!copyProviderModelNames.length" class="text-xs text-tertiary py-2 text-center">暂无模型，可在下方添加</p>
             </div>
             <div class="flex gap-2 mt-2">
               <input
                 v-model="newCopyModelRow"
                 type="text"
                 placeholder="新模型名称"
-                class="flex-1 px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
+                class="flex-1 px-3 py-2 text-sm border border-primary rounded-btn focus:ring-accent focus:ring-2 outline-none"
                 @keydown.enter.prevent="addCopyModelRow"
               />
-              <button type="button" @click="addCopyModelRow" class="px-3 py-2 text-sm font-bold bg-gray-100 border border-gray-200 rounded-lg hover:bg-gray-200">添加</button>
+              <button type="button" @click="addCopyModelRow" class="px-3 py-2 text-sm font-bold bg-surface-elevated border border-primary rounded-btn hover:bg-surface-elevated">添加</button>
             </div>
           </div>
         </div>
         <div class="flex gap-3 mt-8">
-          <button type="button" @click="closeCopyProviderDialog" class="flex-1 px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors">取消</button>
-          <button type="button" @click="submitCopyProvider" class="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-bold">创建副本</button>
+          <button type="button" @click="closeCopyProviderDialog" class="flex-1 px-4 py-2 border border-primary rounded-btn hover:bg-surface-elevated transition-colors">取消</button>
+          <button type="button" @click="submitCopyProvider" class="flex-1 px-4 py-2 bg-accent text-white rounded-btn hover:bg-accent-hover transition-colors font-bold">创建副本</button>
         </div>
       </div>
     </div>
 
     <!-- Add/Edit Provider Modal -->
-    <div v-if="showAddProvider || editingProvider" class="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-      <div class="bg-white rounded-2xl w-full max-w-md p-8 shadow-2xl">
+    <div v-if="showAddProvider || editingProvider" class="modal-overlay">
+      <div class="glow-card shadow-modal w-full max-w-md p-8">
         <h3 class="text-xl font-bold mb-6">{{ editingProvider ? '编辑厂商配置' : '添加厂商配置' }}</h3>
         <div class="space-y-4">
           <div>
-            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">厂商名称</label>
-            <input v-model="(editingProvider || newProvider).name" type="text" placeholder="例如: GPT-4 生产线" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+            <label class="block text-xs font-bold text-tertiary uppercase mb-1">厂商名称</label>
+            <input v-model="(editingProvider || newProvider).name" type="text" placeholder="例如: GPT-4 生产线" class="w-full px-4 py-2 border border-primary rounded-btn focus:ring-accent focus:ring-2 focus:border-transparent outline-none" />
           </div>
           <div>
-            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">厂商类型</label>
-            <select v-model="(editingProvider || newProvider).type" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none">
+            <label class="block text-xs font-bold text-tertiary uppercase mb-1">厂商类型</label>
+            <select v-model="(editingProvider || newProvider).type" class="w-full px-4 py-2 border border-primary rounded-btn focus:ring-accent focus:ring-2 focus:border-transparent outline-none">
               <option value="openai">OpenAI 兼容</option>
               <option value="anthropic">Anthropic 兼容</option>
             </select>
           </div>
           <div>
-            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">基础地址 (Base URL)</label>
-            <input v-model="(editingProvider || newProvider).baseUrl" type="text" placeholder="https://api.openai.com" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+            <label class="block text-xs font-bold text-tertiary uppercase mb-1">基础地址 (Base URL)</label>
+            <input v-model="(editingProvider || newProvider).baseUrl" type="text" placeholder="https://api.openai.com" class="w-full px-4 py-2 border border-primary rounded-btn focus:ring-accent focus:ring-2 focus:border-transparent outline-none" />
           </div>
           <div>
-            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">托管 API Key</label>
+            <label class="block text-xs font-bold text-tertiary uppercase mb-1">托管 API Key</label>
             <div class="relative">
-              <input v-model="(editingProvider || newProvider).apiKey" :type="showProviderApiKey ? 'text' : 'password'" placeholder="sk-..." class="w-full px-4 py-2 pr-10 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+              <input v-model="(editingProvider || newProvider).apiKey" :type="showProviderApiKey ? 'text' : 'password'" placeholder="sk-..." class="w-full px-4 py-2 pr-10 border border-primary rounded-btn focus:ring-accent focus:ring-2 focus:border-transparent outline-none" />
               <button
                 @click="showProviderApiKey = !showProviderApiKey"
-                class="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded hover:bg-gray-100 transition-colors"
+                class="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded hover:bg-surface-elevated transition-colors"
                 :title="showProviderApiKey ? '隐藏' : '显示'"
               >
-                <EyeOff v-if="showProviderApiKey" class="w-4 h-4 text-gray-400" />
-                <Eye v-else class="w-4 h-4 text-gray-400" />
+                <EyeOff v-if="showProviderApiKey" class="w-4 h-4 text-tertiary" />
+                <Eye v-else class="w-4 h-4 text-tertiary" />
               </button>
             </div>
           </div>
           <div class="flex items-center justify-between py-2">
             <div>
-              <label class="block text-xs font-bold text-gray-400 uppercase mb-0.5">协议强制转换</label>
-              <p class="text-[10px] text-gray-400">开启后只接受非原生协议的客户端请求并自动转换</p>
+              <label class="block text-xs font-bold text-tertiary uppercase mb-0.5">协议强制转换</label>
+              <p class="text-[10px] text-tertiary">开启后只接受非原生协议的客户端请求并自动转换</p>
             </div>
             <label class="relative inline-flex items-center cursor-pointer">
               <input type="checkbox" v-model="(editingProvider || newProvider).protocolConvert" class="sr-only peer" />
-              <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+              <div class="w-11 h-6 bg-surface-elevated peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-primary after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-accent"></div>
             </label>
           </div>
         </div>
         <div class="flex gap-3 mt-8">
-          <button @click="showAddProvider = false; editingProvider = null" class="flex-1 px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors">取消</button>
-          <button @click="editingProvider ? updateProvider() : addProvider()" class="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-bold">保存配置</button>
+          <button @click="showAddProvider = false; editingProvider = null" class="flex-1 px-4 py-2 border border-primary rounded-btn hover:bg-surface-elevated transition-colors">取消</button>
+          <button @click="editingProvider ? updateProvider() : addProvider()" class="flex-1 px-4 py-2 bg-accent text-white rounded-btn hover:bg-accent-hover transition-colors font-bold">保存配置</button>
         </div>
       </div>
     </div>
 
-    <div v-if="showAddProviderModel" class="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-      <div class="bg-white rounded-2xl w-full max-w-md p-8 shadow-2xl">
+    <div v-if="showAddProviderModel" class="modal-overlay">
+      <div class="glow-card shadow-modal w-full max-w-md p-8">
         <h3 class="text-xl font-bold mb-6">为厂商添加模型</h3>
         <div class="space-y-4">
           <div>
-            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">厂商</label>
-            <div class="px-4 py-2 border border-gray-200 rounded-lg bg-gray-50 text-sm font-bold text-gray-700">{{ providerModelTargetProvider?.name || '-' }}</div>
+            <label class="block text-xs font-bold text-tertiary uppercase mb-1">厂商</label>
+            <div class="px-4 py-2 border border-primary rounded-btn bg-surface-elevated text-sm font-bold text-secondary">{{ providerModelTargetProvider?.name || '-' }}</div>
           </div>
           <div>
-            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">模型名称</label>
-            <input v-model="newProviderModelName" type="text" placeholder="例如: glm-4.7" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+            <label class="block text-xs font-bold text-tertiary uppercase mb-1">模型名称</label>
+            <input v-model="newProviderModelName" type="text" placeholder="例如: glm-4.7" class="w-full px-4 py-2 border border-primary rounded-btn focus:ring-accent focus:ring-2 focus:border-transparent outline-none" />
           </div>
         </div>
-        <p class="text-[10px] text-gray-400 mt-2">注意：模型名称区分大小写，将以您输入的内容为准进行存储和显示。</p>
+        <p class="text-[10px] text-tertiary mt-2">注意：模型名称区分大小写，将以您输入的内容为准进行存储和显示。</p>
         <div class="flex gap-3 mt-8">
-          <button @click="showAddProviderModel = false; providerModelTargetProvider = null; newProviderModelName = ''" class="flex-1 px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors">取消</button>
-          <button @click="addProviderModel" class="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-bold">添加</button>
+          <button @click="showAddProviderModel = false; providerModelTargetProvider = null; newProviderModelName = ''" class="flex-1 px-4 py-2 border border-primary rounded-btn hover:bg-surface-elevated transition-colors">取消</button>
+          <button @click="addProviderModel" class="flex-1 px-4 py-2 bg-accent text-white rounded-btn hover:bg-accent-hover transition-colors font-bold">添加</button>
         </div>
       </div>
     </div>
 
     <!-- Add/Edit App Modal -->
-    <div v-if="showAddApp || editingApp" class="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-      <div class="bg-white rounded-2xl w-full max-w-md p-8 shadow-2xl">
+    <div v-if="showAddApp || editingApp" class="modal-overlay">
+      <div class="glow-card shadow-modal w-full max-w-md p-8">
         <h3 class="text-xl font-bold mb-6">{{ editingApp ? '应用配置' : '创建新应用' }}</h3>
         <div class="space-y-4">
           <div>
-            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">应用名称</label>
-            <input v-model="(editingApp || newClientApp).name" type="text" placeholder="例如: 我的应用-1" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+            <label class="block text-xs font-bold text-tertiary uppercase mb-1">应用名称</label>
+            <input v-model="(editingApp || newClientApp).name" type="text" placeholder="例如: 我的应用-1" class="w-full px-4 py-2 border border-primary rounded-btn focus:ring-accent focus:ring-2 focus:border-transparent outline-none" />
           </div>
           <div>
-            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">绑定厂商 (Provider)</label>
-            <select v-model="(editingApp || newClientApp).providerId" @change="onClientAppProviderChange(editingApp || newClientApp)" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none">
+            <label class="block text-xs font-bold text-tertiary uppercase mb-1">绑定厂商 (Provider)</label>
+            <select v-model="(editingApp || newClientApp).providerId" @change="onClientAppProviderChange(editingApp || newClientApp)" class="w-full px-4 py-2 border border-primary rounded-btn focus:ring-accent focus:ring-2 focus:border-transparent outline-none">
               <option :value="null">默认厂商 (全局生效)</option>
               <option v-for="p in providers" :key="p.id" :value="p.id">{{ p.name }}</option>
             </select>
           </div>
           <div>
-            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">绑定模型 (Model)</label>
-            <select v-model="(editingApp || newClientApp).managedModelId" :disabled="!(editingApp || newClientApp).providerId" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none disabled:bg-gray-50 disabled:text-gray-400 disabled:cursor-not-allowed">
+            <label class="block text-xs font-bold text-tertiary uppercase mb-1">绑定模型 (Model)</label>
+            <select v-model="(editingApp || newClientApp).managedModelId" :disabled="!(editingApp || newClientApp).providerId" class="w-full px-4 py-2 border border-primary rounded-btn focus:ring-accent focus:ring-2 focus:border-transparent outline-none disabled:bg-surface-elevated disabled:text-tertiary disabled:cursor-not-allowed">
               <option
                 v-for="m in getModelOptionsForProvider((editingApp || newClientApp).providerId, (editingApp || newClientApp).managedModelId)"
                 :key="m.id"
@@ -4593,312 +4890,312 @@ onUnmounted(() => {
                 {{ m.name }}
               </option>
             </select>
-            <p v-if="!(editingApp || newClientApp).providerId" class="text-[10px] text-gray-400 mt-2">选择默认厂商时，模型固定为默认。</p>
+            <p v-if="!(editingApp || newClientApp).providerId" class="text-[10px] text-tertiary mt-2">选择默认厂商时，模型固定为默认。</p>
             <p v-else-if="!(editingApp || newClientApp).managedModelId" class="text-[10px] text-red-600 mt-2">已选择厂商，必须选择该厂商中的一个模型。</p>
           </div>
         </div>
-        <p class="text-[10px] text-gray-400 mt-4 italic">当厂商为默认时，模型固定为默认；当绑定了厂商后，才允许为该应用指定模型。</p>
+        <p class="text-[10px] text-tertiary mt-4 italic">当厂商为默认时，模型固定为默认；当绑定了厂商后，才允许为该应用指定模型。</p>
         <div class="flex gap-3 mt-8">
-          <button @click="showAddApp = false; editingApp = null" class="flex-1 px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors">取消</button>
-          <button @click="editingApp ? updateClientApp() : addClientApp()" class="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-bold">保存应用</button>
+          <button @click="showAddApp = false; editingApp = null" class="flex-1 px-4 py-2 border border-primary rounded-btn hover:bg-surface-elevated transition-colors">取消</button>
+          <button @click="editingApp ? updateClientApp() : addClientApp()" class="flex-1 px-4 py-2 bg-accent text-white rounded-btn hover:bg-accent-hover transition-colors font-bold">保存应用</button>
         </div>
       </div>
     </div>
 
-    <div v-if="showAddAdminUser || editingAdminUser" class="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-      <div class="bg-white rounded-2xl w-full max-w-md p-8 shadow-2xl">
+    <div v-if="showAddAdminUser || editingAdminUser" class="modal-overlay">
+      <div class="glow-card shadow-modal w-full max-w-md p-8">
         <h3 class="text-xl font-bold mb-6">{{ editingAdminUser ? '编辑用户' : '添加用户' }}</h3>
         <div class="space-y-4">
           <div>
-            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">用户名</label>
-            <input v-model="(editingAdminUser || newAdminUser).username" type="text" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+            <label class="block text-xs font-bold text-tertiary uppercase mb-1">用户名</label>
+            <input v-model="(editingAdminUser || newAdminUser).username" type="text" class="w-full px-4 py-2 border border-primary rounded-btn focus:ring-accent focus:ring-2 focus:border-transparent outline-none" />
           </div>
           <div v-if="!editingAdminUser">
-            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">初始密码</label>
-            <input v-model="newAdminUser.password" type="password" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
-            <p class="text-[10px] text-gray-400 mt-1">用户首次登录会被要求强制修改密码。</p>
+            <label class="block text-xs font-bold text-tertiary uppercase mb-1">初始密码</label>
+            <input v-model="newAdminUser.password" type="password" class="w-full px-4 py-2 border border-primary rounded-btn focus:ring-accent focus:ring-2 focus:border-transparent outline-none" />
+            <p class="text-[10px] text-tertiary mt-1">用户首次登录会被要求强制修改密码。</p>
           </div>
-          <div class="flex items-center justify-between p-3 bg-gray-50 rounded-lg border border-gray-200">
+          <div class="flex items-center justify-between p-3 bg-surface-elevated rounded-btn border border-primary">
             <div>
-              <p class="text-xs font-bold text-gray-500">状态</p>
-              <p class="text-[10px] text-gray-400">禁用后无法登录</p>
+              <p class="text-xs font-bold text-secondary">状态</p>
+              <p class="text-[10px] text-tertiary">禁用后无法登录</p>
             </div>
             <button
               @click="(editingAdminUser || newAdminUser).enabled = (editingAdminUser || newAdminUser).enabled ? 0 : 1"
-              :class="(editingAdminUser || newAdminUser).enabled ? 'bg-green-50 text-green-700 border-green-200' : 'bg-gray-50 text-gray-500 border-gray-200'"
-              class="px-3 py-1.5 rounded-lg border text-xs font-bold"
+              :class="(editingAdminUser || newAdminUser).enabled ? 'bg-green-50 text-green-700 border-green-200' : 'bg-surface-elevated text-secondary border-primary'"
+              class="px-3 py-1.5 rounded-btn border text-xs font-bold"
             >
               {{ (editingAdminUser || newAdminUser).enabled ? '已启用' : '已禁用' }}
             </button>
           </div>
         </div>
         <div class="flex gap-3 mt-8">
-          <button @click="showAddAdminUser = false; editingAdminUser = null" class="flex-1 px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors">取消</button>
-          <button @click="editingAdminUser ? updateAdminUser() : addAdminUser()" class="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-bold">保存用户</button>
+          <button @click="showAddAdminUser = false; editingAdminUser = null" class="flex-1 px-4 py-2 border border-primary rounded-btn hover:bg-surface-elevated transition-colors">取消</button>
+          <button @click="editingAdminUser ? updateAdminUser() : addAdminUser()" class="flex-1 px-4 py-2 bg-accent text-white rounded-btn hover:bg-accent-hover transition-colors font-bold">保存用户</button>
         </div>
       </div>
     </div>
 
-    <div v-if="resetPasswordUser" class="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-      <div class="bg-white rounded-2xl w-full max-w-md p-8 shadow-2xl">
+    <div v-if="resetPasswordUser" class="modal-overlay">
+      <div class="glow-card shadow-modal w-full max-w-md p-8">
         <h3 class="text-xl font-bold mb-2">重置密码</h3>
-        <p class="text-xs text-gray-500 mb-6">用户 {{ resetPasswordUser.username }} 下次登录将强制修改密码。</p>
+        <p class="text-xs text-secondary mb-6">用户 {{ resetPasswordUser.username }} 下次登录将强制修改密码。</p>
         <div class="space-y-4">
           <div>
-            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">新密码</label>
-            <input v-model="resetPasswordValue" type="password" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+            <label class="block text-xs font-bold text-tertiary uppercase mb-1">新密码</label>
+            <input v-model="resetPasswordValue" type="password" class="w-full px-4 py-2 border border-primary rounded-btn focus:ring-accent focus:ring-2 focus:border-transparent outline-none" />
           </div>
         </div>
         <div class="flex gap-3 mt-8">
-          <button @click="resetPasswordUser = null; resetPasswordValue = ''" class="flex-1 px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors">取消</button>
-          <button @click="resetAdminPassword" class="flex-1 px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 transition-colors font-bold">确认重置</button>
+          <button @click="resetPasswordUser = null; resetPasswordValue = ''" class="flex-1 px-4 py-2 border border-primary rounded-btn hover:bg-surface-elevated transition-colors">取消</button>
+          <button @click="resetAdminPassword" class="flex-1 px-4 py-2 bg-amber-600 text-white rounded-btn hover:bg-amber-700 transition-colors font-bold">确认重置</button>
         </div>
       </div>
     </div>
 
     <!-- Add/Edit Model Modal -->
-    <div v-if="showAddModel" class="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-      <div class="bg-white rounded-2xl w-full max-w-md p-8 shadow-2xl">
+    <div v-if="showAddModel" class="modal-overlay">
+      <div class="glow-card shadow-modal w-full max-w-md p-8">
         <h3 class="text-xl font-bold mb-6">添加模型</h3>
-        <p class="text-xs text-gray-500 mb-4">厂商：<span class="font-bold text-gray-700">{{ providers.find(p => p.id === selectedModelProviderId)?.name || '当前生效厂商' }}</span></p>
+        <p class="text-xs text-secondary mb-4">厂商：<span class="font-bold text-secondary">{{ providers.find(p => p.id === selectedModelProviderId)?.name || '当前生效厂商' }}</span></p>
         <div class="space-y-4">
           <div>
-            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">模型名称</label>
-            <input v-model="newManagedModel.name" type="text" placeholder="例如: gpt-4o 或 claude-3-5-sonnet" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+            <label class="block text-xs font-bold text-tertiary uppercase mb-1">模型名称</label>
+            <input v-model="newManagedModel.name" type="text" placeholder="例如: gpt-4o 或 claude-3-5-sonnet" class="w-full px-4 py-2 border border-primary rounded-btn focus:ring-accent focus:ring-2 focus:border-transparent outline-none" />
           </div>
         </div>
-        <p class="text-[10px] text-gray-400 mt-4">注意：模型名称区分大小写，将以您输入的内容为准进行存储和显示。</p>
+        <p class="text-[10px] text-tertiary mt-4">注意：模型名称区分大小写，将以您输入的内容为准进行存储和显示。</p>
         <div class="flex gap-3 mt-8">
-          <button @click="showAddModel = false" class="flex-1 px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors">取消</button>
-          <button @click="addManagedModel" class="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-bold">保存配置</button>
+          <button @click="showAddModel = false" class="flex-1 px-4 py-2 border border-primary rounded-btn hover:bg-surface-elevated transition-colors">取消</button>
+          <button @click="addManagedModel" class="flex-1 px-4 py-2 bg-accent text-white rounded-btn hover:bg-accent-hover transition-colors font-bold">保存配置</button>
         </div>
       </div>
     </div>
 
     <!-- Add/Edit Model Rule Modal -->
-    <div v-if="showAddModelRule || editingModelRule" class="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-      <div class="bg-white rounded-2xl w-full max-w-md p-8 shadow-2xl">
+    <div v-if="showAddModelRule || editingModelRule" class="modal-overlay">
+      <div class="glow-card shadow-modal w-full max-w-md p-8">
         <h3 class="text-xl font-bold mb-6">{{ editingModelRule ? '编辑模型规则' : '添加模型规则' }}</h3>
         <div class="space-y-4">
           <div>
-            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">匹配模式 (支持*)</label>
-            <input v-model="(editingModelRule || newModelRule).pattern" type="text" placeholder="例如: gpt-* 或 glm-4.7" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+            <label class="block text-xs font-bold text-tertiary uppercase mb-1">匹配模式 (支持*)</label>
+            <input v-model="(editingModelRule || newModelRule).pattern" type="text" placeholder="例如: gpt-* 或 glm-4.7" class="w-full px-4 py-2 border border-primary rounded-btn focus:ring-accent focus:ring-2 focus:border-transparent outline-none" />
           </div>
           <div>
-            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">转换为 (Target Model)</label>
-            <input v-model="(editingModelRule || newModelRule).targetModel" type="text" placeholder="例如: gpt-4o 或 glm-4.7" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+            <label class="block text-xs font-bold text-tertiary uppercase mb-1">转换为 (Target Model)</label>
+            <input v-model="(editingModelRule || newModelRule).targetModel" type="text" placeholder="例如: gpt-4o 或 glm-4.7" class="w-full px-4 py-2 border border-primary rounded-btn focus:ring-accent focus:ring-2 focus:border-transparent outline-none" />
           </div>
           <div>
-            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">优先级</label>
-            <input v-model.number="(editingModelRule || newModelRule).priority" type="number" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+            <label class="block text-xs font-bold text-tertiary uppercase mb-1">优先级</label>
+            <input v-model.number="(editingModelRule || newModelRule).priority" type="number" class="w-full px-4 py-2 border border-primary rounded-btn focus:ring-accent focus:ring-2 focus:border-transparent outline-none" />
           </div>
-          <div v-if="editingModelRule" class="flex items-center justify-between p-3 bg-gray-50 rounded-lg border border-gray-200">
+          <div v-if="editingModelRule" class="flex items-center justify-between p-3 bg-surface-elevated rounded-btn border border-primary">
             <div>
-              <p class="text-xs font-bold text-gray-500">状态</p>
-              <p class="text-[10px] text-gray-400">禁用后不会参与匹配</p>
+              <p class="text-xs font-bold text-secondary">状态</p>
+              <p class="text-[10px] text-tertiary">禁用后不会参与匹配</p>
             </div>
             <button
               @click="editingModelRule.enabled = editingModelRule.enabled ? 0 : 1"
-              :class="editingModelRule.enabled ? 'bg-green-50 text-green-700 border-green-200' : 'bg-gray-50 text-gray-500 border-gray-200'"
-              class="px-3 py-1.5 rounded-lg border text-xs font-bold"
+              :class="editingModelRule.enabled ? 'bg-green-50 text-green-700 border-green-200' : 'bg-surface-elevated text-secondary border-primary'"
+              class="px-3 py-1.5 rounded-btn border text-xs font-bold"
             >
               {{ editingModelRule.enabled ? '已启用' : '已禁用' }}
             </button>
           </div>
         </div>
-        <p class="text-[10px] text-gray-400 mt-4">大小写敏感；按优先级从高到低匹配，命中第一条后生效。</p>
+        <p class="text-[10px] text-tertiary mt-4">大小写敏感；按优先级从高到低匹配，命中第一条后生效。</p>
         <div class="flex gap-3 mt-8">
-          <button @click="showAddModelRule = false; editingModelRule = null" class="flex-1 px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors">取消</button>
-          <button @click="editingModelRule ? updateModelRule() : addModelRule()" class="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-bold">保存规则</button>
+          <button @click="showAddModelRule = false; editingModelRule = null" class="flex-1 px-4 py-2 border border-primary rounded-btn hover:bg-surface-elevated transition-colors">取消</button>
+          <button @click="editingModelRule ? updateModelRule() : addModelRule()" class="flex-1 px-4 py-2 bg-accent text-white rounded-btn hover:bg-accent-hover transition-colors font-bold">保存规则</button>
         </div>
       </div>
     </div>
 
     <!-- Log Detail Modal -->
-    <div v-if="selectedLog" class="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50" @click.self="closeLogDetail">
-      <div class="bg-white rounded-2xl w-full max-w-4xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
-        <div class="p-6 border-b border-gray-200 flex justify-between items-center">
+    <div v-if="selectedLog" class="modal-overlay" @click.self="closeLogDetail">
+      <div class="glow-card shadow-modal w-full max-w-4xl max-h-[90vh] flex flex-col overflow-hidden">
+        <div class="p-6 border-b border-primary flex justify-between items-center">
           <div>
             <h3 class="text-xl font-bold">对话详情</h3>
-            <p class="text-sm text-gray-500">
+            <p class="text-sm text-secondary">
               <span v-if="!selectedLog.actualModel || selectedLog.model === selectedLog.actualModel">{{ selectedLog.model }}</span>
               <span v-else>{{ selectedLog.model }} → {{ selectedLog.actualModel }}</span>
               @ {{ selectedLog.providerName }}
             </p>
           </div>
-          <button type="button" @click="closeLogDetail" class="p-2 hover:bg-gray-100 rounded-full transition-colors">
-            <X class="w-6 h-6 text-gray-400" />
+          <button type="button" @click="closeLogDetail" class="p-2 hover:bg-surface-elevated rounded-full transition-colors">
+            <X class="w-6 h-6 text-tertiary" />
           </button>
         </div>
-        <div v-if="logDetailError" class="mx-6 mt-2 rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">
+        <div v-if="logDetailError" class="mx-6 mt-2 rounded-btn border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">
           {{ logDetailError }}
         </div>
-        <div v-if="logDetailLoading" class="flex-1 flex flex-col items-center justify-center gap-3 py-24 text-gray-500">
-          <Loader2 class="w-10 h-10 animate-spin text-blue-500" />
+        <div v-if="logDetailLoading" class="flex-1 flex flex-col items-center justify-center gap-3 py-24 text-secondary">
+          <Loader2 class="w-10 h-10 animate-spin text-accent" />
           <p class="text-sm">正在加载完整日志…</p>
         </div>
         <div v-else-if="!logDetailError" class="flex-1 overflow-auto p-4 sm:p-6 grid grid-cols-1 lg:grid-cols-2 gap-6">
             <div class="lg:col-span-2 flex flex-col sm:flex-row gap-4 mb-2">
-            <div class="flex-1 p-3 bg-gray-50 rounded-lg border border-gray-100">
-              <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">客户端密钥</p>
+            <div class="flex-1 p-3 bg-surface-elevated rounded-btn border border-primary">
+              <p class="text-[10px] text-tertiary font-bold uppercase mb-1">客户端密钥</p>
               <span :style="keyBadgeStyle(selectedLog.clientKeyId)" class="px-2 py-1 rounded text-[10px] font-bold uppercase tracking-tight border inline-block">{{ selectedLog.clientKeyName || '未知' }}</span>
-              <p v-if="selectedLog.clientApp" class="text-[10px] text-gray-400 mt-0.5">{{ selectedLog.clientApp }}</p>
+              <p v-if="selectedLog.clientApp" class="text-[10px] text-tertiary mt-0.5">{{ selectedLog.clientApp }}</p>
             </div>
-            <div class="flex-1 p-3 bg-gray-50 rounded-lg border border-gray-100">
-              <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">生效厂商</p>
-              <p class="text-sm font-medium text-blue-700">{{ selectedLog.providerName }}</p>
+            <div class="flex-1 p-3 bg-surface-elevated rounded-btn border border-primary">
+              <p class="text-[10px] text-tertiary font-bold uppercase mb-1">生效厂商</p>
+              <p class="text-sm font-medium text-accent">{{ selectedLog.providerName }}</p>
             </div>
-            <div class="flex-1 p-3 bg-gray-50 rounded-lg border border-gray-100">
-              <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">响应耗时</p>
+            <div class="flex-1 p-3 bg-surface-elevated rounded-btn border border-primary">
+              <p class="text-[10px] text-tertiary font-bold uppercase mb-1">响应耗时</p>
               <p class="text-sm font-medium text-green-700">{{ formatLogLatency(selectedLog) || '计算中...' }}</p>
             </div>
           </div>
           <div class="lg:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-3 mb-2 text-xs">
-            <div class="p-3 bg-gray-50 rounded-lg border border-gray-100">
-              <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">HTTP</p>
-              <p class="font-mono text-gray-800">{{ selectedLog.httpMethod || 'POST' }} <span class="text-gray-500">{{ selectedLog.requestPath || '—' }}</span></p>
+            <div class="p-3 bg-surface-elevated rounded-btn border border-primary">
+              <p class="text-[10px] text-tertiary font-bold uppercase mb-1">HTTP</p>
+              <p class="font-mono text-primary">{{ selectedLog.httpMethod || 'POST' }} <span class="text-secondary">{{ selectedLog.requestPath || '—' }}</span></p>
             </div>
-            <div class="p-3 bg-gray-50 rounded-lg border border-gray-100">
-              <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">客户端 IP</p>
-              <p class="font-mono text-gray-800">{{ selectedLog.clientIp || '—' }}</p>
+            <div class="p-3 bg-surface-elevated rounded-btn border border-primary">
+              <p class="text-[10px] text-tertiary font-bold uppercase mb-1">客户端 IP</p>
+              <p class="font-mono text-primary">{{ selectedLog.clientIp || '—' }}</p>
             </div>
-            <div class="p-3 bg-gray-50 rounded-lg border border-gray-100 sm:col-span-2">
-              <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">User-Agent（客户端）</p>
-              <p class="font-mono text-gray-700 break-all">{{ selectedLog.clientUserAgent || '—' }}</p>
+            <div class="p-3 bg-surface-elevated rounded-btn border border-primary sm:col-span-2">
+              <p class="text-[10px] text-tertiary font-bold uppercase mb-1">User-Agent（客户端）</p>
+              <p class="font-mono text-secondary break-all">{{ selectedLog.clientUserAgent || '—' }}</p>
             </div>
-            <div class="p-3 bg-gray-50 rounded-lg border border-gray-100 sm:col-span-2">
-              <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">User-Agent（发往上游）</p>
-              <p class="font-mono text-gray-700 break-all">{{ selectedLog.proxyUserAgent || '—' }}</p>
+            <div class="p-3 bg-surface-elevated rounded-btn border border-primary sm:col-span-2">
+              <p class="text-[10px] text-tertiary font-bold uppercase mb-1">User-Agent（发往上游）</p>
+              <p class="font-mono text-secondary break-all">{{ selectedLog.proxyUserAgent || '—' }}</p>
             </div>
-            <div class="p-3 bg-gray-50 rounded-lg border border-gray-100">
-              <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">流式 / 中断</p>
-              <p class="text-gray-800">
+            <div class="p-3 bg-surface-elevated rounded-btn border border-primary">
+              <p class="text-[10px] text-tertiary font-bold uppercase mb-1">流式 / 中断</p>
+              <p class="text-primary">
                 {{ Number(selectedLog.isStream) === 1 ? '是' : '否' }}
                 <span v-if="selectedLog.responseBody && selectedLog.responseBody.includes('tool_use')" class="text-amber-600 font-bold"> · 工具调用</span>
                 <span v-if="Number(selectedLog.isStream) === 1 && Number(selectedLog.streamBroken) === 1" class="text-red-600 font-bold"> · 流中断</span>
               </p>
             </div>
-            <div class="p-3 bg-gray-50 rounded-lg border border-gray-100">
-              <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">上游 / 客户端 HTTP 状态</p>
-              <p class="font-mono text-gray-800">{{ selectedLog.upstreamStatus ?? '—' }} / {{ selectedLog.clientStatus ?? '—' }}</p>
+            <div class="p-3 bg-surface-elevated rounded-btn border border-primary">
+              <p class="text-[10px] text-tertiary font-bold uppercase mb-1">上游 / 客户端 HTTP 状态</p>
+              <p class="font-mono text-primary">{{ selectedLog.upstreamStatus ?? '—' }} / {{ selectedLog.clientStatus ?? '—' }}</p>
             </div>
-            <div class="p-3 bg-gray-50 rounded-lg border border-gray-100">
-              <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">请求体 / 响应体</p>
-              <p class="font-mono text-gray-800">{{ formatBytes(selectedLog.requestBytes) }} / {{ formatBytes(selectedLog.responseBytes) }}</p>
+            <div class="p-3 bg-surface-elevated rounded-btn border border-primary">
+              <p class="text-[10px] text-tertiary font-bold uppercase mb-1">请求体 / 响应体</p>
+              <p class="font-mono text-primary">{{ formatBytes(selectedLog.requestBytes) }} / {{ formatBytes(selectedLog.responseBytes) }}</p>
             </div>
-            <div class="p-3 bg-gray-50 rounded-lg border border-gray-100">
-              <p class="text-[10px] text-gray-400 font-bold uppercase mb-1">Token（入 / 出 / 计）</p>
-              <p class="font-mono text-gray-800">{{ selectedLog.tokensIn != null ? formatNumber(selectedLog.tokensIn) : '—' }} / {{ selectedLog.tokensOut != null ? formatNumber(selectedLog.tokensOut) : '—' }} / {{ selectedLog.tokensTotal != null ? formatNumber(selectedLog.tokensTotal) : '—' }}</p>
+            <div class="p-3 bg-surface-elevated rounded-btn border border-primary">
+              <p class="text-[10px] text-tertiary font-bold uppercase mb-1">Token（入 / 出 / 计）</p>
+              <p class="font-mono text-primary">{{ selectedLog.tokensIn != null ? formatNumber(selectedLog.tokensIn) : '—' }} / {{ selectedLog.tokensOut != null ? formatNumber(selectedLog.tokensOut) : '—' }} / {{ selectedLog.tokensTotal != null ? formatNumber(selectedLog.tokensTotal) : '—' }}</p>
             </div>
           </div>
           <div class="lg:col-span-2 space-y-2 mb-2">
-            <div class="p-3 bg-gray-50 rounded-lg border border-gray-100 flex items-center gap-3">
-              <span class="px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-[10px] font-bold uppercase">客户端 URL</span>
-              <code class="text-xs text-gray-600 font-mono flex-1 truncate">{{ selectedLog.clientUrl || '-' }}</code>
+            <div class="p-3 bg-surface-elevated rounded-btn border border-primary flex items-center gap-3">
+              <span class="px-2 py-0.5 bg-blue-100 text-accent rounded text-[10px] font-bold uppercase">客户端 URL</span>
+              <code class="text-xs text-secondary font-mono flex-1 truncate">{{ selectedLog.clientUrl || '-' }}</code>
             </div>
-            <div class="p-3 bg-gray-50 rounded-lg border border-gray-100 flex items-center gap-3">
+            <div class="p-3 bg-surface-elevated rounded-btn border border-primary flex items-center gap-3">
               <span class="px-2 py-0.5 bg-green-100 text-green-700 rounded text-[10px] font-bold uppercase">代理目标 URL</span>
-              <code class="text-xs text-gray-600 font-mono flex-1 truncate">{{ selectedLog.targetUrl || '-' }}</code>
+              <code class="text-xs text-secondary font-mono flex-1 truncate">{{ selectedLog.targetUrl || '-' }}</code>
             </div>
           </div>
           <div class="lg:col-span-2 space-y-4">
             <div class="flex justify-between items-center cursor-pointer select-none" @click="expandedSections.clientHeaders = !expandedSections.clientHeaders">
               <div class="flex items-center gap-2">
-                <ChevronRight class="w-4 h-4 text-gray-400 transition-transform duration-200" :class="{'rotate-90': expandedSections.clientHeaders}" />
-                <h4 class="text-xs font-bold text-gray-400 uppercase">客户端请求头</h4>
+                <ChevronRight class="w-4 h-4 text-tertiary transition-transform duration-200" :class="{'rotate-90': expandedSections.clientHeaders}" />
+                <h4 class="text-xs font-bold text-tertiary uppercase">客户端请求头</h4>
               </div>
             </div>
             <div v-show="expandedSections.clientHeaders">
-              <pre class="bg-gray-900 text-gray-100 p-4 rounded-xl overflow-auto text-xs leading-relaxed max-h-[600px]">{{ formatJson(selectedLog.clientRequestHeaders) }}</pre>
+              <pre class="bg-gray-900 text-gray-100 p-4 rounded-card overflow-auto text-xs leading-relaxed max-h-[600px]">{{ formatJson(selectedLog.clientRequestHeaders) }}</pre>
             </div>
           </div>
           <div class="lg:col-span-2 space-y-4">
             <div class="flex justify-between items-center cursor-pointer select-none" @click="expandedSections.proxyHeaders = !expandedSections.proxyHeaders">
               <div class="flex items-center gap-2">
-                <ChevronRight class="w-4 h-4 text-gray-400 transition-transform duration-200" :class="{'rotate-90': expandedSections.proxyHeaders}" />
-                <h4 class="text-xs font-bold text-gray-400 uppercase">代理请求头（发往上游）</h4>
+                <ChevronRight class="w-4 h-4 text-tertiary transition-transform duration-200" :class="{'rotate-90': expandedSections.proxyHeaders}" />
+                <h4 class="text-xs font-bold text-tertiary uppercase">代理请求头（发往上游）</h4>
               </div>
             </div>
             <div v-show="expandedSections.proxyHeaders">
-              <pre class="bg-gray-900 text-gray-100 p-4 rounded-xl overflow-auto text-xs leading-relaxed max-h-[600px]">{{ formatJson(selectedLog.proxyRequestHeaders) }}</pre>
+              <pre class="bg-gray-900 text-gray-100 p-4 rounded-card overflow-auto text-xs leading-relaxed max-h-[600px]">{{ formatJson(selectedLog.proxyRequestHeaders) }}</pre>
             </div>
           </div>
           <div class="lg:col-span-2 space-y-4">
             <div class="flex justify-between items-center cursor-pointer select-none" @click="expandedSections.requestBody = !expandedSections.requestBody">
               <div class="flex items-center gap-2">
-                <ChevronRight class="w-4 h-4 text-gray-400 transition-transform duration-200" :class="{'rotate-90': expandedSections.requestBody}" />
-                <h4 class="text-xs font-bold text-gray-400 uppercase">请求正文</h4>
+                <ChevronRight class="w-4 h-4 text-tertiary transition-transform duration-200" :class="{'rotate-90': expandedSections.requestBody}" />
+                <h4 class="text-xs font-bold text-tertiary uppercase">请求正文</h4>
               </div>
-              <span class="text-[10px] text-gray-400 font-mono">{{ formatTime(selectedLog.requestAt) }}</span>
+              <span class="text-[10px] text-tertiary font-mono">{{ formatTime(selectedLog.requestAt) }}</span>
             </div>
             <div v-show="expandedSections.requestBody">
-              <pre class="bg-gray-900 text-gray-100 p-4 rounded-xl overflow-auto text-xs leading-relaxed max-h-[600px]">{{ formatJson(selectedLog.requestBody) }}</pre>
+              <pre class="bg-gray-900 text-gray-100 p-4 rounded-card overflow-auto text-xs leading-relaxed max-h-[600px]">{{ formatJson(selectedLog.requestBody) }}</pre>
             </div>
           </div>
           <div v-if="selectedLog.proxyRequestBody" class="lg:col-span-2 space-y-4">
             <div class="flex justify-between items-center cursor-pointer select-none" @click="expandedSections.proxyRequestBody = !expandedSections.proxyRequestBody">
               <div class="flex items-center gap-2">
-                <ChevronRight class="w-4 h-4 text-gray-400 transition-transform duration-200" :class="{'rotate-90': expandedSections.proxyRequestBody}" />
-                <h4 class="text-xs font-bold text-gray-400 uppercase">代理请求正文（发往上游）</h4>
+                <ChevronRight class="w-4 h-4 text-tertiary transition-transform duration-200" :class="{'rotate-90': expandedSections.proxyRequestBody}" />
+                <h4 class="text-xs font-bold text-tertiary uppercase">代理请求正文（发往上游）</h4>
               </div>
             </div>
             <div v-show="expandedSections.proxyRequestBody">
-              <pre class="bg-gray-900 text-gray-100 p-4 rounded-xl overflow-auto text-xs leading-relaxed max-h-[600px]">{{ formatJson(selectedLog.proxyRequestBody) }}</pre>
+              <pre class="bg-gray-900 text-gray-100 p-4 rounded-card overflow-auto text-xs leading-relaxed max-h-[600px]">{{ formatJson(selectedLog.proxyRequestBody) }}</pre>
             </div>
           </div>
           <div v-if="selectedLog.proxyResponseBody" class="lg:col-span-2 space-y-4">
             <div class="flex justify-between items-center cursor-pointer select-none" @click="expandedSections.proxyResponseBody = !expandedSections.proxyResponseBody">
               <div class="flex items-center gap-2">
-                <ChevronRight class="w-4 h-4 text-gray-400 transition-transform duration-200" :class="{'rotate-90': expandedSections.proxyResponseBody}" />
-                <h4 class="text-xs font-bold text-gray-400 uppercase">上游原始响应</h4>
+                <ChevronRight class="w-4 h-4 text-tertiary transition-transform duration-200" :class="{'rotate-90': expandedSections.proxyResponseBody}" />
+                <h4 class="text-xs font-bold text-tertiary uppercase">上游原始响应</h4>
               </div>
             </div>
             <div v-show="expandedSections.proxyResponseBody">
-              <pre class="bg-gray-900 text-gray-100 p-4 rounded-xl overflow-auto text-xs leading-relaxed max-h-[600px]">{{ formatJson(selectedLog.proxyResponseBody) }}</pre>
+              <pre class="bg-gray-900 text-gray-100 p-4 rounded-card overflow-auto text-xs leading-relaxed max-h-[600px]">{{ formatJson(selectedLog.proxyResponseBody) }}</pre>
             </div>
           </div>
           <div class="lg:col-span-2 space-y-4">
             <div class="flex justify-between items-center cursor-pointer select-none" @click="expandedSections.responseBody = !expandedSections.responseBody">
               <div class="flex items-center gap-2">
-                <ChevronRight class="w-4 h-4 text-gray-400 transition-transform duration-200" :class="{'rotate-90': expandedSections.responseBody}" />
-                <h4 class="text-xs font-bold text-gray-400 uppercase">响应正文（发往客户端）</h4>
+                <ChevronRight class="w-4 h-4 text-tertiary transition-transform duration-200" :class="{'rotate-90': expandedSections.responseBody}" />
+                <h4 class="text-xs font-bold text-tertiary uppercase">响应正文（发往客户端）</h4>
               </div>
-              <span v-if="selectedLog.responseAt" class="text-[10px] text-gray-400 font-mono">{{ formatTime(selectedLog.responseAt) }}</span>
+              <span v-if="selectedLog.responseAt" class="text-[10px] text-tertiary font-mono">{{ formatTime(selectedLog.responseAt) }}</span>
             </div>
             <div v-show="expandedSections.responseBody">
-              <div v-if="selectedLog.status === 'waiting' && !selectedLog.responseBody" class="h-[200px] flex flex-col items-center justify-center text-gray-400 gap-4 bg-gray-50 rounded-xl border border-dashed border-gray-200">
-                <Loader2 class="w-12 h-12 animate-spin text-blue-500" />
+              <div v-if="selectedLog.status === 'waiting' && !selectedLog.responseBody" class="h-[200px] flex flex-col items-center justify-center text-tertiary gap-4 bg-surface-elevated rounded-card border border-dashed border-primary">
+                <Loader2 class="w-12 h-12 animate-spin text-accent" />
                 <p class="animate-pulse">正在等待厂商响应...</p>
               </div>
-              <pre v-else class="bg-gray-900 text-gray-100 p-4 rounded-xl overflow-auto text-xs leading-relaxed max-h-[600px]">{{ formatJson(selectedLog.responseBody) }}</pre>
+              <pre v-else class="bg-gray-900 text-gray-100 p-4 rounded-card overflow-auto text-xs leading-relaxed max-h-[600px]">{{ formatJson(selectedLog.responseBody) }}</pre>
             </div>
           </div>
         </div>
       </div>
     </div>
 
-    <div v-if="mustChangePassword" class="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-      <div class="bg-white rounded-2xl w-full max-w-md p-8 shadow-2xl">
+    <div v-if="mustChangePassword" class="modal-overlay">
+      <div class="glow-card shadow-modal w-full max-w-md p-8">
         <h3 class="text-xl font-bold mb-2">请先修改密码</h3>
-        <p class="text-xs text-gray-500 mb-6">首次登录必须修改默认密码后才能继续使用管理功能。</p>
+        <p class="text-xs text-secondary mb-6">首次登录必须修改默认密码后才能继续使用管理功能。</p>
         <div class="space-y-4">
           <div>
-            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">当前密码</label>
-            <input v-model="changePasswordForm.currentPassword" type="password" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+            <label class="block text-xs font-bold text-tertiary uppercase mb-1">当前密码</label>
+            <input v-model="changePasswordForm.currentPassword" type="password" class="w-full px-4 py-2 border border-primary rounded-btn focus:ring-accent focus:ring-2 focus:border-transparent outline-none" />
           </div>
           <div>
-            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">新密码</label>
-            <input v-model="changePasswordForm.newPassword" type="password" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+            <label class="block text-xs font-bold text-tertiary uppercase mb-1">新密码</label>
+            <input v-model="changePasswordForm.newPassword" type="password" class="w-full px-4 py-2 border border-primary rounded-btn focus:ring-accent focus:ring-2 focus:border-transparent outline-none" />
           </div>
           <div>
-            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">确认新密码</label>
-            <input v-model="changePasswordForm.confirmNewPassword" type="password" class="w-full px-4 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none" />
+            <label class="block text-xs font-bold text-tertiary uppercase mb-1">确认新密码</label>
+            <input v-model="changePasswordForm.confirmNewPassword" type="password" class="w-full px-4 py-2 border border-primary rounded-btn focus:ring-accent focus:ring-2 focus:border-transparent outline-none" />
           </div>
         </div>
-        <button @click="changePassword" class="w-full mt-6 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-bold">
+        <button @click="changePassword" class="w-full mt-6 px-4 py-2 bg-accent text-white rounded-btn hover:bg-accent-hover transition-colors font-bold">
           修改密码并继续
         </button>
-        <button @click="logout" class="w-full mt-3 px-4 py-2 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors font-bold text-gray-700">
+        <button @click="logout" class="w-full mt-3 px-4 py-2 border border-primary rounded-btn hover:bg-surface-elevated transition-colors font-bold text-secondary">
           退出登录
         </button>
       </div>
@@ -4910,27 +5207,9 @@ onUnmounted(() => {
 @import './style.css';
 
 mark {
-  background-color: #fef08a; /* yellow-200 */
-  color: #854d0e; /* yellow-900 */
+  background-color: #fef08a;
+  color: #854d0e;
   border-radius: 2px;
   padding: 0 2px;
-}
-
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-::-webkit-scrollbar-thumb {
-  background: #e2e8f0;
-  border-radius: 10px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: #cbd5e1;
 }
 </style>
